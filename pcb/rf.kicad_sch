@@ -262,6 +262,130 @@
 				)
 			)
 		)
+		(symbol "Rocketry_Easyeda:BWU.FL-IPEX1"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "U"
+				(at 0 12.7 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "BWU.FL-IPEX1"
+				(at 0 -12.7 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" "Rocketry_Easyeda:IPEX-SMD_BWIPX-1-001E"
+				(at 0 -15.24 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "LCSC Part" "C5137195"
+				(at 0 -17.78 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "BWU.FL-IPEX1_0_1"
+				(rectangle
+					(start -5.08 5.08)
+					(end 2.54 -5.08)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(pin unspecified line
+					(at 5.08 0 180)
+					(length 2.54)
+					(name "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin unspecified line
+					(at -1.27 7.62 270)
+					(length 2.54)
+					(name "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin unspecified line
+					(at -1.27 -7.62 90)
+					(length 2.54)
+					(name "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+		)
 		(symbol "Rocketry_Manual:CAM-M8Q-0"
 			(pin_names
 				(offset 1.016)
@@ -1917,6 +2041,12 @@
 		(uuid "7d66106c-41a0-43b3-bfe6-ae80ccf4fcc8")
 	)
 	(junction
+		(at 87.63 134.62)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "9c320b0b-bd68-459c-9621-ed02273a5e00")
+	)
+	(junction
 		(at 154.94 58.42)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -1983,6 +2113,26 @@
 			(type default)
 		)
 		(uuid "01458d00-0e10-4487-af89-ac74661d05cf")
+	)
+	(wire
+		(pts
+			(xy 85.09 163.83) (xy 87.63 163.83)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "105eec33-0125-4ac1-9ff3-882fb3d3ecba")
+	)
+	(wire
+		(pts
+			(xy 87.63 134.62) (xy 87.63 163.83)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "1c0861da-400a-4999-af2e-8b6e8d967a09")
 	)
 	(wire
 		(pts
@@ -2086,7 +2236,7 @@
 	)
 	(wire
 		(pts
-			(xy 86.36 134.62) (xy 93.98 134.62)
+			(xy 86.36 134.62) (xy 87.63 134.62)
 		)
 		(stroke
 			(width 0)
@@ -2143,6 +2293,16 @@
 			(type default)
 		)
 		(uuid "d7e23d6d-da0b-482f-a3aa-1fbd8c790805")
+	)
+	(wire
+		(pts
+			(xy 87.63 134.62) (xy 93.98 134.62)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d9433c83-fb84-46d4-ad15-1408dee0397c")
 	)
 	(hierarchical_label "GPS_nRST"
 		(shape input)
@@ -3177,6 +3337,73 @@
 	)
 	(symbol
 		(lib_id "power:GND")
+		(at 71.12 156.21 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "bdb1a887-b22e-42f4-b8b9-08b6dc389889")
+		(property "Reference" "#PWR29"
+			(at 71.12 149.86 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 71.1201 152.4 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 71.12 156.21 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 71.12 156.21 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 71.12 156.21 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "9d544107-c5ac-4687-a743-3a49ce519ff5")
+		)
+		(instances
+			(project "VLF5"
+				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
+					(reference "#PWR29")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
 		(at 154.94 50.8 180)
 		(unit 1)
 		(exclude_from_sim no)
@@ -3236,6 +3463,86 @@
 			(project "VLFX_PCB"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
 					(reference "#PWR083")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Rocketry_Easyeda:BWU.FL-IPEX1")
+		(at 72.39 163.83 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "cfac179c-9f2a-4c6c-add9-210ee885079a")
+		(property "Reference" "U8"
+			(at 64.77 163.83 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "BWU.FL-IPEX1"
+			(at 62.23 163.83 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Rocketry_Easyeda:IPEX-SMD_BWIPX-1-001E"
+			(at 72.39 179.07 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 72.39 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" ""
+			(at 72.39 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "LCSC Part" "C5137195"
+			(at 72.39 181.61 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "063f6aca-9ee3-4033-9728-6f4424468c65")
+		)
+		(pin "1"
+			(uuid "36a18c6c-0e28-4482-8d73-48f83f805199")
+		)
+		(pin "3"
+			(uuid "b7d28df0-9624-41b3-ad60-c93d19499c5d")
+		)
+		(instances
+			(project ""
+				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
+					(reference "U8")
 					(unit 1)
 				)
 			)
@@ -3302,6 +3609,73 @@
 			(project "VLFX_PCB"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
 					(reference "#PWR082")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 71.12 171.45 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "d89e2c96-39a4-4c8c-88a0-3810e251ffe1")
+		(property "Reference" "#PWR33"
+			(at 71.12 177.8 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 71.1201 175.4787 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+		(property "Footprint" ""
+			(at 71.12 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 71.12 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 71.12 171.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "0a0e9685-3bd7-46c6-9ebf-6ba55143b32e")
+		)
+		(instances
+			(project "VLF5"
+				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
+					(reference "#PWR33")
 					(unit 1)
 				)
 			)
@@ -3895,6 +4269,81 @@
 			(project ""
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
 					(reference "U5")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 81.28 163.83 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "f7188f27-7504-48cb-949a-8afe140cff0e")
+		(property "Reference" "R14"
+			(at 81.28 157.48 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "0R"
+			(at 81.28 160.02 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
+			(at 81.28 165.608 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 81.28 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 81.28 163.83 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "DNP" "DNP"
+			(at 81.28 167.005 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "a195243c-c044-49ce-b409-3ded76fd9d11")
+		)
+		(pin "2"
+			(uuid "c670e4c8-5cd1-4cda-a706-c946ac949055")
+		)
+		(instances
+			(project "VLF5"
+				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
+					(reference "R14")
 					(unit 1)
 				)
 			)
