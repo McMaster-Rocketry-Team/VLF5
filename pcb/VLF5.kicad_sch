@@ -4396,6 +4396,26 @@
 		)
 		(uuid "faf6773a-43c5-4fe2-b080-d863fc3f9fa7")
 	)
+	(text "Needs EXTI:"
+		(exclude_from_sim no)
+		(at 192.405 83.82 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "bc912c4d-de9e-49ab-bd3b-e1a1770f5e6a")
+	)
+	(label "PYRO1_CONT"
+		(at 187.325 95.25 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "07e870fc-dc2d-4690-942a-cfe0b61039fc")
+	)
 	(label "SWDCLK"
 		(at 165.1 88.9 0)
 		(effects
@@ -4416,6 +4436,26 @@
 		)
 		(uuid "28667782-4278-4ea0-9795-5e33d420252c")
 	)
+	(label "IMU_INT1"
+		(at 39.37 44.45 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "2cd62154-760c-4551-a110-339e0ad53aa2")
+	)
+	(label "IMU_INT2"
+		(at 39.37 46.99 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "435de86b-f665-4086-a294-83cd534a03ca")
+	)
 	(label "SWDIO"
 		(at 264.16 149.86 180)
 		(effects
@@ -4425,6 +4465,36 @@
 			(justify right bottom)
 		)
 		(uuid "4b6e5905-6de4-4b88-be3a-ec41faa804bc")
+	)
+	(label "PYRO2_CONT"
+		(at 187.325 97.79 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "6f5015fd-3bca-4120-82c0-aea4789c531d")
+	)
+	(label "GPS_PPS"
+		(at 187.325 92.71 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "7b7b18b6-e0a7-4c14-9070-fa9eae7c9bb9")
+	)
+	(label "IMU_INT1"
+		(at 187.325 87.63 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "81952f7c-6b8d-45af-a88b-260b2ae04d4d")
 	)
 	(label "SWDIO"
 		(at 165.1 86.36 0)
@@ -4436,6 +4506,16 @@
 		)
 		(uuid "8520a462-30f0-46e8-87ba-caf9120c8218")
 	)
+	(label "GPS_PPS"
+		(at 254 124.46 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "86208982-22df-4010-9022-cfa810c7f53d")
+	)
 	(label "SWDCLK"
 		(at 264.16 154.94 180)
 		(effects
@@ -4446,6 +4526,26 @@
 		)
 		(uuid "88077713-0277-41cf-a31a-d3a11bcefa87")
 	)
+	(label "IMU_INT2"
+		(at 187.325 90.17 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "b7e6d532-fef4-4d71-aaff-dce2215e46c7")
+	)
+	(label "PYRO2_CONT"
+		(at 254 64.77 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "ba097939-64c8-41a9-ac9c-993e542af598")
+	)
 	(label "nRST"
 		(at 264.16 144.78 180)
 		(effects
@@ -4455,6 +4555,16 @@
 			(justify right bottom)
 		)
 		(uuid "c502f379-6579-4287-bc33-cc2904672c34")
+	)
+	(label "PYRO1_CONT"
+		(at 254 57.15 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "e8e81204-9e13-4acc-983d-5b21a93192aa")
 	)
 	(symbol
 		(lib_id "Device:C")

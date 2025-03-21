@@ -2949,7 +2949,7 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(uuid "324b4639-c251-431a-a57a-ab1152e4f78e")
 		(property "Reference" "C28"
 			(at 114.3 137.1599 0)
@@ -2994,14 +2994,6 @@
 					(size 1.27 1.27)
 				)
 				(hide yes)
-			)
-		)
-		(property "DNP" "DNP"
-			(at 116.332 141.732 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
 			)
 		)
 		(pin "2"
@@ -3653,7 +3645,7 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(uuid "72d130f6-0a9f-42cf-9bd0-e0547fde3ff7")
 		(property "Reference" "R17"
 			(at 80.645 52.07 90)
@@ -3696,14 +3688,6 @@
 					(size 1.27 1.27)
 				)
 				(hide yes)
-			)
-		)
-		(property "DNP" "DNP"
-			(at 90.17 52.07 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
 			)
 		)
 		(pin "1"
@@ -3993,7 +3977,7 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(fields_autoplaced yes)
 		(uuid "a696c1f2-8901-4e4f-a3aa-98a031abccb0")
 		(property "Reference" "R31"
@@ -4803,7 +4787,7 @@
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
-		(dnp no)
+		(dnp yes)
 		(uuid "e48cc254-8645-4ffc-aa9b-e0b0d18c7d77")
 		(property "Reference" "C46"
 			(at 97.79 137.1599 0)
@@ -4848,14 +4832,6 @@
 					(size 1.27 1.27)
 				)
 				(hide yes)
-			)
-		)
-		(property "DNP" "DNP"
-			(at 99.822 141.732 0)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
 			)
 		)
 		(pin "2"
@@ -5245,14 +5221,6 @@
 					(size 1.27 1.27)
 				)
 				(hide yes)
-			)
-		)
-		(property "DNP" "DNP"
-			(at 121.285 170.815 90)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
 			)
 		)
 		(pin "1"
