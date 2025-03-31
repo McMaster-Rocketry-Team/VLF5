@@ -3812,7 +3812,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "5b9f32e9-b52d-445d-9d46-3da636dd5811")
-		(property "Reference" "#PWR7"
+		(property "Reference" "#PWR07"
 			(at 64.77 124.46 0)
 			(effects
 				(font
@@ -3862,7 +3862,7 @@
 		(instances
 			(project "VLFX_PCB"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/0ff91d85-fd45-4839-94e3-1d7024f5eed1"
-					(reference "#PWR7")
+					(reference "#PWR07")
 					(unit 1)
 				)
 			)
@@ -5579,7 +5579,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "d80da2e0-61fe-4ab4-b394-d580b06ff25c")
-		(property "Reference" "#PWR62"
+		(property "Reference" "#PWR062"
 			(at 232.41 53.34 0)
 			(effects
 				(font
@@ -5630,7 +5630,7 @@
 		(instances
 			(project "VLFX_PCB"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/0ff91d85-fd45-4839-94e3-1d7024f5eed1"
-					(reference "#PWR62")
+					(reference "#PWR062")
 					(unit 1)
 				)
 			)
@@ -5827,7 +5827,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "eb909384-bfe1-4a4d-bb8f-3337f33f870c")
-		(property "Reference" "#PWR26"
+		(property "Reference" "#PWR026"
 			(at 191.77 57.15 0)
 			(effects
 				(font
@@ -5877,7 +5877,7 @@
 		(instances
 			(project "VLFX_PCB"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/0ff91d85-fd45-4839-94e3-1d7024f5eed1"
-					(reference "#PWR26")
+					(reference "#PWR026")
 					(unit 1)
 				)
 			)

@@ -3378,7 +3378,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "54aaa4c6-560f-43d6-a1db-6de88e044560")
-		(property "Reference" "#PWR35"
+		(property "Reference" "#PWR035"
 			(at 93.98 148.59 0)
 			(effects
 				(font
@@ -3428,7 +3428,7 @@
 		(instances
 			(project "VLFX_PCB"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
-					(reference "#PWR35")
+					(reference "#PWR035")
 					(unit 1)
 				)
 			)
@@ -3581,7 +3581,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "716e1fea-ad2c-40c6-ab2a-338bff328e7e")
-		(property "Reference" "#PWR46"
+		(property "Reference" "#PWR046"
 			(at 34.925 82.55 0)
 			(effects
 				(font
@@ -3632,7 +3632,7 @@
 		(instances
 			(project "VLF5"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
-					(reference "#PWR46")
+					(reference "#PWR046")
 					(unit 1)
 				)
 			)
@@ -3781,7 +3781,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "7c300412-2467-49de-8a07-ad78290b9b86")
-		(property "Reference" "#PWR47"
+		(property "Reference" "#PWR047"
 			(at 48.26 51.435 0)
 			(effects
 				(font
@@ -3831,7 +3831,7 @@
 		(instances
 			(project "VLF5"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
-					(reference "#PWR47")
+					(reference "#PWR047")
 					(unit 1)
 				)
 			)
@@ -4183,7 +4183,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "bdb1a887-b22e-42f4-b8b9-08b6dc389889")
-		(property "Reference" "#PWR29"
+		(property "Reference" "#PWR029"
 			(at 111.125 153.67 0)
 			(effects
 				(font
@@ -4234,7 +4234,7 @@
 		(instances
 			(project "VLF5"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
-					(reference "#PWR29")
+					(reference "#PWR029")
 					(unit 1)
 				)
 			)
@@ -4462,7 +4462,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "d56dc8cb-f70f-49ec-a4cc-03e44eb514ad")
-		(property "Reference" "#PWR45"
+		(property "Reference" "#PWR045"
 			(at 34.925 54.61 0)
 			(effects
 				(font
@@ -4513,7 +4513,7 @@
 		(instances
 			(project "VLF5"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
-					(reference "#PWR45")
+					(reference "#PWR045")
 					(unit 1)
 				)
 			)
@@ -4529,7 +4529,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "d89e2c96-39a4-4c8c-88a0-3810e251ffe1")
-		(property "Reference" "#PWR33"
+		(property "Reference" "#PWR033"
 			(at 111.125 181.61 0)
 			(effects
 				(font
@@ -4580,7 +4580,7 @@
 		(instances
 			(project "VLF5"
 				(path "/4bffc06c-5f79-4e02-8f96-a145cb662fb0/9659afac-78ff-4f2c-9a35-7ccff7bb9b81"
-					(reference "#PWR33")
+					(reference "#PWR033")
 					(unit 1)
 				)
 			)
