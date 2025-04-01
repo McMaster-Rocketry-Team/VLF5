@@ -4711,14 +4711,14 @@
 		(uuid "574e4ab8-9b59-4bb3-a9de-b77f68e4eabb")
 	)
 	(label "MAG_SDA"
-		(at 165.1 114.3 0)
+		(at 165.1 124.46 0)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
 			(justify left bottom)
 		)
-		(uuid "5d531e87-45ef-4bbd-b2bd-e35ebcedfe10")
+		(uuid "5ac83eb0-a9ce-430f-b184-8119a110b1e0")
 	)
 	(label "IMU_CLK"
 		(at 119.38 78.74 180)
@@ -4919,6 +4919,16 @@
 			(justify left bottom)
 		)
 		(uuid "865da3d7-a65d-4ade-b8f0-25ad3bcaeacd")
+	)
+	(label "MAG_SCL"
+		(at 165.1 121.92 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "87fd7770-d801-46f7-b80e-84be7fd464f0")
 	)
 	(label "SWDCLK"
 		(at 264.16 154.94 180)
@@ -5209,16 +5219,6 @@
 			(justify left bottom)
 		)
 		(uuid "c6da17c8-a000-49da-9e26-f9621fa8673e")
-	)
-	(label "MAG_SCL"
-		(at 165.1 116.84 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "c72ff236-1488-4612-8360-6b1501172294")
 	)
 	(label "LORA_CS"
 		(at 119.38 127 180)
