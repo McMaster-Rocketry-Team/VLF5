@@ -4152,16 +4152,6 @@
 	)
 	(wire
 		(pts
-			(xy 106.68 124.46) (xy 119.38 124.46)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "59b0fb93-9b61-4d69-a36d-3735da662c1d")
-	)
-	(wire
-		(pts
 			(xy 168.91 45.72) (xy 149.86 45.72)
 		)
 		(stroke
@@ -4222,16 +4212,6 @@
 	)
 	(wire
 		(pts
-			(xy 106.68 119.38) (xy 119.38 119.38)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "701b2efc-c8e2-4fb0-8662-9f6db3d0b4d2")
-	)
-	(wire
-		(pts
 			(xy 74.93 62.23) (xy 74.93 64.77)
 		)
 		(stroke
@@ -4249,16 +4229,6 @@
 			(type default)
 		)
 		(uuid "7b65b5df-69d4-4446-83e9-093712d1b14a")
-	)
-	(wire
-		(pts
-			(xy 106.68 116.84) (xy 119.38 116.84)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "7be25211-0c5b-46a0-929d-90da28f632cc")
 	)
 	(wire
 		(pts
@@ -4312,16 +4282,6 @@
 	)
 	(wire
 		(pts
-			(xy 106.68 129.54) (xy 119.38 129.54)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "93ef22a0-dc01-436b-a487-6ac2f5372b0e")
-	)
-	(wire
-		(pts
 			(xy 101.6 160.02) (xy 104.14 160.02)
 		)
 		(stroke
@@ -4359,26 +4319,6 @@
 			(type default)
 		)
 		(uuid "ae1a07bb-bb50-410d-ba8d-2ca95629bc4a")
-	)
-	(wire
-		(pts
-			(xy 106.68 127) (xy 119.38 127)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "afb36c1d-51ac-4f44-a063-39b80f9cc215")
-	)
-	(wire
-		(pts
-			(xy 177.8 157.48) (xy 165.1 157.48)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "b200c443-6230-4d67-bc13-818ddb93ea28")
 	)
 	(wire
 		(pts
@@ -4460,16 +4400,6 @@
 		)
 		(uuid "faf6773a-43c5-4fe2-b080-d863fc3f9fa7")
 	)
-	(wire
-		(pts
-			(xy 177.8 73.66) (xy 165.1 73.66)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "fc9f6ff8-ac32-436a-8cc1-6e3fd1accec4")
-	)
 	(label "LORA_MOSI"
 		(at 119.38 132.08 180)
 		(effects
@@ -4541,7 +4471,7 @@
 		(uuid "130ec1aa-dd9d-4745-8135-c76d59ff3dee")
 	)
 	(label "LORA_RXEN"
-		(at 177.8 73.66 0)
+		(at 165.1 73.66 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -4670,16 +4600,6 @@
 		)
 		(uuid "2d511c9f-f83b-4bf4-bcf2-61ccfb2127b3")
 	)
-	(label "LED_B_CTRL"
-		(at 165.1 60.96 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "2fd5d91a-3a10-4bac-9d07-6e992b8f1a98")
-	)
 	(label "LORA_TXEN"
 		(at 254 96.52 180)
 		(effects
@@ -4710,8 +4630,18 @@
 		)
 		(uuid "3641a689-42e5-4a89-8f1e-1e8e82608653")
 	)
+	(label "PYRO_nEN"
+		(at 119.38 96.52 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "407f3975-1d9e-4634-94da-a3fed82a93a2")
+	)
 	(label "LORA_BUSY"
-		(at 106.68 119.38 180)
+		(at 119.38 119.38 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -4890,15 +4820,25 @@
 		)
 		(uuid "6ec00f8f-2755-4b8d-b3c0-eea76ba5fa8a")
 	)
-	(label "PYRO2_CONT"
-		(at 119.38 147.32 180)
+	(label "PS"
+		(at 165.1 60.96 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "6f565edc-38ac-438b-91a8-0ccaa71df52a")
+	)
+	(label "PYRO_PG"
+		(at 119.38 106.68 180)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
 			(justify right bottom)
 		)
-		(uuid "6f5015fd-3bca-4120-82c0-aea4789c531d")
+		(uuid "755d0177-e361-4d93-a2d5-3203c1e49f8e")
 	)
 	(label "LED_R_CTRL"
 		(at 39.37 97.79 0)
@@ -4940,15 +4880,15 @@
 		)
 		(uuid "7c5aa283-4174-41dc-8fc0-9dbf1cabf661")
 	)
-	(label "PYRO_PG"
-		(at 119.38 142.24 180)
+	(label "PYRO2_CONT"
+		(at 119.38 104.14 180)
 		(effects
 			(font
 				(size 1.27 1.27)
 			)
 			(justify right bottom)
 		)
-		(uuid "7fb026e4-c5ca-4b3c-b38e-c39f3f44af0d")
+		(uuid "805e2338-c84a-4e3a-97b4-b3e293df5d5f")
 	)
 	(label "IMU_INT1"
 		(at 165.1 175.26 0)
@@ -5030,16 +4970,6 @@
 		)
 		(uuid "8bdd10a6-f174-4212-95bf-c4864bde60a8")
 	)
-	(label "PS"
-		(at 119.38 106.68 180)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right bottom)
-		)
-		(uuid "8d367481-898e-424a-adc2-5991be2ee61a")
-	)
 	(label "CAN_TX"
 		(at 165.1 111.76 0)
 		(effects
@@ -5081,7 +5011,7 @@
 		(uuid "9432200a-cdc1-4da4-91d6-7d03ca276e1a")
 	)
 	(label "LORA_TXEN"
-		(at 106.68 116.84 180)
+		(at 119.38 116.84 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -5111,7 +5041,7 @@
 		(uuid "96e5f48d-bbc0-413e-83f5-bf3e490ef568")
 	)
 	(label "LORA_nRST"
-		(at 106.68 129.54 180)
+		(at 119.38 129.54 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -5341,7 +5271,7 @@
 		(uuid "d93c837d-3838-4a56-ab62-c86362478762")
 	)
 	(label "LORA_CS"
-		(at 177.8 157.48 0)
+		(at 165.1 157.48 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -5421,7 +5351,7 @@
 		(uuid "e96f6975-6fb0-44ac-a301-947452f6426e")
 	)
 	(label "GPS_nRST"
-		(at 106.68 124.46 180)
+		(at 119.38 124.46 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -5431,7 +5361,7 @@
 		(uuid "ea0972bf-9558-449d-8e60-071b640b17a0")
 	)
 	(label "LORA_DIO1"
-		(at 106.68 127 180)
+		(at 119.38 127 180)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -5460,16 +5390,6 @@
 		)
 		(uuid "f2f3c20c-dd15-4ad5-9677-51326579bb96")
 	)
-	(label "PYRO_nEN"
-		(at 119.38 144.78 180)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right bottom)
-		)
-		(uuid "f33eb0da-4d8d-41fd-97eb-53d0a8d73636")
-	)
 	(label "IMU_MISO"
 		(at 39.37 39.37 0)
 		(effects
@@ -5479,6 +5399,16 @@
 			(justify left bottom)
 		)
 		(uuid "f69354b7-107c-4b62-8d26-21a3cb4458f7")
+	)
+	(label "LED_B_CTRL"
+		(at 165.1 58.42 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "fa0addd7-0e74-441f-aaaf-e630485a7cf0")
 	)
 	(label "LORA_BUSY"
 		(at 254 109.22 180)
