@@ -1,39 +1,26 @@
-#![no_std]
+// only use std when feature = "std" is enabled or during testing
+#![cfg_attr(not(test), no_std)]
 #![no_main]
 
-
+mod fmt;
+mod time;
 mod utils;
-
-use core::{fmt::Debug, marker::PhantomData};
 
 use {defmt_rtt as _, panic_probe as _};
 
 use cortex_m::singleton;
-use defmt::info;
-use dspower_servo::DSPowerServo;
-use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
 use embassy_stm32::{
     bind_interrupts,
-    gpio::{Level, Output, Pull, Speed},
-    mode::Async,
-    peripherals,
-    spi::{Config as SpiConfig, Spi},
-    time::{mhz, Hertz},
-    usart::{
-        self, BufferedUart, Config as UartConfig, Error as UartError, HalfDuplexConfig,
-        HalfDuplexReadback, Uart,
-    },
+    peripherals::{PA10, PB14, USART1},
+    time::mhz,
+    usart::{self, BufferedUart, Config as UartConfig},
 };
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Delay, Duration, Timer};
-use embedded_alloc::Heap;
-use embedded_io_async::{ErrorType, Read, Write};
-use firmware_common::driver::{barometer::Barometer, imu::IMU};
-
+use firmware_common_new::run_gps_uart_receiver;
+use time::Clock;
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let config = {
         use embassy_stm32::rcc::mux::*;
         use embassy_stm32::rcc::*;
@@ -100,5 +87,25 @@ async fn main(_spawner: Spawner) {
     };
     let p = embassy_stm32::init(config);
 
+    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14));
+}
 
+#[embassy_executor::task]
+async fn gps_task(usart1: USART1, pa10: PA10, pb14: PB14) {
+    bind_interrupts!(struct Irqs {
+        USART1 => usart::BufferedInterruptHandler<USART1>;
+    });
+
+    let tx_buffer = singleton!(: [u8; 32] = [0; 32]).unwrap();
+    let rx_buffer = singleton!(: [u8; 32] = [0; 32]).unwrap();
+    let mut config = UartConfig::default();
+    config.baudrate = 9600;
+
+    let mut uart1 =
+        BufferedUart::new(usart1, Irqs, pa10, pb14, tx_buffer, rx_buffer, config).unwrap();
+
+    run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
+        log_info!("GPS Data: {:?}", gps_data);
+    })
+    .await;
 }
