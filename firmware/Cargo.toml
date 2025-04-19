@@ -1,0 +1,76 @@
+[package]
+edition = "2021"
+name = "firmware"
+version = "0.1.0"
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = [
+    "inline-asm",
+    "critical-section-single-core",
+] }
+cortex-m-rt = "0.7.5"
+defmt = { version = "0.3.10" }
+defmt-rtt = { version = "0.4.1" }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", features = [
+    "arch-cortex-m",
+    "executor-thread",
+] }
+embassy-futures = { git = "https://github.com/embassy-rs/embassy.git" }
+embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", features = [
+    "memory-x",
+    "stm32h743vi",
+    "time-driver-any",
+    "exti",
+    "defmt",
+    "unstable-pac",
+] }
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
+embassy-time = { git = "https://github.com/embassy-rs/embassy.git", features = [
+    "tick-hz-32_768",
+    "defmt",
+    "defmt-timestamp-uptime",
+] }
+panic-halt = "1.0.0"
+panic-probe = { version = "0.3.2", features = ["print-defmt"] }
+dspower-servo = { path = "../../Rust_Monorepo/dspower-servo", features = [
+    "defmt",
+] }
+firmware-common = { path = "../../Rust_Monorepo/firmware-common", features = [
+    "defmt",
+] }
+embedded-io-async = "0.6.1"
+embedded-hal-async = { version = "1.0.0", features = ["defmt-03"] }
+futures = { version = "0.3.17", default-features = false, features = [
+    "async-await",
+] }
+embedded-alloc = "0.5.1"
+embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", features = [
+    "defmt",
+] }
+stm32-device-signature = { version = "0.3.3", features = ["stm32h74x"] }
+embedded-can = "0.4.1"
+crc = "3.2.1"
+
+# [[bin]]
+# name = "firmware"
+# path = "src/main.rs"
+# test = false
+# bench = false
+
+[[bin]]
+name = "beacon"
+path = "src/main_beacon.rs"
+test = false
+bench = false
+
+[profile.dev]
+debug = true
+lto = true
+opt-level = "z"
+incremental = true
+
+[profile.release]
+debug = false
+lto = true
+opt-level = "z"
+incremental = true
