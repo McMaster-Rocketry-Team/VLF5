@@ -44,6 +44,14 @@ stm32-device-signature = { version = "0.3.3", features = ["stm32h74x"] }
 embedded-can = "0.4.1"
 crc = "3.2.1"
 heapless = { version = "0.8.0", features = ["serde"], default-features = false }
+# change back to https://github.com/lora-rs/lora-rs.git once https://github.com/lora-rs/lora-rs/pull/381 is merged
+lora-phy = { git = "https://github.com/PegasisForever/lora-rs.git", branch = "patch-1", default-features = false, features = [
+    "defmt-03",
+] }
+
+[patch.crates-io]
+embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
+
 
 # [[bin]]
 # name = "firmware"
@@ -54,6 +62,12 @@ heapless = { version = "0.8.0", features = ["serde"], default-features = false }
 [[bin]]
 name = "beacon"
 path = "src/main_beacon.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "gcm"
+path = "src/main_gcm.rs"
 test = false
 bench = false
 

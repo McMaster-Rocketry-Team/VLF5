@@ -108,6 +108,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+dependencies = [
+ "generic-array 0.14.7",
+]
+
+[[package]]
 name = "block-device-driver"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +130,14 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "calculate-required-bits"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn 2.0.100",
+]
 
 [[package]]
 name = "cfg-if"
@@ -190,6 +207,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crc"
 version = "3.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,6 +235,16 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "crypto-common"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
+dependencies = [
+ "generic-array 0.14.7",
+ "typenum",
+]
 
 [[package]]
 name = "darling"
@@ -294,6 +330,16 @@ checksum = "b2cac3b8a5644a9e02b75085ebad3b6deafdbdbdec04bb25086523828aa4dfd1"
 dependencies = [
  "critical-section",
  "defmt 1.0.1",
+]
+
+[[package]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
 ]
 
 [[package]]
@@ -567,6 +613,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+
+[[package]]
 name = "firmware"
 version = "0.1.0"
 dependencies = [
@@ -587,6 +639,7 @@ dependencies = [
  "firmware-common-new",
  "futures",
  "heapless 0.8.0",
+ "lora-phy",
  "panic-probe",
  "stm32-device-signature",
 ]
@@ -595,16 +648,28 @@ dependencies = [
 name = "firmware-common-new"
 version = "0.1.0"
 dependencies = [
+ "calculate-required-bits",
  "chrono",
+ "crc",
  "defmt 1.0.1",
  "embassy-futures 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embassy-sync",
  "embedded-hal-async",
  "embedded-io-async",
  "heapless 0.8.0",
+ "icao-isa",
+ "icao-units",
+ "libm",
+ "lora-modulation",
+ "lora-phy",
  "nmea",
+ "num-traits",
  "packed_struct",
+ "paste",
  "postcard",
+ "reed-solomon",
  "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -765,10 +830,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "icao-isa"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b6ac30bae3c039887bccb011cfbf085cc465bb27fd140b79b8ccf9bd80b4c78"
+dependencies = [
+ "icao-units",
+ "libm",
+]
+
+[[package]]
+name = "icao-units"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d50b724a06c523261580311f718c8d6ae8c36a228d75cb1fe0ac3f3139910262"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "libc"
+version = "0.2.172"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libm"
@@ -790,6 +886,63 @@ checksum = "07af8b9cdd281b7915f413fa73f29ebd5d55d0d3f0155584dade1ff18cea1b17"
 dependencies = [
  "autocfg",
  "scopeguard",
+]
+
+[[package]]
+name = "lora-modulation"
+version = "0.1.5"
+source = "git+https://github.com/PegasisForever/lora-rs.git?branch=patch-1#bd377ec431991e8af7903c735abe30409425091b"
+dependencies = [
+ "defmt 0.3.100",
+]
+
+[[package]]
+name = "lora-phy"
+version = "3.0.2-alpha"
+source = "git+https://github.com/PegasisForever/lora-rs.git?branch=patch-1#bd377ec431991e8af7903c735abe30409425091b"
+dependencies = [
+ "defmt 0.3.100",
+ "document-features",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "lora-modulation",
+ "lorawan-device",
+ "num-traits",
+]
+
+[[package]]
+name = "lorawan"
+version = "0.9.1"
+source = "git+https://github.com/PegasisForever/lora-rs.git?branch=patch-1#bd377ec431991e8af7903c735abe30409425091b"
+dependencies = [
+ "defmt 0.3.100",
+ "hex",
+ "lorawan-macros",
+]
+
+[[package]]
+name = "lorawan-device"
+version = "0.12.2"
+source = "git+https://github.com/PegasisForever/lora-rs.git?branch=patch-1#bd377ec431991e8af7903c735abe30409425091b"
+dependencies = [
+ "defmt 0.3.100",
+ "document-features",
+ "fastrand",
+ "futures",
+ "heapless 0.8.0",
+ "lora-modulation",
+ "lorawan",
+ "rand_core",
+]
+
+[[package]]
+name = "lorawan-macros"
+version = "0.1.0"
+source = "git+https://github.com/PegasisForever/lora-rs.git?branch=patch-1#bd377ec431991e8af7903c735abe30409425091b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -861,6 +1014,8 @@ checksum = "36b29691432cc9eff8b282278473b63df73bea49bc3ec5e67f31a3ae9c3ec190"
 dependencies = [
  "bitvec",
  "packed_struct_codegen",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -883,6 +1038,12 @@ dependencies = [
  "cortex-m 0.7.7",
  "defmt 1.0.1",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pin-project-lite"
@@ -960,6 +1121,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
+name = "reed-solomon"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13de68c877a77f35885442ac72c8beb7c2f0b09380c43b734b9d63d1db69ee54"
+
+[[package]]
 name = "rustc_version"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,6 +1195,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]

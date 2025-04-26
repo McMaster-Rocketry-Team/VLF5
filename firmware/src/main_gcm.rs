@@ -8,7 +8,6 @@ mod utils;
 
 use {defmt_rtt as _, panic_probe as _};
 
-use cortex_m::singleton;
 use defmt::info;
 use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
@@ -20,27 +19,15 @@ use embassy_stm32::peripherals::{
     DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA7, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
-use embassy_stm32::{
-    bind_interrupts,
-    peripherals::{PA10, PB14, USART1},
-    time::{mhz, Hertz},
-    usart::{self, BufferedUart, Config as UartConfig},
-};
-use embassy_sync::signal::Signal;
+use embassy_stm32::time::{mhz, Hertz};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Delay, Timer};
-use firmware_common_new::gps::{run_gps_uart_receiver, GPSData};
-use firmware_common_new::sensor_reading::SensorReading;
-use firmware_common_new::time::BootTimestamp;
-use firmware_common_new::vlp::client::VLPAvionics;
+use firmware_common_new::vlp::client::VLPGroundStation;
 use firmware_common_new::vlp::lora::LoraPhy;
 use firmware_common_new::vlp::lora_config::LoraConfig;
-use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
-use firmware_common_new::vlp::packets::VLPDownlinkPacket;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
-use time::Clock;
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -114,15 +101,11 @@ async fn main(spawner: Spawner) {
 
     spawner.must_spawn(power_led_task(p.PA2));
 
-    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14));
-
     spawner.must_spawn(lora_task(
         p.PA7, p.SPI3, p.PB3, p.PD6, p.PB4, p.PC7, p.PD5, p.PD4, p.EXTI4, p.PD1, p.EXTI1, p.PD0,
         p.PA8, p.DMA1_CH3, p.DMA1_CH2,
     ));
 }
-
-const GPS_DATA_SIGNAL: Signal<NoopRawMutex, SensorReading<BootTimestamp, GPSData>> = Signal::new();
 
 #[embassy_executor::task]
 async fn power_led_task(blue_led: PA2) {
@@ -134,26 +117,6 @@ async fn power_led_task(blue_led: PA2) {
         blue_led.set_high();
         Timer::after_millis(950).await;
     }
-}
-
-#[embassy_executor::task]
-async fn gps_task(usart1: USART1, rx: PA10, tx: PB14) {
-    bind_interrupts!(struct Irqs {
-        USART1 => usart::BufferedInterruptHandler<USART1>;
-    });
-
-    let tx_buffer = singleton!(: [u8; 32] = [0; 32]).unwrap();
-    let rx_buffer = singleton!(: [u8; 32] = [0; 32]).unwrap();
-    let mut config = UartConfig::default();
-    config.baudrate = 9600;
-
-    let mut uart1 = BufferedUart::new(usart1, Irqs, rx, tx, tx_buffer, rx_buffer, config).unwrap();
-
-    run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
-        info!("GPS Data: {:?}", gps_data);
-        GPS_DATA_SIGNAL.signal(gps_data);
-    })
-    .await;
 }
 
 #[embassy_executor::task]
@@ -209,26 +172,20 @@ async fn lora_task(
             power: 22,
         },
     );
-    let avionics_client = VLPAvionics::<NoopRawMutex>::new();
+    let gcm_client = VLPGroundStation::<NoopRawMutex>::new();
     let key = [0u8; 32];
-    let mut daemon = avionics_client.daemon(&mut lora, &key);
+    let mut daemon = gcm_client.daemon(&mut lora, &key);
     let daemon_fut = daemon.run();
 
-    let send_fut = async {
+    let receive_fut = async {
         loop {
-            let gps_data = GPS_DATA_SIGNAL.wait().await.data;
-            if gps_data.lat_lon.is_some() {
-                green_led.set_low();
-                Timer::after_millis(50).await;
-                green_led.set_high();
-            }
-            avionics_client.send(VLPDownlinkPacket::GPSBeacon(GPSBeaconPacket::new(
-                gps_data.lat_lon,
-                gps_data.num_of_fix_satellites,
-                0.0,
-            )));
+            let packet = gcm_client.receive().await;
+            info!("Received packet: {:?}", packet);
+            green_led.set_low();
+            Timer::after_millis(50).await;
+            green_led.set_high();
         }
     };
 
-    join(daemon_fut, send_fut).await;
+    join(daemon_fut, receive_fut).await;
 }
