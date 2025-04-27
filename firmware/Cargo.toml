@@ -44,8 +44,7 @@ stm32-device-signature = { version = "0.3.3", features = ["stm32h74x"] }
 embedded-can = "0.4.1"
 crc = "3.2.1"
 heapless = { version = "0.8.0", features = ["serde"], default-features = false }
-# change back to https://github.com/lora-rs/lora-rs.git once https://github.com/lora-rs/lora-rs/pull/381 is merged
-lora-phy = { git = "https://github.com/PegasisForever/lora-rs.git", branch = "patch-1", default-features = false, features = [
+lora-phy = { git = "https://github.com/lora-rs/lora-rs.git", default-features = false, features = [
     "defmt-03",
 ] }
 
