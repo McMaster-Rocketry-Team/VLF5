@@ -107,6 +107,7 @@ async fn main(spawner: Spawner) {
     };
     let p = embassy_stm32::init(config);
 
+    // PS: PA3 (low: force pwm)
     // red_led: PB1
     // green_led: PA7
     // blue_led: PA2
@@ -117,23 +118,23 @@ async fn main(spawner: Spawner) {
 
     spawner.must_spawn(gps_task(vlp_avionics_client, p.USART1, p.PA10, p.PB14));
 
-    spawner.must_spawn(lora_task(
-        vlp_avionics_client,
-        p.SPI3,
-        p.PB3,
-        p.PD6,
-        p.PB4,
-        p.PC7,
-        p.PD5,
-        p.PD4,
-        p.EXTI4,
-        p.PD1,
-        p.EXTI1,
-        p.PD0,
-        p.PA8,
-        p.DMA1_CH3,
-        p.DMA1_CH2,
-    ));
+    // spawner.must_spawn(lora_task(
+    //     vlp_avionics_client,
+    //     p.SPI3,
+    //     p.PB3,
+    //     p.PD6,
+    //     p.PB4,
+    //     p.PC7,
+    //     p.PD5,
+    //     p.PD4,
+    //     p.EXTI4,
+    //     p.PD1,
+    //     p.EXTI1,
+    //     p.PD0,
+    //     p.PA8,
+    //     p.DMA1_CH3,
+    //     p.DMA1_CH2,
+    // ));
 }
 
 #[embassy_executor::task]

@@ -47,6 +47,7 @@ heapless = { version = "0.8.0", features = ["serde"], default-features = false }
 lora-phy = { git = "https://github.com/lora-rs/lora-rs.git", default-features = false, features = [
     "defmt-03",
 ] }
+embedded-sdmmc = { version = "0.8.1", default-features = false, features = ["defmt-log"] }
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
@@ -67,6 +68,12 @@ bench = false
 [[bin]]
 name = "gcm"
 path = "src/main_gcm.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "sd_test"
+path = "src/sd_test.rs"
 test = false
 bench = false
 
