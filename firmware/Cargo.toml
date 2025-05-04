@@ -77,6 +77,12 @@ path = "src/sd_test.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "sensors_test"
+path = "src/sensors_test.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true

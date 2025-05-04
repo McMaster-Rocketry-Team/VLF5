@@ -1,28 +1,51 @@
-#![no_std]
+// only use std when feature = "std" is enabled or during testing
+#![cfg_attr(not(test), no_std)]
 #![no_main]
+
+mod e22;
+mod time;
+mod utils;
 
 use {defmt_rtt as _, panic_probe as _};
 
+use cortex_m::singleton;
 use defmt::info;
+use e22::E22;
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_stm32::sdmmc::DataBlock;
-use embassy_stm32::time::mhz;
-use embassy_stm32::{
-    bind_interrupts, peripherals,
-    rng::{self, Rng},
+use embassy_stm32::adc::{self, Adc, AdcChannel, SampleTime};
+use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::gpio::{Level, Output, Pull, Speed};
+use embassy_stm32::opamp::OpAmp;
+use embassy_stm32::peripherals::{
+    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
+use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::{
-    crc::{Config as CrcConfig, Crc, InputReverseConfig, PolySize},
-    sdmmc::{self, Sdmmc},
+    bind_interrupts,
+    peripherals::{PA10, PB14, USART1},
+    time::{mhz, Hertz},
+    usart::{self, BufferedUart, Config as UartConfig},
 };
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_time::{Delay, Timer};
+use firmware_common_new::gps::run_gps_uart_receiver;
+use firmware_common_new::vlp::client::VLPAvionics;
+use firmware_common_new::vlp::lora::LoraPhy;
+use firmware_common_new::vlp::lora_config::LoraConfig;
+use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
+use firmware_common_new::vlp::packets::VLPDownlinkPacket;
+use lora_phy::iv::GenericSx126xInterfaceVariant;
+use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
+use lora_phy::LoRa;
+use time::Clock;
 
-bind_interrupts!(struct Irqs {
-    RNG => rng::InterruptHandler<peripherals::RNG>;
-    SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
-});
+// bind_interrupts!(struct Irqs {
+//     ADC1 => adc::InterruptHandler<peripherals::ADC1>;
+// });
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let config = {
         use embassy_stm32::rcc::mux::*;
         use embassy_stm32::rcc::*;
@@ -89,57 +112,27 @@ async fn main(_spawner: Spawner) {
     };
     let p = embassy_stm32::init(config);
 
-    info!("Hello VLF5!");
+    // PS: PA3 (low: force pwm)
+    // red_led: PB1
+    // green_led: PA7
+    // blue_led: PA2
 
-    let mut sdmmc = Sdmmc::new_4bit(
-        p.SDMMC1,
-        Irqs,
-        p.PC12,
-        p.PD2,
-        p.PC8,
-        p.PC9,
-        p.PC10,
-        p.PC11,
-        Default::default(),
-    );
+    // let mut adc = Adc::new(p.ADC2, Irqs);
+    let mut adc = Adc::new(p.ADC1);
+    adc.set_resolution(adc::Resolution::BITS12V);
+    let mut bat_v_m = p.PB0.degrade_adc();
 
-    info!("Configured clock: {}", sdmmc.clock().0);
-    sdmmc.init_sd_card(mhz(1)).await.unwrap();
+    adc.set_sample_time(SampleTime::CYCLES810_5);
 
-    // let size = sdcard.num_bytes().unwrap();
-    // let block_count = (size / 512) as u32;
-    // info!("Card size is {} bytes, {} blocks", size, block_count);
+    let mut vrefint_channel = adc.enable_vrefint();
+    loop {
+        let VREFINT = 1.21f32;
+        let vrefint = adc.blocking_read(&mut vrefint_channel);
+        info!("vrefint: {}", vrefint);
+        let ratio = VREFINT / vrefint as f32;
 
-    let mut rng = Rng::new(p.RNG, Irqs);
-    let crc_config =
-        CrcConfig::new(InputReverseConfig::None, false, PolySize::Width8, 69, 69).unwrap();
-    let mut crc = Crc::new(p.CRC, crc_config);
-
-    let mut block = DataBlock([0u8; 512]);
-    for block_i in 0..10 {
-        info!(
-            "Testing block {} ({}MiB).....",
-            block_i,
-            (block_i as f32) * 512.0 / 1024.0 / 1024.0
-        );
-
-        rng.async_fill_bytes(&mut block.0[..508]).await.unwrap();
-        crc.reset();
-        let check_sum = crc.feed_bytes(&block.0[..508]);
-        block.0[508..512].copy_from_slice(&check_sum.to_le_bytes());
-
-        sdmmc.write_block(block_i, &block).await.unwrap();
-
-        sdmmc.read_block(block_i, &mut block).await.unwrap();
-
-        crc.reset();
-        let check_sum = crc.feed_bytes(&block.0[..508]);
-        let check_sum2 = u32::from_le_bytes(block.0[508..512].try_into().unwrap());
-        if check_sum != check_sum2 {
-            info!("Failed, checksum mismatch: {} != {}", check_sum, check_sum2);
-            break;
-        }
+        let measured = adc.blocking_read(&mut bat_v_m);
+        info!("measured: {}V", measured as f32 * ratio);
+        Timer::after_millis(500).await;
     }
-
-    info!("SD Card test passed!")
 }

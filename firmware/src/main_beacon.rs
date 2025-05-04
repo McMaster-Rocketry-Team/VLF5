@@ -16,7 +16,8 @@ use embassy_executor::Spawner;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
 use embassy_stm32::peripherals::{
-    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
+    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA7, PA8, PB1, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6,
+    SPI3,
 };
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::Peri;
@@ -26,6 +27,7 @@ use embassy_stm32::{
     time::{mhz, Hertz},
     usart::{self, BufferedUart, Config as UartConfig},
 };
+use embassy_sync::signal::Signal;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Delay, Timer};
 use firmware_common_new::gps::run_gps_uart_receiver;
@@ -113,10 +115,21 @@ async fn main(spawner: Spawner) {
     // blue_led: PA2
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
+    let gps_satellites_signal = singleton!(: Signal<NoopRawMutex, u8> = Signal::new()).unwrap();
+    let gps_fixed_signal = singleton!(: Signal<NoopRawMutex, bool> = Signal::new()).unwrap();
 
-    spawner.must_spawn(power_led_task(p.PA2));
+    spawner.must_spawn(gps_task(
+        vlp_avionics_client,
+        p.USART1,
+        p.PA10,
+        p.PB14,
+        gps_satellites_signal,
+        gps_fixed_signal,
+    ));
 
-    spawner.must_spawn(gps_task(vlp_avionics_client, p.USART1, p.PA10, p.PB14));
+    spawner.must_spawn(power_led_task(p.PB1));
+    spawner.must_spawn(gps_satellites_led_task(p.PA2, gps_satellites_signal));
+    spawner.must_spawn(gps_fixed_led_task(p.PA7, gps_fixed_signal));
 
     // spawner.must_spawn(lora_task(
     //     vlp_avionics_client,
@@ -138,14 +151,51 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn power_led_task(blue_led: Peri<'static, PA2>) {
+async fn power_led_task(red_led: Peri<'static, PB1>) {
+    let mut red_led = Output::new(red_led, Level::High, Speed::Low);
+
+    loop {
+        red_led.set_low();
+        Timer::after_millis(50).await;
+        red_led.set_high();
+        Timer::after_millis(950).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn gps_satellites_led_task(
+    blue_led: Peri<'static, PA2>,
+    gps_satellites_signal: &'static Signal<NoopRawMutex, u8>,
+) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
 
     loop {
-        blue_led.set_low();
-        Timer::after_millis(50).await;
-        blue_led.set_high();
-        Timer::after_millis(950).await;
+        let num_of_fix_satellites = gps_satellites_signal.wait().await;
+        for _ in 0..num_of_fix_satellites {
+            blue_led.set_low();
+            Timer::after_millis(50).await;
+            blue_led.set_high();
+            Timer::after_millis(150).await;
+        }
+        Timer::after_millis(1000).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn gps_fixed_led_task(
+    green_led: Peri<'static, PA7>,
+    gps_fixed_signal: &'static Signal<NoopRawMutex, bool>,
+) {
+    let mut green_led = Output::new(green_led, Level::High, Speed::Low);
+
+    loop {
+        let gps_fixed = gps_fixed_signal.wait().await;
+        if gps_fixed {
+            green_led.set_low();
+            Timer::after_millis(50).await;
+            green_led.set_high();
+            Timer::after_millis(950).await;
+        }
     }
 }
 
@@ -155,6 +205,8 @@ async fn gps_task(
     usart1: Peri<'static, USART1>,
     rx: Peri<'static, PA10>,
     tx: Peri<'static, PB14>,
+    gps_satellites_signal: &'static Signal<NoopRawMutex, u8>,
+    gps_fixed_signal: &'static Signal<NoopRawMutex, bool>,
 ) {
     bind_interrupts!(struct Irqs {
         USART1 => usart::BufferedInterruptHandler<USART1>;
@@ -170,6 +222,8 @@ async fn gps_task(
     run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
         info!("GPS Data: {:?}", gps_data);
         let gps_data = gps_data.data;
+        gps_satellites_signal.signal(gps_data.num_of_fix_satellites);
+        gps_fixed_signal.signal(gps_data.lat_lon.is_some());
         vlp_avionics_client.send(VLPDownlinkPacket::GPSBeacon(GPSBeaconPacket::new(
             gps_data.lat_lon,
             gps_data.num_of_fix_satellites,
