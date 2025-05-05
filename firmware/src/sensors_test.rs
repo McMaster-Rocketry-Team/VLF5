@@ -12,44 +12,22 @@ use {defmt_rtt as _, panic_probe as _};
 
 use cortex_m::singleton;
 use defmt::info;
-use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_stm32::adc::{self, Adc, AdcChannel, SampleTime};
-use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::gpio::{Level, Output, Pull, Speed};
-use embassy_stm32::opamp::OpAmp;
-use embassy_stm32::peripherals::{
-    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
-};
+use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
-use embassy_stm32::{
-    bind_interrupts,
-    peripherals::{PA10, PB14, USART1},
-    time::{mhz, Hertz},
-    usart::{self, BufferedUart, Config as UartConfig},
-};
+use embassy_stm32::time::{mhz, Hertz};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Delay, Timer};
-use firmware_common_new::gps::run_gps_uart_receiver;
-use firmware_common_new::vlp::client::VLPAvionics;
-use firmware_common_new::vlp::lora::LoraPhy;
-use firmware_common_new::vlp::lora_config::LoraConfig;
-use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
-use firmware_common_new::vlp::packets::VLPDownlinkPacket;
-use lora_phy::iv::GenericSx126xInterfaceVariant;
-use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
-use lora_phy::LoRa;
+use embassy_time::Timer;
 use lsm6dsm::LSM6DSM;
 use ms5607::MS5607;
-use time::Clock;
 
 // bind_interrupts!(struct Irqs {
 //     ADC1 => adc::InterruptHandler<peripherals::ADC1>;
 // });
 
 #[embassy_executor::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
     let config = {
         use embassy_stm32::rcc::mux::*;
         use embassy_stm32::rcc::*;
