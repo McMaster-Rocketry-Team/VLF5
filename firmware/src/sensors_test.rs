@@ -3,6 +3,8 @@
 #![no_main]
 
 mod e22;
+mod lsm6dsm;
+mod ms5607;
 mod time;
 mod utils;
 
@@ -38,6 +40,8 @@ use firmware_common_new::vlp::packets::VLPDownlinkPacket;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
 use lora_phy::LoRa;
+use lsm6dsm::LSM6DSM;
+use ms5607::MS5607;
 use time::Clock;
 
 // bind_interrupts!(struct Irqs {
@@ -117,22 +121,62 @@ async fn main(spawner: Spawner) {
     // green_led: PA7
     // blue_led: PA2
 
-    // let mut adc = Adc::new(p.ADC2, Irqs);
-    let mut adc = Adc::new(p.ADC1);
-    adc.set_resolution(adc::Resolution::BITS12V);
-    let mut bat_v_m = p.PB0.degrade_adc();
+    // baro
+    let mut spi_config = SpiConfig::default();
+    spi_config.frequency = Hertz(250_000);
+    let spi1 = Mutex::<NoopRawMutex, _>::new(Spi::new(
+        p.SPI1, p.PA5, p.PD7, p.PA6, p.DMA1_CH4, p.DMA1_CH5, spi_config,
+    ));
+    let baro_spi_device = SpiDeviceWithConfig::new(
+        &spi1,
+        Output::new(p.PC6, Level::High, Speed::High),
+        spi_config,
+    );
+    let baro_buffer = singleton!(: [u8; 8] = [0; 8]).unwrap();
+    let mut baro = MS5607::new(baro_spi_device, baro_buffer);
+    baro.reset().await.unwrap();
+    info!("Barometer initialized");
 
-    adc.set_sample_time(SampleTime::CYCLES810_5);
+    // Low G IMU
+    let mut spi_config = SpiConfig::default();
+    spi_config.frequency = Hertz(1_000_000);
+    let spi4 = Mutex::<NoopRawMutex, _>::new(Spi::new(
+        p.SPI4, p.PE2, p.PE6, p.PE5, p.DMA2_CH1, p.DMA2_CH0, spi_config,
+    ));
+    let low_g_imu_spi_device = SpiDeviceWithConfig::new(
+        &spi4,
+        Output::new(p.PC13, Level::High, Speed::High),
+        spi_config,
+    );
+    let mut low_g_imu = LSM6DSM::new(low_g_imu_spi_device);
+    low_g_imu.reset().await.unwrap();
+    info!("Low G IMU initialized");
 
-    let mut vrefint_channel = adc.enable_vrefint();
+    // let mut adc = Adc::new(p.ADC1);
+    // adc.set_resolution(adc::Resolution::BITS12V);
+    // let mut bat_v_m = p.PB0.degrade_adc();
+
+    // adc.set_sample_time(SampleTime::CYCLES810_5);
+
+    // let mut vrefint_channel = adc.enable_vrefint();
     loop {
-        let VREFINT = 1.21f32;
-        let vrefint = adc.blocking_read(&mut vrefint_channel);
-        info!("vrefint: {}", vrefint);
-        let ratio = VREFINT / vrefint as f32;
+        // let VREFINT = 1.21f32;
+        // let vrefint = adc.blocking_read(&mut vrefint_channel);
+        // info!("vrefint: {}", vrefint);
+        // let ratio = VREFINT / vrefint as f32;
 
-        let measured = adc.blocking_read(&mut bat_v_m);
-        info!("measured: {}V", measured as f32 * ratio);
+        // let measured = adc.blocking_read(&mut bat_v_m);
+        // info!("measured: {}V", measured as f32 * ratio);
+
+        let baro_measurements = baro.read().await.unwrap();
+        info!(
+            "Barometer measurements: {:?}, altitude: {}",
+            baro_measurements,
+            baro_measurements.data.altitude()
+        );
+        let low_g_imu_measurements = low_g_imu.read().await.unwrap();
+        info!("Low G IMU measurements: {:?}", low_g_imu_measurements);
+
         Timer::after_millis(500).await;
     }
 }
