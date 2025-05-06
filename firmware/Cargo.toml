@@ -83,6 +83,12 @@ path = "src/sensors_test.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "pyro_test"
+path = "src/pyro_test.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true
