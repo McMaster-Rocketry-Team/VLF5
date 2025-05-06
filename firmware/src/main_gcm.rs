@@ -163,6 +163,7 @@ async fn lora_task(
     .unwrap();
     let sx1262 = Sx126x::new(lora_spi_device, iv, config);
     let mut lora = LoRa::new(sx1262, false, Delay).await.unwrap();
+    info!("LoRa initialized");
     let mut lora = LoraPhy::new(
         &mut lora,
         LoraConfig {
