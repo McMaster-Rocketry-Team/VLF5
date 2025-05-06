@@ -89,6 +89,12 @@ path = "src/pyro_test.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "mag_test"
+path = "src/mag_test.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true
