@@ -80,12 +80,12 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Ok(())
     }
 
-        /*
+    /*
        Reset the sensor
 
-       CTRL1_XL (10h) - 0b1010_11_00; Set odr (acceleration) to 6.66KHz, full scale to 16g, low cutoff freq, high BW
-       CTRL2_G (11h) - 0b1010_11_00;  Set odr (Gyro) to 6.66KHz, full scale to 2000dps, low cutoff freq, high BW
-       CTRL3_C (12h) - 0b1100_01_01;  Reboots memory content/software, 4-wire SPI, enable block data update
+       CTRL1_XL (10h) - 0b1010_01_00; Set odr (acceleration) to 1.66KHz, full scale to +-16g, low cutoff freq, high BW
+       CTRL2_G (11h) - 0b1010_11_00;  Set odr (Gyro) to 1.66KHz, full scale to 2000dps, low cutoff freq, high BW
+       CTRL3_C (12h) - 0b1000_01_01;  Reboots memory content/software, 4-wire SPI, enable block data update
     */
     pub async fn reset(&mut self) -> Result<(), ErrorKind> {
         self.write_register(CTRL3_C, 0b10000101).await?;
@@ -96,9 +96,9 @@ impl<B: SpiDevice> LSM6DSM<B> {
             return Err(ErrorKind::Other);
         }
 
-        self.write_register(CTRL1_XL, 0b10101100).await?;
+        self.write_register(CTRL1_XL, 0b1010_01_00).await?;
         sleep!(10);
-        self.write_register(CTRL2_G, 0b10101100).await?;
+        self.write_register(CTRL2_G, 0b1010_11_00).await?;
         sleep!(10);
 
         Ok(())

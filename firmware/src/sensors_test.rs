@@ -18,7 +18,8 @@ use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::{mhz, Hertz};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::Timer;
+use embassy_time::{Duration, Ticker, Timer};
+use firmware_common_new::variance::VarianceEstimator;
 use lsm6dsm::LSM6DSM;
 use ms5607::MS5607;
 
@@ -95,6 +96,7 @@ async fn main(_spawner: Spawner) {
     let p = embassy_stm32::init(config);
 
     // PS: PA3 (low: force pwm)
+    let mut ps = Output::new(p.PA3, Level::Low, Speed::Low);
     // red_led: PB1
     // green_led: PA7
     // blue_led: PA2
@@ -137,6 +139,11 @@ async fn main(_spawner: Spawner) {
     // adc.set_sample_time(SampleTime::CYCLES810_5);
 
     // let mut vrefint_channel = adc.enable_vrefint();
+
+    let hz = 5000u32;
+    let mut ticker = Ticker::every(Duration::from_hz(hz as u64));
+    let mut variance_estimator = VarianceEstimator::<6>::new();
+    let mut count = 0u32;
     loop {
         // let VREFINT = 1.21f32;
         // let vrefint = adc.blocking_read(&mut vrefint_channel);
@@ -146,15 +153,25 @@ async fn main(_spawner: Spawner) {
         // let measured = adc.blocking_read(&mut bat_v_m);
         // info!("measured: {}V", measured as f32 * ratio);
 
-        let baro_measurements = baro.read().await.unwrap();
-        info!(
-            "Barometer measurements: {:?}, altitude: {}",
-            baro_measurements,
-            baro_measurements.data.altitude()
-        );
+        // let baro_measurements = baro.read().await.unwrap();
+        // info!(
+        //     "Barometer measurements: {:?}, altitude: {}",
+        //     baro_measurements,
+        //     baro_measurements.data.altitude()
+        // );
         let low_g_imu_measurements = low_g_imu.read().await.unwrap();
-        info!("Low G IMU measurements: {:?}", low_g_imu_measurements);
+        // info!("Low G IMU measurements: {:?}", low_g_imu_measurements);
+        let acc = low_g_imu_measurements.data.acc;
+        let gyro = low_g_imu_measurements.data.gyro;
+        variance_estimator.update([acc[0], acc[1], acc[2], gyro[0], gyro[1], gyro[2]]);
 
-        Timer::after_millis(500).await;
+        count += 1;
+        if count > 50000 {
+            info!("mean: {:?}", variance_estimator.mean());
+            info!("noise density: {:?}", variance_estimator.noise_density(hz as f32));
+            break;
+        }
+
+        ticker.next().await;
     }
 }
