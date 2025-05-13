@@ -78,7 +78,7 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
 
     pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, BaroData>, ErrorKind> {
         // request measurement pressure with OSR=1024
-        let timestamp = Instant::now().as_micros() as f64 / 1000.0 + 1.0; // timestamp of the pressure measurement
+        let timestamp = Instant::now().as_micros() + 1000; // timestamp of the pressure measurement
         let (read_buffer, write_buffer) = create_buffer!(self, [0x44]);
         self.spi
             .transfer(read_buffer, write_buffer)

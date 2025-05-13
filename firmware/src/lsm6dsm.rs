@@ -135,7 +135,7 @@ impl<B: SpiDevice> LSM6DSM<B> {
         let gyro_scale = 2000.0 / 32768.0; // ±2000dps range
 
         Ok(SensorReading::new(
-            Instant::now().as_micros() as f64 / 1000.0,
+            Instant::now().as_micros(),
             IMUData {
                 acc: [
                     acc_x as f32 * acc_scale,
