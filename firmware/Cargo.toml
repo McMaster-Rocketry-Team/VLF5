@@ -95,6 +95,12 @@ path = "src/mag_test.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "can_main"
+path = "src/can_main.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true
