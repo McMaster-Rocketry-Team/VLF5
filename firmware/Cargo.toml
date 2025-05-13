@@ -26,7 +26,7 @@ embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", features = 
 ] }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
 embassy-time = { git = "https://github.com/embassy-rs/embassy.git", features = [
-    "tick-hz-32_768",
+    "tick-hz-1_000_000",
     "defmt",
     "defmt-timestamp-uptime",
 ] }
