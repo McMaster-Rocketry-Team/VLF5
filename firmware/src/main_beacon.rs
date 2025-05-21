@@ -131,23 +131,23 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(gps_satellites_led_task(p.PA2, gps_satellites_signal));
     spawner.must_spawn(gps_fixed_led_task(p.PA7, gps_fixed_signal));
 
-    // spawner.must_spawn(lora_task(
-    //     vlp_avionics_client,
-    //     p.SPI3,
-    //     p.PB3,
-    //     p.PD6,
-    //     p.PB4,
-    //     p.PC7,
-    //     p.PD5,
-    //     p.PD4,
-    //     p.EXTI4,
-    //     p.PD1,
-    //     p.EXTI1,
-    //     p.PD0,
-    //     p.PA8,
-    //     p.DMA1_CH3,
-    //     p.DMA1_CH2,
-    // ));
+    spawner.must_spawn(lora_task(
+        vlp_avionics_client,
+        p.SPI3,
+        p.PB3,
+        p.PD6,
+        p.PB4,
+        p.PC7,
+        p.PD5,
+        p.PD4,
+        p.EXTI4,
+        p.PD1,
+        p.EXTI1,
+        p.PD0,
+        p.PA8,
+        p.DMA1_CH3,
+        p.DMA1_CH2,
+    ));
 }
 
 #[embassy_executor::task]
