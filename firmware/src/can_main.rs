@@ -10,7 +10,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::can::enums::FrameCreateError;
 use embassy_stm32::can::{CanConfigurator, CanTx, Frame};
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::peripherals::{FDCAN2, PA2};
+use embassy_stm32::peripherals::{FDCAN2, PA2, PA7, PB1};
 use embassy_stm32::time::mhz;
 use embassy_stm32::{bind_interrupts, can, Peri};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -92,7 +92,7 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(config);
     info!("Hello VLF5!");
 
-    spawner.must_spawn(power_led_task(p.PA2));
+    spawner.must_spawn(power_led_task(p.PA7, p.PB1));
 
     let can_node_id = can_node_id_from_serial_number(device_id());
     info!("CAN Device ID: {}", can_node_id);
@@ -107,22 +107,27 @@ async fn main(spawner: Spawner) {
     });
 
     let mut can = CanConfigurator::new(p.FDCAN2, p.PB5, p.PB6, Irqs);
-    can.set_bitrate(250_000);
+    can.set_bitrate(1_000_000);
     let can = can.into_normal_mode();
     let (tx, _rx, _) = can.split();
 
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
     spawner.must_spawn(node_status_task(can_sender));
+
+    info!("All tasks started")
 }
 
 #[embassy_executor::task]
-async fn power_led_task(blue_led: Peri<'static, PA2>) {
-    let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
+async fn power_led_task(green_led: Peri<'static, PA7>, red_led: Peri<'static, PB1>) {
+    let mut green_led = Output::new(green_led, Level::High, Speed::Low);
+    let mut red_led = Output::new(red_led, Level::High, Speed::Low);
 
     loop {
-        blue_led.set_low();
+        green_led.set_low();
+        red_led.set_low();
         Timer::after_millis(50).await;
-        blue_led.set_high();
+        green_led.set_high();
+        red_led.set_high();
         Timer::after_millis(950).await;
     }
 }
