@@ -220,7 +220,7 @@ async fn gps_task(
     let mut uart1 = BufferedUart::new(usart1, rx, tx, tx_buffer, rx_buffer, Irqs, config).unwrap();
 
     run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
-        info!("GPS Data: {:?}", gps_data);
+        // info!("GPS Data: {:?}", gps_data);
         let gps_data = gps_data.data;
         gps_satellites_signal.signal(gps_data.num_of_fix_satellites);
         gps_fixed_signal.signal(gps_data.lat_lon.is_some());
@@ -260,8 +260,8 @@ async fn lora_task(
 
     let config = sx126x::Config {
         chip: E22,
-        tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V7),
-        use_dcdc: true,
+        tcxo_ctrl: None,
+        use_dcdc: false,
         rx_boost: true,
     };
     let iv = GenericSx126xInterfaceVariant::new(

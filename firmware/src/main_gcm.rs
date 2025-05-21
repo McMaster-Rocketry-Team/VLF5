@@ -149,8 +149,8 @@ async fn lora_task(
 
     let config = sx126x::Config {
         chip: E22,
-        tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V7),
-        use_dcdc: true,
+        tcxo_ctrl: None,
+        use_dcdc: false,
         rx_boost: true,
     };
     let iv = GenericSx126xInterfaceVariant::new(
