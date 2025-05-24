@@ -27,7 +27,7 @@ use firmware_common_new::vlp::client::VLPGroundStation;
 use firmware_common_new::vlp::lora::LoraPhy;
 use firmware_common_new::vlp::lora_config::LoraConfig;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
-use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
+use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 
 #[embassy_executor::main]
@@ -117,6 +117,7 @@ async fn power_led_task(blue_led: Peri<'static, PA2>) {
         Timer::after_millis(50).await;
         blue_led.set_high();
         Timer::after_millis(950).await;
+        info!("Hello");
     }
 }
 
