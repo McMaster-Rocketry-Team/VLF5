@@ -6,7 +6,7 @@ mod e22;
 mod time;
 mod utils;
 
-use {defmt_rtt as _, panic_probe as _};
+use {defmt_rtt_pipe::PIPE, panic_probe as _};
 
 use defmt::info;
 use e22::E22;
@@ -118,6 +118,8 @@ async fn power_led_task(blue_led: Peri<'static, PA2>) {
         blue_led.set_high();
         Timer::after_millis(950).await;
         info!("Hello");
+        let pipe_len = PIPE.len();
+        info!("pipe length: {}", pipe_len);
     }
 }
 

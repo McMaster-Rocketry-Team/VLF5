@@ -10,7 +10,7 @@ cortex-m = { version = "0.7.7", features = [
 ] }
 cortex-m-rt = "0.7.5"
 defmt = { version = "1.0.1" }
-defmt-rtt = { version = "1.0.0" }
+defmt-rtt-pipe = { path = "../../Rust_Monorepo/defmt-rtt-pipe" }
 embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", features = [
     "arch-cortex-m",
     "executor-thread",
@@ -47,7 +47,9 @@ heapless = { version = "0.8.0", features = ["serde"], default-features = false }
 lora-phy = { git = "https://github.com/lora-rs/lora-rs.git", default-features = false, features = [
     "defmt-03",
 ] }
-embedded-sdmmc = { version = "0.8.1", default-features = false, features = ["defmt-log"] }
+embedded-sdmmc = { version = "0.8.1", default-features = false, features = [
+    "defmt-log",
+] }
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }

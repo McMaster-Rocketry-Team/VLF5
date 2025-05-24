@@ -364,13 +364,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "defmt-rtt"
+name = "defmt-rtt-pipe"
 version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2cac3b8a5644a9e02b75085ebad3b6deafdbdbdec04bb25086523828aa4dfd1"
 dependencies = [
  "critical-section",
  "defmt 1.0.1",
+ "embassy-sync",
 ]
 
 [[package]]
@@ -691,7 +690,7 @@ dependencies = [
  "cortex-m-rt",
  "crc",
  "defmt 1.0.1",
- "defmt-rtt",
+ "defmt-rtt-pipe",
  "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures 0.1.1 (git+https://github.com/embassy-rs/embassy.git)",

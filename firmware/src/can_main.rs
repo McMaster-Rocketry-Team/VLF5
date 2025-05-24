@@ -2,7 +2,7 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
-use {defmt_rtt as _, panic_probe as _};
+use {defmt_rtt_pipe as _, panic_probe as _};
 
 use cortex_m::singleton;
 use defmt::info;
