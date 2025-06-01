@@ -18,7 +18,7 @@ use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::{mhz, Hertz};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Ticker};
 use firmware_common_new::variance::VarianceEstimator;
 use lsm6dsm::LSM6DSM;
 use ms5607::MS5607;
@@ -96,7 +96,7 @@ async fn main(_spawner: Spawner) {
     let p = embassy_stm32::init(config);
 
     // PS: PA3 (low: force pwm)
-    let mut ps = Output::new(p.PA3, Level::Low, Speed::Low);
+    let mut _ps = Output::new(p.PA3, Level::Low, Speed::Low);
     // red_led: PB1
     // green_led: PA7
     // blue_led: PA2

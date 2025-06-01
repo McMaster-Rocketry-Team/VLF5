@@ -9,7 +9,6 @@ mod utils;
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use cortex_m::singleton;
-use defmt::info;
 use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
@@ -37,7 +36,7 @@ use firmware_common_new::vlp::lora_config::LoraConfig;
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
 use firmware_common_new::vlp::packets::VLPDownlinkPacket;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
-use lora_phy::sx126x::{self, Sx126x, TcxoCtrlVoltage};
+use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 use time::Clock;
 

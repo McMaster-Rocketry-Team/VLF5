@@ -10,7 +10,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::can::enums::FrameCreateError;
 use embassy_stm32::can::{CanConfigurator, CanTx, Frame};
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::peripherals::{FDCAN2, PA2, PA7, PB1};
+use embassy_stm32::peripherals::{FDCAN2, PA7, PB1};
 use embassy_stm32::time::mhz;
 use embassy_stm32::{bind_interrupts, can, Peri};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
