@@ -83,6 +83,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "biquad"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8580925877eb35ab50f987a1c2c193eb46000c8827c871bc3425070f086408cc"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "bit_field"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -686,6 +695,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 name = "firmware"
 version = "0.1.0"
 dependencies = [
+ "biquad",
  "cortex-m 0.7.7",
  "cortex-m-rt",
  "crc",
@@ -722,6 +732,7 @@ dependencies = [
  "embedded-hal-async",
  "embedded-io-async",
  "heapless 0.8.0",
+ "heatshrink-lib",
  "icao-isa",
  "icao-units",
  "libm",
@@ -895,6 +906,12 @@ dependencies = [
  "serde",
  "stable_deref_trait",
 ]
+
+[[package]]
+name = "heatshrink-lib"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd595a0ca030d4e50596e7bc25d07cd71d3b820ff3d9db34debd3c3573ddf481"
 
 [[package]]
 name = "hex"

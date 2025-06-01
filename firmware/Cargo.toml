@@ -50,6 +50,7 @@ lora-phy = { git = "https://github.com/lora-rs/lora-rs.git", default-features = 
 embedded-sdmmc = { version = "0.8.1", default-features = false, features = [
     "defmt-log",
 ] }
+biquad = "0.5.0"
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
@@ -70,6 +71,12 @@ bench = false
 [[bin]]
 name = "gcm"
 path = "src/main_gcm.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "altimeter_test"
+path = "src/main_altimeter_test.rs"
 test = false
 bench = false
 
