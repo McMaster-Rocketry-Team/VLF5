@@ -2,9 +2,12 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod clock_config;
 mod ms5607;
 mod time;
 mod utils;
+
+use crate::clock_config::vlf5_clock_config;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
@@ -16,79 +19,29 @@ use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::peripherals::PA2;
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
-use embassy_stm32::time::{mhz, Hertz};
+use embassy_stm32::time::Hertz;
 use embassy_stm32::Peri;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Ticker, Timer};
 use ms5607::MS5607;
 
+/// drogue must deploy above this altitude
+const DROGUE_CHUTE_MIN_AGL_M: f32 = 3000f32;
+
+// main chute will deploy once the rocket descents to this altitude
+const MAIN_CHUTE_AGL_M: f32 = 426f32;
+
+/// This program is only intended for altimeter test. The logic here for deploying main and drogue
+/// chutes is different from the actual logic used in the rocket. This is because the actual logic
+/// uses imu for more accurate measurements, which we can't recreate under the test conditions of
+/// the altimeter test (vacuum chamber only)
+///
+/// Blue led blinks means powered on
+/// Green led on means drogue deployed
+/// Red led on means main deployed
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let config = {
-        use embassy_stm32::rcc::mux::*;
-        use embassy_stm32::rcc::*;
-        let mut config = embassy_stm32::Config::default();
-        let rcc = &mut config.rcc;
-
-        rcc.hsi = None;
-        rcc.hse = Some(Hse {
-            freq: mhz(16),
-            mode: HseMode::Oscillator,
-        });
-        rcc.csi = false;
-
-        rcc.hsi48 = None;
-        rcc.sys = Sysclk::PLL1_P;
-
-        rcc.pll1 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL60,
-            divp: Some(PllDiv::DIV2),
-            divq: Some(PllDiv::DIV20),
-            divr: None,
-        });
-        rcc.pll2 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL10,
-            divp: Some(PllDiv::DIV4),
-            divq: Some(PllDiv::DIV4),
-            divr: Some(PllDiv::DIV4),
-        });
-        rcc.pll3 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL10,
-            divp: None,
-            divq: None,
-            divr: Some(PllDiv::DIV8),
-        });
-
-        rcc.d1c_pre = AHBPrescaler::DIV1;
-        rcc.ahb_pre = AHBPrescaler::DIV2;
-        rcc.apb1_pre = APBPrescaler::DIV2;
-        rcc.apb2_pre = APBPrescaler::DIV2;
-        rcc.apb3_pre = APBPrescaler::DIV2;
-        rcc.apb4_pre = APBPrescaler::DIV2;
-
-        rcc.timer_prescaler = TimerPrescaler::DefaultX2;
-        rcc.voltage_scale = VoltageScale::Scale0;
-
-        rcc.ls = LsConfig::default_lsi();
-        rcc.mux.spi123sel = Saisel::PLL2_P;
-        rcc.mux.usart16910sel = Usart16910sel::PLL2_Q;
-        rcc.mux.rngsel = Rngsel::PLL1_Q;
-        rcc.mux.i2c1235sel = I2c1235sel::PLL3_R;
-        rcc.mux.spi45sel = Spi45sel::PLL2_Q;
-        rcc.mux.adcsel = Adcsel::PLL2_P;
-        rcc.mux.usbsel = Usbsel::PLL1_Q;
-        rcc.mux.fdcansel = Fdcansel::PLL2_Q;
-        rcc.mux.sdmmcsel = Sdmmcsel::PLL2_R;
-
-        config
-    };
-    let p = embassy_stm32::init(config);
+    let p = embassy_stm32::init(vlf5_clock_config());
 
     // PS: PA3 (low: force pwm)
     let mut _ps = Output::new(p.PA3, Level::Low, Speed::Low);
@@ -127,8 +80,6 @@ async fn main(spawner: Spawner) {
     );
 
     let mut ticker = Ticker::every(Duration::from_hz(sampling_hz));
-    let min_drogue_agl_m = 3000f32;
-    let drogue_agl_m = 426f32;
 
     enum State {
         Init,
@@ -158,7 +109,7 @@ async fn main(spawner: Spawner) {
                 max_altitude_m,
             } => {
                 *max_altitude_m = max_altitude_m.max(altitude);
-                if altitude > min_drogue_agl_m + *ground_altitude_m && altitude < *max_altitude_m {
+                if altitude > DROGUE_CHUTE_MIN_AGL_M + *ground_altitude_m && altitude < *max_altitude_m {
                     state = State::DrogueDescent {
                         ground_altitude_m: *ground_altitude_m,
                     };
@@ -166,7 +117,7 @@ async fn main(spawner: Spawner) {
                 }
             }
             State::DrogueDescent { ground_altitude_m } => {
-                if altitude < drogue_agl_m + *ground_altitude_m {
+                if altitude < MAIN_CHUTE_AGL_M + *ground_altitude_m {
                     state = State::MainDescent {};
                     red_led.set_low();
                 }
