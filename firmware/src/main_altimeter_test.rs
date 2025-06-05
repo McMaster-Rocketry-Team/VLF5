@@ -58,7 +58,7 @@ const VLP_KEY: [u8; 32] = [42u8; 32];
 /// drogue must deploy above this altitude
 const DROGUE_CHUTE_MIN_AGL_M: f32 = 3000f32;
 
-// main chute will deploy once the rocket descents to this altitude
+/// main chute will deploy once the rocket descents to this altitude
 const MAIN_CHUTE_AGL_M: f32 = 457.2f32; // 1500ft
 
 /// This program is only intended for altimeter test. The logic here for deploying main and drogue
