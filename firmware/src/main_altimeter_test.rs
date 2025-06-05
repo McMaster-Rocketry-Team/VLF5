@@ -1,4 +1,4 @@
-// only use std when feature = "std" is enabled or during testing
+// only use std during testing
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
@@ -139,7 +139,7 @@ async fn main(spawner: Spawner) {
         DrogueDescent {
             ground_altitude_m: f32,
         },
-        MainDescent {},
+        MainDescent,
     }
     let mut state = State::Init;
     loop {

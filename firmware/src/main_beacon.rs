@@ -1,35 +1,42 @@
-// only use std when feature = "std" is enabled or during testing
+// only use std during testing
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod clock_config;
 mod e22;
 mod time;
 mod utils;
 
+use crate::clock_config::vlf5_clock_config;
+
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use cortex_m::singleton;
+use defmt::info;
 use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
 use embassy_stm32::peripherals::{
-    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA7, PA8, PB1, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6,
-    SPI3,
+    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA7, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::Peri;
 use embassy_stm32::{
+    adc::{self, Adc, AdcChannel as _},
+    exti::ExtiInput,
+    peripherals::{ADC1, PB0},
+};
+use embassy_stm32::{
     bind_interrupts,
     peripherals::{PA10, PB14, USART1},
-    time::{mhz, Hertz},
+    time::Hertz,
     usart::{self, BufferedUart, Config as UartConfig},
 };
-use embassy_sync::signal::Signal;
+use embassy_sync::watch;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Delay, Timer};
-use firmware_common_new::gps::run_gps_uart_receiver;
+use embassy_time::{Delay, Duration, Ticker, Timer};
+use firmware_common_new::gps::{run_gps_uart_receiver, GPSData};
 use firmware_common_new::vlp::client::VLPAvionics;
 use firmware_common_new::vlp::lora::LoraPhy;
 use firmware_common_new::vlp::lora_config::LoraConfig;
@@ -40,97 +47,34 @@ use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 use time::Clock;
 
+/// This program acts as a GPS beacon, sends the current position to GCM over lora
+/// using `GPSBeaconPacket` every 2 seconds
+///
+/// Blue led blinks when gps no fix
+/// Green led blinks when gps fix
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let config = {
-        use embassy_stm32::rcc::mux::*;
-        use embassy_stm32::rcc::*;
-        let mut config = embassy_stm32::Config::default();
-        let rcc = &mut config.rcc;
-
-        rcc.hsi = None;
-        rcc.hse = Some(Hse {
-            freq: mhz(16),
-            mode: HseMode::Oscillator,
-        });
-        rcc.csi = false;
-
-        rcc.hsi48 = None;
-        rcc.sys = Sysclk::PLL1_P;
-
-        rcc.pll1 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL60,
-            divp: Some(PllDiv::DIV2),
-            divq: Some(PllDiv::DIV20),
-            divr: None,
-        });
-        rcc.pll2 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL10,
-            divp: Some(PllDiv::DIV4),
-            divq: Some(PllDiv::DIV4),
-            divr: Some(PllDiv::DIV4),
-        });
-        rcc.pll3 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL10,
-            divp: None,
-            divq: None,
-            divr: Some(PllDiv::DIV8),
-        });
-
-        rcc.d1c_pre = AHBPrescaler::DIV1;
-        rcc.ahb_pre = AHBPrescaler::DIV2;
-        rcc.apb1_pre = APBPrescaler::DIV2;
-        rcc.apb2_pre = APBPrescaler::DIV2;
-        rcc.apb3_pre = APBPrescaler::DIV2;
-        rcc.apb4_pre = APBPrescaler::DIV2;
-
-        rcc.timer_prescaler = TimerPrescaler::DefaultX2;
-        rcc.voltage_scale = VoltageScale::Scale0;
-
-        rcc.ls = LsConfig::default_lsi();
-        rcc.mux.spi123sel = Saisel::PLL2_P;
-        rcc.mux.usart16910sel = Usart16910sel::PLL2_Q;
-        rcc.mux.rngsel = Rngsel::PLL1_Q;
-        rcc.mux.i2c1235sel = I2c1235sel::PLL3_R;
-        rcc.mux.spi45sel = Spi45sel::PLL2_Q;
-        rcc.mux.adcsel = Adcsel::PLL2_P;
-        rcc.mux.usbsel = Usbsel::PLL1_Q;
-        rcc.mux.fdcansel = Fdcansel::PLL2_Q;
-        rcc.mux.sdmmcsel = Sdmmcsel::PLL2_R;
-
-        config
-    };
-    let p = embassy_stm32::init(config);
-
-    // PS: PA3 (low: force pwm)
-    // red_led: PB1
-    // green_led: PA7
-    // blue_led: PA2
+    let p = embassy_stm32::init(vlf5_clock_config());
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
-    let gps_satellites_signal = singleton!(: Signal<NoopRawMutex, u8> = Signal::new()).unwrap();
-    let gps_fixed_signal = singleton!(: Signal<NoopRawMutex, bool> = Signal::new()).unwrap();
+    let gps_data =
+        singleton!(: watch::Watch<NoopRawMutex, GPSData, 2> = watch::Watch::new()).unwrap();
 
-    spawner.must_spawn(gps_task(
-        vlp_avionics_client,
-        p.USART1,
-        p.PA10,
-        p.PB14,
-        gps_satellites_signal,
-        gps_fixed_signal,
+    spawner.must_spawn(power_led_task(
+        p.PA2,
+        p.PA7,
+        gps_data.dyn_receiver().unwrap(),
     ));
 
-    spawner.must_spawn(power_led_task(p.PB1));
-    spawner.must_spawn(gps_satellites_led_task(p.PA2, gps_satellites_signal));
-    spawner.must_spawn(gps_fixed_led_task(p.PA7, gps_fixed_signal));
+    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.dyn_sender()));
+    spawner.must_spawn(send_beacon_packet_task(
+        p.ADC1,
+        p.PB0,
+        vlp_avionics_client,
+        gps_data.dyn_receiver().unwrap(),
+    ));
 
-    spawner.must_spawn(lora_task(
+    spawner.must_spawn(lora_daemon_task(
         vlp_avionics_client,
         p.SPI3,
         p.PB3,
@@ -150,90 +94,109 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn power_led_task(red_led: Peri<'static, PB1>) {
-    let mut red_led = Output::new(red_led, Level::High, Speed::Low);
-
-    loop {
-        red_led.set_low();
-        Timer::after_millis(50).await;
-        red_led.set_high();
-        Timer::after_millis(950).await;
-    }
-}
-
-#[embassy_executor::task]
-async fn gps_satellites_led_task(
+async fn power_led_task(
     blue_led: Peri<'static, PA2>,
-    gps_satellites_signal: &'static Signal<NoopRawMutex, u8>,
+    green_led: Peri<'static, PA7>,
+    mut gps_data: watch::DynReceiver<'static, GPSData>,
 ) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
-
-    loop {
-        let num_of_fix_satellites = gps_satellites_signal.wait().await;
-        for _ in 0..num_of_fix_satellites {
-            blue_led.set_low();
-            Timer::after_millis(50).await;
-            blue_led.set_high();
-            Timer::after_millis(150).await;
-        }
-        Timer::after_millis(1000).await;
-    }
-}
-
-#[embassy_executor::task]
-async fn gps_fixed_led_task(
-    green_led: Peri<'static, PA7>,
-    gps_fixed_signal: &'static Signal<NoopRawMutex, bool>,
-) {
     let mut green_led = Output::new(green_led, Level::High, Speed::Low);
 
+    let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
-        let gps_fixed = gps_fixed_signal.wait().await;
-        if gps_fixed {
-            green_led.set_low();
-            Timer::after_millis(50).await;
-            green_led.set_high();
-            Timer::after_millis(950).await;
-        }
+        let gps_fixed = if let Some(gps_data) = gps_data.try_get() {
+            gps_data.lat_lon.is_some()
+        } else {
+            false
+        };
+        let led = if gps_fixed {
+            &mut green_led
+        } else {
+            &mut blue_led
+        };
+        led.set_low();
+        Timer::after_millis(50).await;
+        led.set_high();
+        ticker.next().await;
     }
 }
 
 #[embassy_executor::task]
 async fn gps_task(
-    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     usart1: Peri<'static, USART1>,
     rx: Peri<'static, PA10>,
     tx: Peri<'static, PB14>,
-    gps_satellites_signal: &'static Signal<NoopRawMutex, u8>,
-    gps_fixed_signal: &'static Signal<NoopRawMutex, bool>,
+    gps_data_sender: watch::DynSender<'static, GPSData>,
 ) {
     bind_interrupts!(struct Irqs {
         USART1 => usart::BufferedInterruptHandler<USART1>;
     });
 
-    let tx_buffer = singleton!(: [u8; 32] = [0; 32]).unwrap();
-    let rx_buffer = singleton!(: [u8; 32] = [0; 32]).unwrap();
+    let tx_buffer = singleton!(: [u8; 64] = [0; 64]).unwrap();
+    let rx_buffer = singleton!(: [u8; 64] = [0; 64]).unwrap();
     let mut config = UartConfig::default();
     config.baudrate = 9600;
 
     let mut uart1 = BufferedUart::new(usart1, rx, tx, tx_buffer, rx_buffer, Irqs, config).unwrap();
 
     run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
-        // info!("GPS Data: {:?}", gps_data);
         let gps_data = gps_data.data;
-        gps_satellites_signal.signal(gps_data.num_of_fix_satellites);
-        gps_fixed_signal.signal(gps_data.lat_lon.is_some());
-        vlp_avionics_client.send(VLPDownlinkPacket::GPSBeacon(GPSBeaconPacket::new(
-            gps_data.lat_lon,
-            gps_data.num_of_fix_satellites,
-            0.0,
-        )));
+        gps_data_sender.send(gps_data);
     })
     .await;
 }
 
 #[embassy_executor::task]
-async fn lora_task(
+async fn send_beacon_packet_task(
+    adc1: Peri<'static, ADC1>,
+    pb0: Peri<'static, PB0>,
+    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
+    mut gps_data: watch::DynReceiver<'static, GPSData>,
+) {
+    let mut adc = Adc::new(adc1);
+    adc.set_resolution(adc::Resolution::BITS12V);
+    adc.set_sample_time(adc::SampleTime::CYCLES810_5);
+    let mut bat_v_m = pb0.degrade_adc();
+    // let mut vrefint_channel = adc.enable_vrefint();
+
+    let mut read_battery_voltage = || {
+        let vrefint = 1.21f32;
+        // for some reason reading vrefint gives lower than expected value,
+        // using a hard coded value instead
+        // let vrefint_raw = adc.blocking_read(&mut vrefint_channel);
+        let vrefint_raw = 1502u16;
+        let ratio = vrefint / vrefint_raw as f32;
+
+        let pb0_raw = adc.blocking_read(&mut bat_v_m);
+        let pb0 = pb0_raw as f32 * ratio;
+        let batt_v = pb0 / 0.161;
+        batt_v
+    };
+
+    gps_data.get().await;
+
+    let mut ticker = Ticker::every(Duration::from_millis(2000));
+    loop {
+        let gps_data = gps_data.try_get().unwrap();
+        let battery_voltage = read_battery_voltage();
+        info!(
+            "satellites: {}, fixed: {}, batt v: {}V",
+            gps_data.num_of_fix_satellites,
+            gps_data.lat_lon.is_some(),
+            battery_voltage
+        );
+
+        vlp_avionics_client.send(VLPDownlinkPacket::GPSBeacon(GPSBeaconPacket::new(
+            gps_data.lat_lon,
+            gps_data.num_of_fix_satellites,
+            battery_voltage,
+        )));
+        ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn lora_daemon_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     spi3: Peri<'static, SPI3>,
     sck: Peri<'static, PB3>,
