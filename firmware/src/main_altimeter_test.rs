@@ -37,20 +37,17 @@ use embassy_stm32::{
 use embassy_stm32::{
     gpio::Input,
     peripherals::{
-        DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD13, PD7, PD8, PD9, PE12, PE13, PE9, SPI1,
+        DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD13, PD7, PD8, PD9, PE12, PE9, SPI1,
     },
 };
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, watch};
 use embassy_time::{Delay, Duration, Ticker, Timer};
-use firmware_common_new::{
-    readings::BaroData,
-    vlp::{
+use firmware_common_new::vlp::{
         client::VLPAvionics,
         lora::LoraPhy,
         lora_config::LoraConfig,
         packets::{altimeter_telemetry::AltimeterTelemetryPacket, VLPDownlinkPacket},
-    },
-};
+    };
 use lora_phy::{
     iv::GenericSx126xInterfaceVariant,
     sx126x::{self, Sx126x},
