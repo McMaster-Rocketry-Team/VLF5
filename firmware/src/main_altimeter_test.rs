@@ -71,7 +71,7 @@ const MAIN_CHUTE_AGL_M: f32 = 457.2f32; // 1500ft
 /// uses imu for more accurate measurements, which we can't recreate under the test conditions of
 /// the altimeter test (vacuum chamber only)
 ///
-/// This program sends current continuity, altitude and temperature to GCM over lora using 
+/// This program sends current continuity, altitude and temperature to GCM over lora using
 /// `AltimeterTelemetryPacket` every second
 ///
 /// Blue led blinks means powered on
@@ -86,8 +86,9 @@ async fn main(spawner: Spawner) {
     mem::forget(ps); // forget ps pin so it does not get reset to Hi-Z when main function finishes
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
+    // (temperature, agl altitude)
     let baro_data =
-        singleton!(: watch::Watch<NoopRawMutex, BaroData, 2> = watch::Watch::new()).unwrap();
+        singleton!(: watch::Watch<NoopRawMutex, (f32, f32), 1> = watch::Watch::new()).unwrap();
 
     spawner.must_spawn(power_led_task(p.PA2));
 
@@ -159,7 +160,7 @@ async fn altimeter_task(
     rx_dma: Peri<'static, DMA1_CH5>,
     green_led: Peri<'static, PA7>,
     red_led: Peri<'static, PB1>,
-    baro_data: watch::DynSender<'static, BaroData>,
+    baro_data: watch::DynSender<'static, (f32, f32)>,
 ) {
     let mut green_led = Output::new(green_led, Level::High, Speed::Low);
     let mut red_led = Output::new(red_led, Level::High, Speed::Low);
@@ -192,7 +193,9 @@ async fn altimeter_task(
     let mut ticker = Ticker::every(Duration::from_hz(sampling_hz));
 
     enum State {
-        Init,
+        Init {
+            count: usize,
+        },
         Ascent {
             ground_altitude_m: f32,
             max_altitude_m: f32,
@@ -200,26 +203,34 @@ async fn altimeter_task(
         DrogueDescent {
             ground_altitude_m: f32,
         },
-        MainDescent,
+        MainDescent {
+            ground_altitude_m: f32,
+        },
     }
-    let mut state = State::Init;
+    let mut state = State::Init { count: 0 };
     loop {
-        let baro_measurement = baro.read().await.unwrap();
-        let altitude = baro_measurement.data.altitude();
+        let baro_measurement = baro.read().await.unwrap().data;
+        let altitude = baro_measurement.altitude();
         let altitude = lowpass.run(altitude);
-        baro_data.send(baro_measurement.data);
 
         match &mut state {
-            State::Init => {
-                state = State::Ascent {
-                    ground_altitude_m: altitude,
-                    max_altitude_m: altitude,
+            State::Init { count } => {
+                if *count < 200 {
+                    // let low pass filter do its thing
+                    *count += 1;
+                } else {
+                    state = State::Ascent {
+                        ground_altitude_m: altitude,
+                        max_altitude_m: altitude,
+                    }
                 }
             }
             State::Ascent {
                 ground_altitude_m,
                 max_altitude_m,
             } => {
+                baro_data.send((baro_measurement.temperature, altitude - *ground_altitude_m));
+
                 *max_altitude_m = max_altitude_m.max(altitude);
                 if altitude > DROGUE_CHUTE_MIN_AGL_M + *ground_altitude_m
                     && altitude < *max_altitude_m
@@ -231,12 +242,18 @@ async fn altimeter_task(
                 }
             }
             State::DrogueDescent { ground_altitude_m } => {
+                baro_data.send((baro_measurement.temperature, altitude - *ground_altitude_m));
+
                 if altitude < MAIN_CHUTE_AGL_M + *ground_altitude_m {
-                    state = State::MainDescent {};
+                    state = State::MainDescent {
+                        ground_altitude_m: *ground_altitude_m,
+                    };
                     red_led.set_low();
                 }
             }
-            State::MainDescent {} => {}
+            State::MainDescent { ground_altitude_m } => {
+                baro_data.send((baro_measurement.temperature, altitude - *ground_altitude_m));
+            }
         }
 
         ticker.next().await;
@@ -255,7 +272,7 @@ async fn send_altimeter_packet_task(
     pyro2_cont: Peri<'static, PE12>,
 
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    mut baro_data: watch::DynReceiver<'static, BaroData>,
+    mut baro_data: watch::DynReceiver<'static, (f32, f32)>,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);
@@ -291,16 +308,11 @@ async fn send_altimeter_packet_task(
     loop {
         let main_cont = pyro1_cont.is_low();
         let drogue_cont = pyro2_cont.is_low();
-        let baro_data = baro_data.try_get().unwrap();
+        let (temperature, altitude) = baro_data.try_get().unwrap();
         let battery_voltage = read_battery_voltage();
         info!(
-            "main cont: {}, drogue cont: {}, temp: {}C, pressure: {}Pa, altitude: {}m, batt v: {}V",
-            main_cont,
-            drogue_cont,
-            baro_data.temperature,
-            baro_data.pressure,
-            baro_data.altitude(),
-            battery_voltage
+            "main cont: {}, drogue cont: {}, temp: {}C, agl altitude: {}m, batt v: {}V",
+            main_cont, drogue_cont, temperature, altitude, battery_voltage
         );
 
         vlp_avionics_client.send(VLPDownlinkPacket::AltimeterTelemetry(
@@ -308,8 +320,8 @@ async fn send_altimeter_packet_task(
                 main_cont,
                 drogue_cont,
                 battery_voltage,
-                baro_data.temperature,
-                baro_data.altitude(),
+                temperature,
+                altitude,
             ),
         ));
         ticker.next().await;
