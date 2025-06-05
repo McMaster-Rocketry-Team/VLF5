@@ -29,7 +29,7 @@ use ms5607::MS5607;
 const DROGUE_CHUTE_MIN_AGL_M: f32 = 3000f32;
 
 // main chute will deploy once the rocket descents to this altitude
-const MAIN_CHUTE_AGL_M: f32 = 426f32;
+const MAIN_CHUTE_AGL_M: f32 = 457.2f32; // 1500ft
 
 /// This program is only intended for altimeter test. The logic here for deploying main and drogue
 /// chutes is different from the actual logic used in the rocket. This is because the actual logic
