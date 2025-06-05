@@ -19,7 +19,6 @@ use cortex_m::singleton;
 use defmt::info;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_stm32::peripherals::{DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD7, SPI1};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::Peri;
@@ -34,6 +33,12 @@ use embassy_stm32::{
     exti::ExtiInput,
     gpio::{Level, Output, Pull, Speed},
     peripherals::SPI3,
+};
+use embassy_stm32::{
+    gpio::Input,
+    peripherals::{
+        DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD13, PD7, PD8, PD9, PE12, PE13, PE9, SPI1,
+    },
 };
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, watch};
 use embassy_time::{Delay, Duration, Ticker, Timer};
@@ -66,8 +71,8 @@ const MAIN_CHUTE_AGL_M: f32 = 457.2f32; // 1500ft
 /// uses imu for more accurate measurements, which we can't recreate under the test conditions of
 /// the altimeter test (vacuum chamber only)
 ///
-/// This program sends current altitude and temperature to GCM over lora using `AltimeterTelemetryPacket`
-/// every second
+/// This program sends current continuity, altitude and temperature to GCM over lora using 
+/// `AltimeterTelemetryPacket` every second
 ///
 /// Blue led blinks means powered on
 /// Green led on means drogue deployed
@@ -102,6 +107,11 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(send_altimeter_packet_task(
         p.ADC1,
         p.PB0,
+        p.PE9,
+        p.PD8,
+        p.PD13,
+        p.PD9,
+        p.PE12,
         vlp_avionics_client,
         baro_data.dyn_receiver().unwrap(),
     ));
@@ -236,14 +246,21 @@ async fn altimeter_task(
 #[embassy_executor::task]
 async fn send_altimeter_packet_task(
     adc1: Peri<'static, ADC1>,
-    pb0: Peri<'static, PB0>,
+    bat_v_m: Peri<'static, PB0>,
+
+    pyro_n_en: Peri<'static, PE9>,
+    pyro1_ctrl: Peri<'static, PD8>,
+    pyro1_cont: Peri<'static, PD13>,
+    pyro2_ctrl: Peri<'static, PD9>,
+    pyro2_cont: Peri<'static, PE12>,
+
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     mut baro_data: watch::DynReceiver<'static, BaroData>,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);
     adc.set_sample_time(adc::SampleTime::CYCLES810_5);
-    let mut bat_v_m = pb0.degrade_adc();
+    let mut bat_v_m = bat_v_m.degrade_adc();
     // let mut vrefint_channel = adc.enable_vrefint();
 
     let mut read_battery_voltage = || {
@@ -254,20 +271,32 @@ async fn send_altimeter_packet_task(
         let vrefint_raw = 1502u16;
         let ratio = vrefint / vrefint_raw as f32;
 
-        let pb0_raw = adc.blocking_read(&mut bat_v_m);
-        let pb0 = pb0_raw as f32 * ratio;
-        let batt_v = pb0 / 0.161;
-        batt_v
+        let bat_v_raw = adc.blocking_read(&mut bat_v_m);
+        bat_v_raw as f32 * ratio / 0.161
     };
+
+    // https://www.notion.so/mcmasterrocketry/VLF5-1c0d3a029ea580f882dfee3f98b0b897?pvs=4#1ebd3a029ea5807e8651fe9f530ff869
+    let _pyro_n_en = Output::new(pyro_n_en, Level::Low, Speed::Low);
+
+    // high: enable pyro
+    let _pyro1_ctrl = Output::new(pyro1_ctrl, Level::Low, Speed::Low);
+    let pyro1_cont = Input::new(pyro1_cont, Pull::Up);
+
+    let _pyro2_ctrl = Output::new(pyro2_ctrl, Level::Low, Speed::Low);
+    let pyro2_cont = Input::new(pyro2_cont, Pull::Up);
 
     baro_data.get().await;
 
     let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
+        let main_cont = pyro1_cont.is_low();
+        let drogue_cont = pyro2_cont.is_low();
         let baro_data = baro_data.try_get().unwrap();
         let battery_voltage = read_battery_voltage();
         info!(
-            "temp: {}C, pressure: {}Pa, altitude: {}m, batt v: {}V",
+            "main cont: {}, drogue cont: {}, temp: {}C, pressure: {}Pa, altitude: {}m, batt v: {}V",
+            main_cont,
+            drogue_cont,
             baro_data.temperature,
             baro_data.pressure,
             baro_data.altitude(),
@@ -276,6 +305,8 @@ async fn send_altimeter_packet_task(
 
         vlp_avionics_client.send(VLPDownlinkPacket::AltimeterTelemetry(
             AltimeterTelemetryPacket::new(
+                main_cont,
+                drogue_cont,
                 battery_voltage,
                 baro_data.temperature,
                 baro_data.altitude(),
