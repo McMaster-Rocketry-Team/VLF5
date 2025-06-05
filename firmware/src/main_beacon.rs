@@ -7,6 +7,8 @@ mod e22;
 mod time;
 mod utils;
 
+use core::mem;
+
 use crate::clock_config::vlf5_clock_config;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
@@ -50,13 +52,17 @@ use time::Clock;
 const VLP_KEY: [u8; 32] = [42u8; 32];
 
 /// This program acts as a GPS beacon, sends the current position to GCM over lora
-/// using `GPSBeaconPacket` every 2 seconds
+/// using `GPSBeaconPacket` every second
 ///
 /// Blue led blinks when gps no fix
 /// Green led blinks when gps fix
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(vlf5_clock_config());
+
+    // PS: PA3 (low: force pwm)
+    let ps = Output::new(p.PA3, Level::Low, Speed::Low);
+    mem::forget(ps); // forget ps pin so it does not get reset to Hi-Z when main function finishes
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let gps_data =
@@ -69,6 +75,7 @@ async fn main(spawner: Spawner) {
     ));
 
     spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.dyn_sender()));
+    
     spawner.must_spawn(send_beacon_packet_task(
         p.ADC1,
         p.PB0,
@@ -177,7 +184,7 @@ async fn send_beacon_packet_task(
 
     gps_data.get().await;
 
-    let mut ticker = Ticker::every(Duration::from_millis(2000));
+    let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
         let gps_data = gps_data.try_get().unwrap();
         let battery_voltage = read_battery_voltage();

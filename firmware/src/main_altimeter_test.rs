@@ -3,11 +3,14 @@
 #![no_main]
 
 mod clock_config;
+mod e22;
 mod ms5607;
 mod time;
 mod utils;
 
-use crate::clock_config::vlf5_clock_config;
+use core::mem;
+
+use crate::{clock_config::vlf5_clock_config, e22::E22};
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
@@ -16,14 +19,41 @@ use cortex_m::singleton;
 use defmt::info;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::peripherals::PA2;
+use embassy_stm32::peripherals::{DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD7, SPI1};
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::Peri;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_stm32::{
+    adc::{self, Adc, AdcChannel as _},
+    peripherals::{
+        ADC1, DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA7, PA8, PB0, PB1, PB3, PB4, PC7, PD0, PD1, PD4,
+        PD5, PD6,
+    },
+};
+use embassy_stm32::{
+    exti::ExtiInput,
+    gpio::{Level, Output, Pull, Speed},
+    peripherals::SPI3,
+};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, watch};
+use embassy_time::{Delay, Duration, Ticker, Timer};
+use firmware_common_new::{
+    readings::BaroData,
+    vlp::{
+        client::VLPAvionics,
+        lora::LoraPhy,
+        lora_config::LoraConfig,
+        packets::{altimeter_telemetry::AltimeterTelemetryPacket, VLPDownlinkPacket},
+    },
+};
+use lora_phy::{
+    iv::GenericSx126xInterfaceVariant,
+    sx126x::{self, Sx126x},
+    LoRa,
+};
 use ms5607::MS5607;
+
+const VLP_KEY: [u8; 32] = [42u8; 32];
 
 /// drogue must deploy above this altitude
 const DROGUE_CHUTE_MIN_AGL_M: f32 = 3000f32;
@@ -36,6 +66,9 @@ const MAIN_CHUTE_AGL_M: f32 = 457.2f32; // 1500ft
 /// uses imu for more accurate measurements, which we can't recreate under the test conditions of
 /// the altimeter test (vacuum chamber only)
 ///
+/// This program sends current altitude and temperature to GCM over lora using `AltimeterTelemetryPacket`
+/// every second
+///
 /// Blue led blinks means powered on
 /// Green led on means drogue deployed
 /// Red led on means main deployed
@@ -44,27 +77,94 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(vlf5_clock_config());
 
     // PS: PA3 (low: force pwm)
-    let mut _ps = Output::new(p.PA3, Level::Low, Speed::Low);
-    let mut green_led = Output::new(p.PA7, Level::High, Speed::Low);
-    let mut red_led = Output::new(p.PB1, Level::High, Speed::Low);
+    let ps = Output::new(p.PA3, Level::Low, Speed::Low);
+    mem::forget(ps); // forget ps pin so it does not get reset to Hi-Z when main function finishes
+
+    let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
+    let baro_data =
+        singleton!(: watch::Watch<NoopRawMutex, BaroData, 2> = watch::Watch::new()).unwrap();
+
+    spawner.must_spawn(power_led_task(p.PA2));
+
+    spawner.must_spawn(altimeter_task(
+        p.SPI1,
+        p.PA5,
+        p.PD7,
+        p.PA6,
+        p.PC6,
+        p.DMA1_CH4,
+        p.DMA1_CH5,
+        p.PA7,
+        p.PB1,
+        baro_data.dyn_sender(),
+    ));
+
+    spawner.must_spawn(send_altimeter_packet_task(
+        p.ADC1,
+        p.PB0,
+        vlp_avionics_client,
+        baro_data.dyn_receiver().unwrap(),
+    ));
+
+    spawner.must_spawn(lora_daemon_task(
+        vlp_avionics_client,
+        p.SPI3,
+        p.PB3,
+        p.PD6,
+        p.PB4,
+        p.PC7,
+        p.PD5,
+        p.PD4,
+        p.EXTI4,
+        p.PD1,
+        p.EXTI1,
+        p.PD0,
+        p.PA8,
+        p.DMA1_CH3,
+        p.DMA1_CH2,
+    ));
+}
+
+#[embassy_executor::task]
+async fn power_led_task(blue_led: Peri<'static, PA2>) {
+    let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
+
+    let mut ticker = Ticker::every(Duration::from_millis(1000));
+    loop {
+        blue_led.set_low();
+        Timer::after_millis(50).await;
+        blue_led.set_high();
+        ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn altimeter_task(
+    spi1: Peri<'static, SPI1>,
+    sck: Peri<'static, PA5>,
+    mosi: Peri<'static, PD7>,
+    miso: Peri<'static, PA6>,
+    cs: Peri<'static, PC6>,
+    tx_dma: Peri<'static, DMA1_CH4>,
+    rx_dma: Peri<'static, DMA1_CH5>,
+    green_led: Peri<'static, PA7>,
+    red_led: Peri<'static, PB1>,
+    baro_data: watch::DynSender<'static, BaroData>,
+) {
+    let mut green_led = Output::new(green_led, Level::High, Speed::Low);
+    let mut red_led = Output::new(red_led, Level::High, Speed::Low);
 
     // baro
     let mut spi_config = SpiConfig::default();
     spi_config.frequency = Hertz(250_000);
-    let spi1 = Mutex::<NoopRawMutex, _>::new(Spi::new(
-        p.SPI1, p.PA5, p.PD7, p.PA6, p.DMA1_CH4, p.DMA1_CH5, spi_config,
-    ));
-    let baro_spi_device = SpiDeviceWithConfig::new(
-        &spi1,
-        Output::new(p.PC6, Level::High, Speed::High),
-        spi_config,
-    );
+    let spi1 =
+        Mutex::<NoopRawMutex, _>::new(Spi::new(spi1, sck, mosi, miso, tx_dma, rx_dma, spi_config));
+    let baro_spi_device =
+        SpiDeviceWithConfig::new(&spi1, Output::new(cs, Level::High, Speed::High), spi_config);
     let baro_buffer = singleton!(: [u8; 8] = [0; 8]).unwrap();
     let mut baro = MS5607::new(baro_spi_device, baro_buffer);
     baro.reset().await.unwrap();
     info!("Barometer initialized");
-
-    spawner.must_spawn(power_led_task(p.PA2));
 
     let sampling_hz = 200;
     let cut_off_freq = (1).hz();
@@ -94,8 +194,10 @@ async fn main(spawner: Spawner) {
     }
     let mut state = State::Init;
     loop {
-        let altitude = baro.read().await.unwrap().data.altitude();
+        let baro_measurement = baro.read().await.unwrap();
+        let altitude = baro_measurement.data.altitude();
         let altitude = lowpass.run(altitude);
+        baro_data.send(baro_measurement.data);
 
         match &mut state {
             State::Init => {
@@ -109,7 +211,9 @@ async fn main(spawner: Spawner) {
                 max_altitude_m,
             } => {
                 *max_altitude_m = max_altitude_m.max(altitude);
-                if altitude > DROGUE_CHUTE_MIN_AGL_M + *ground_altitude_m && altitude < *max_altitude_m {
+                if altitude > DROGUE_CHUTE_MIN_AGL_M + *ground_altitude_m
+                    && altitude < *max_altitude_m
+                {
                     state = State::DrogueDescent {
                         ground_altitude_m: *ground_altitude_m,
                     };
@@ -130,14 +234,109 @@ async fn main(spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn power_led_task(blue_led: Peri<'static, PA2>) {
-    let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
+async fn send_altimeter_packet_task(
+    adc1: Peri<'static, ADC1>,
+    pb0: Peri<'static, PB0>,
+    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
+    mut baro_data: watch::DynReceiver<'static, BaroData>,
+) {
+    let mut adc = Adc::new(adc1);
+    adc.set_resolution(adc::Resolution::BITS12V);
+    adc.set_sample_time(adc::SampleTime::CYCLES810_5);
+    let mut bat_v_m = pb0.degrade_adc();
+    // let mut vrefint_channel = adc.enable_vrefint();
+
+    let mut read_battery_voltage = || {
+        let vrefint = 1.21f32;
+        // for some reason reading vrefint gives lower than expected value,
+        // using a hard coded value instead
+        // let vrefint_raw = adc.blocking_read(&mut vrefint_channel);
+        let vrefint_raw = 1502u16;
+        let ratio = vrefint / vrefint_raw as f32;
+
+        let pb0_raw = adc.blocking_read(&mut bat_v_m);
+        let pb0 = pb0_raw as f32 * ratio;
+        let batt_v = pb0 / 0.161;
+        batt_v
+    };
+
+    baro_data.get().await;
 
     let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
-        blue_led.set_low();
-        Timer::after_millis(50).await;
-        blue_led.set_high();
+        let baro_data = baro_data.try_get().unwrap();
+        let battery_voltage = read_battery_voltage();
+        info!(
+            "temp: {}C, pressure: {}Pa, altitude: {}m, batt v: {}V",
+            baro_data.temperature,
+            baro_data.pressure,
+            baro_data.altitude(),
+            battery_voltage
+        );
+
+        vlp_avionics_client.send(VLPDownlinkPacket::AltimeterTelemetry(
+            AltimeterTelemetryPacket::new(
+                battery_voltage,
+                baro_data.temperature,
+                baro_data.altitude(),
+            ),
+        ));
         ticker.next().await;
     }
+}
+
+#[embassy_executor::task]
+async fn lora_daemon_task(
+    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
+    spi3: Peri<'static, SPI3>,
+    sck: Peri<'static, PB3>,
+    mosi: Peri<'static, PD6>,
+    miso: Peri<'static, PB4>,
+    cs: Peri<'static, PC7>,
+    reset: Peri<'static, PD5>,
+    dio1: Peri<'static, PD4>,
+    dio1_exti: Peri<'static, EXTI4>,
+    busy: Peri<'static, PD1>,
+    busy_exti: Peri<'static, EXTI1>,
+    txen: Peri<'static, PD0>,
+    rxen: Peri<'static, PA8>,
+    tx_dma: Peri<'static, DMA1_CH3>,
+    rx_dma: Peri<'static, DMA1_CH2>,
+) {
+    let mut spi_config = SpiConfig::default();
+    spi_config.frequency = Hertz(250_000);
+    let spi3 =
+        Mutex::<NoopRawMutex, _>::new(Spi::new(spi3, sck, mosi, miso, tx_dma, rx_dma, spi_config));
+    let lora_spi_device =
+        SpiDeviceWithConfig::new(&spi3, Output::new(cs, Level::High, Speed::High), spi_config);
+
+    let config = sx126x::Config {
+        chip: E22,
+        tcxo_ctrl: None,
+        use_dcdc: false,
+        rx_boost: true,
+    };
+    let iv = GenericSx126xInterfaceVariant::new(
+        Output::new(reset, Level::High, Speed::Low),
+        ExtiInput::new(dio1, dio1_exti, Pull::Down),
+        ExtiInput::new(busy, busy_exti, Pull::Down),
+        Some(Output::new(rxen, Level::High, Speed::High)),
+        Some(Output::new(txen, Level::High, Speed::High)),
+    )
+    .unwrap();
+    let sx1262 = Sx126x::new(lora_spi_device, iv, config);
+    let mut lora = LoRa::new(sx1262, false, Delay).await.unwrap();
+    info!("LoRa initialized");
+    let mut lora = LoraPhy::new(
+        &mut lora,
+        LoraConfig {
+            frequency: 915_100_000,
+            sf: 12,
+            bw: 250000,
+            cr: 8,
+            power: 22,
+        },
+    );
+    let mut daemon = vlp_avionics_client.daemon(&mut lora, &VLP_KEY);
+    daemon.run().await;
 }
