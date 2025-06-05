@@ -47,6 +47,8 @@ use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 use time::Clock;
 
+const VLP_KEY: [u8; 32] = [42u8; 32];
+
 /// This program acts as a GPS beacon, sends the current position to GCM over lora
 /// using `GPSBeaconPacket` every 2 seconds
 ///
@@ -236,6 +238,7 @@ async fn lora_daemon_task(
     .unwrap();
     let sx1262 = Sx126x::new(lora_spi_device, iv, config);
     let mut lora = LoRa::new(sx1262, false, Delay).await.unwrap();
+    info!("LoRa initialized");
     let mut lora = LoraPhy::new(
         &mut lora,
         LoraConfig {
@@ -246,7 +249,6 @@ async fn lora_daemon_task(
             power: 22,
         },
     );
-    let key = [0u8; 32];
-    let mut daemon = vlp_avionics_client.daemon(&mut lora, &key);
+    let mut daemon = vlp_avionics_client.daemon(&mut lora, &VLP_KEY);
     daemon.run().await;
 }

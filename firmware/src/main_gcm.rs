@@ -2,27 +2,30 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod clock_config;
 mod e22;
 mod time;
 mod utils;
 
-use {defmt_rtt_pipe::PIPE, panic_probe as _};
+use crate::clock_config::vlf5_clock_config;
 
+use {defmt_rtt_pipe as _, panic_probe as _};
+
+use cortex_m::singleton;
 use defmt::info;
 use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
 use embassy_stm32::peripherals::{
-    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA7, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
+    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
-use embassy_stm32::time::{mhz, Hertz};
+use embassy_stm32::time::Hertz;
 use embassy_stm32::Peri;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Delay, Timer};
+use embassy_time::{Delay, Duration, Ticker, Timer};
 use firmware_common_new::vlp::client::VLPGroundStation;
 use firmware_common_new::vlp::lora::LoraPhy;
 use firmware_common_new::vlp::lora_config::LoraConfig;
@@ -30,102 +33,65 @@ use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 
+const VLP_KEY: [u8; 32] = [42u8; 32];
+
+/// This program acts as a simple ground station, it simply logs everything it receives from lora to the console.
+/// 
+/// Blue led blinks means powered on
+/// Every time a valid lora packet is received, green led blinks once
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let config = {
-        use embassy_stm32::rcc::mux::*;
-        use embassy_stm32::rcc::*;
-        let mut config = embassy_stm32::Config::default();
-        let rcc = &mut config.rcc;
+    let p = embassy_stm32::init(vlf5_clock_config());
 
-        rcc.hsi = None;
-        rcc.hse = Some(Hse {
-            freq: mhz(16),
-            mode: HseMode::Oscillator,
-        });
-        rcc.csi = false;
-
-        rcc.hsi48 = None;
-        rcc.sys = Sysclk::PLL1_P;
-
-        rcc.pll1 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL60,
-            divp: Some(PllDiv::DIV2),
-            divq: Some(PllDiv::DIV20),
-            divr: None,
-        });
-        rcc.pll2 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL10,
-            divp: Some(PllDiv::DIV4),
-            divq: Some(PllDiv::DIV4),
-            divr: Some(PllDiv::DIV4),
-        });
-        rcc.pll3 = Some(Pll {
-            source: PllSource::HSE,
-            prediv: PllPreDiv::DIV1,
-            mul: PllMul::MUL10,
-            divp: None,
-            divq: None,
-            divr: Some(PllDiv::DIV8),
-        });
-
-        rcc.d1c_pre = AHBPrescaler::DIV1;
-        rcc.ahb_pre = AHBPrescaler::DIV2;
-        rcc.apb1_pre = APBPrescaler::DIV2;
-        rcc.apb2_pre = APBPrescaler::DIV2;
-        rcc.apb3_pre = APBPrescaler::DIV2;
-        rcc.apb4_pre = APBPrescaler::DIV2;
-
-        rcc.timer_prescaler = TimerPrescaler::DefaultX2;
-        rcc.voltage_scale = VoltageScale::Scale0;
-
-        rcc.ls = LsConfig::default_lsi();
-        rcc.mux.spi123sel = Saisel::PLL2_P;
-        rcc.mux.usart16910sel = Usart16910sel::PLL2_Q;
-        rcc.mux.rngsel = Rngsel::PLL1_Q;
-        rcc.mux.i2c1235sel = I2c1235sel::PLL3_R;
-        rcc.mux.spi45sel = Spi45sel::PLL2_Q;
-        rcc.mux.adcsel = Adcsel::PLL2_P;
-        rcc.mux.usbsel = Usbsel::PLL1_Q;
-        rcc.mux.fdcansel = Fdcansel::PLL2_Q;
-        rcc.mux.sdmmcsel = Sdmmcsel::PLL2_R;
-
-        config
-    };
-    let p = embassy_stm32::init(config);
-
-    // let mut red_led = Output::new(p.PB1, Level::High, Speed::Low);
+    let vlp_gcm_client =
+        singleton!(: VLPGroundStation<NoopRawMutex> = VLPGroundStation::new()).unwrap();
 
     spawner.must_spawn(power_led_task(p.PA2));
 
-    spawner.must_spawn(lora_task(
-        p.PA7, p.SPI3, p.PB3, p.PD6, p.PB4, p.PC7, p.PD5, p.PD4, p.EXTI4, p.PD1, p.EXTI1, p.PD0,
-        p.PA8, p.DMA1_CH3, p.DMA1_CH2,
+    spawner.must_spawn(lora_daemon_task(
+        vlp_gcm_client,
+        p.SPI3,
+        p.PB3,
+        p.PD6,
+        p.PB4,
+        p.PC7,
+        p.PD5,
+        p.PD4,
+        p.EXTI4,
+        p.PD1,
+        p.EXTI1,
+        p.PD0,
+        p.PA8,
+        p.DMA1_CH3,
+        p.DMA1_CH2,
     ));
+
+    let mut green_led = Output::new(p.PA7, Level::High, Speed::Low);
+    loop {
+        let packet = vlp_gcm_client.receive().await;
+        info!("Received packet: {:?}", packet);
+        green_led.set_low();
+        Timer::after_millis(50).await;
+        green_led.set_high();
+    }
 }
 
 #[embassy_executor::task]
 async fn power_led_task(blue_led: Peri<'static, PA2>) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
 
+    let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
         blue_led.set_low();
         Timer::after_millis(50).await;
         blue_led.set_high();
-        Timer::after_millis(950).await;
-        info!("Hello");
-        let pipe_len = PIPE.len();
-        info!("pipe length: {}", pipe_len);
+        ticker.next().await;
     }
 }
 
 #[embassy_executor::task]
-async fn lora_task(
-    green_led: Peri<'static, PA7>,
+async fn lora_daemon_task(
+    vlp_gcm_client: &'static VLPGroundStation<NoopRawMutex>,
     spi3: Peri<'static, SPI3>,
     sck: Peri<'static, PB3>,
     mosi: Peri<'static, PD6>,
@@ -141,8 +107,6 @@ async fn lora_task(
     tx_dma: Peri<'static, DMA1_CH3>,
     rx_dma: Peri<'static, DMA1_CH2>,
 ) {
-    let mut green_led = Output::new(green_led, Level::High, Speed::Low);
-
     let mut spi_config = SpiConfig::default();
     spi_config.frequency = Hertz(250_000);
     let spi3 =
@@ -177,20 +141,6 @@ async fn lora_task(
             power: 22,
         },
     );
-    let gcm_client = VLPGroundStation::<NoopRawMutex>::new();
-    let key = [0u8; 32];
-    let mut daemon = gcm_client.daemon(&mut lora, &key);
-    let daemon_fut = daemon.run();
-
-    let receive_fut = async {
-        loop {
-            let packet = gcm_client.receive().await;
-            info!("Received packet: {:?}", packet);
-            green_led.set_low();
-            Timer::after_millis(50).await;
-            green_led.set_high();
-        }
-    };
-
-    join(daemon_fut, receive_fut).await;
+    let mut daemon = vlp_gcm_client.daemon(&mut lora, &VLP_KEY);
+    daemon.run().await;
 }
