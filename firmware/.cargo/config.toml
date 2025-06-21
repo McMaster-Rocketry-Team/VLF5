@@ -1,5 +1,6 @@
 [target.thumbv7em-none-eabihf]
 runner = 'rocket-cli download STM32H743VIHx ../../Rust_Monorepo/secret.key void-lake'
+# runner = 'probe-rs run --chip STM32H743VIHx --connect-under-reset'
 rustflags = [
   "-C", "link-arg=--nmagic",
   "-C", "link-arg=-Tlink.x",
