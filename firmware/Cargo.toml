@@ -110,6 +110,12 @@ path = "src/can_main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "blinky"
+path = "src/main_blinky.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true
