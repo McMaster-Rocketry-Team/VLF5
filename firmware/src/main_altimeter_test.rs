@@ -36,18 +36,16 @@ use embassy_stm32::{
 };
 use embassy_stm32::{
     gpio::Input,
-    peripherals::{
-        DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD13, PD7, PD8, PD9, PE12, PE9, SPI1,
-    },
+    peripherals::{DMA1_CH4, DMA1_CH5, PA2, PA5, PA6, PC6, PD13, PD7, PD8, PD9, PE12, PE9, SPI1},
 };
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex, watch};
 use embassy_time::{Delay, Duration, Ticker, Timer};
 use firmware_common_new::vlp::{
-        client::VLPAvionics,
-        lora::LoraPhy,
-        lora_config::LoraConfig,
-        packets::{altimeter_telemetry::AltimeterTelemetryPacket, VLPDownlinkPacket},
-    };
+    client::VLPAvionics,
+    lora::LoraPhy,
+    lora_config::LoraConfig,
+    packets::{altimeter_telemetry::AltimeterTelemetryPacket, VLPDownlinkPacket},
+};
 use lora_phy::{
     iv::GenericSx126xInterfaceVariant,
     sx126x::{self, Sx126x},
@@ -99,7 +97,7 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH5,
         p.PA7,
         p.PB1,
-        baro_data.dyn_sender(),
+        baro_data.sender(),
     ));
 
     spawner.must_spawn(send_altimeter_packet_task(
@@ -111,7 +109,7 @@ async fn main(spawner: Spawner) {
         p.PD9,
         p.PE12,
         vlp_avionics_client,
-        baro_data.dyn_receiver().unwrap(),
+        baro_data.receiver().unwrap(),
     ));
 
     spawner.must_spawn(lora_daemon_task(
@@ -157,7 +155,7 @@ async fn altimeter_task(
     rx_dma: Peri<'static, DMA1_CH5>,
     green_led: Peri<'static, PA7>,
     red_led: Peri<'static, PB1>,
-    baro_data: watch::DynSender<'static, (f32, f32)>,
+    baro_data: watch::Sender<'static, NoopRawMutex, (f32, f32), 1>,
 ) {
     let mut green_led = Output::new(green_led, Level::High, Speed::Low);
     let mut red_led = Output::new(red_led, Level::High, Speed::Low);
@@ -208,7 +206,7 @@ async fn altimeter_task(
     loop {
         let baro_measurement = baro.read().await.unwrap().data;
         let altitude = baro_measurement.altitude();
-        let altitude = lowpass.run(altitude);
+        // let altitude = lowpass.run(altitude);
 
         match &mut state {
             State::Init { count } => {
@@ -216,9 +214,10 @@ async fn altimeter_task(
                     // let low pass filter do its thing
                     *count += 1;
                 } else {
+                    info!("ground altitude: {}m", altitude);
                     state = State::Ascent {
                         ground_altitude_m: altitude,
-                        max_altitude_m: altitude,
+                        max_altitude_m: 0.0,
                     }
                 }
             }
@@ -226,12 +225,16 @@ async fn altimeter_task(
                 ground_altitude_m,
                 max_altitude_m,
             } => {
-                baro_data.send((baro_measurement.temperature, altitude - *ground_altitude_m));
+                let altitude_agl = altitude - *ground_altitude_m;
+                // info!(
+                //     "altitude agl: {}m, ground altitude: {}m",
+                //     altitude_agl, *ground_altitude_m
+                // );
 
-                *max_altitude_m = max_altitude_m.max(altitude);
-                if altitude > DROGUE_CHUTE_MIN_AGL_M + *ground_altitude_m
-                    && altitude < *max_altitude_m
-                {
+                baro_data.send((baro_measurement.temperature, altitude_agl));
+
+                *max_altitude_m = max_altitude_m.max(altitude_agl);
+                if altitude_agl > DROGUE_CHUTE_MIN_AGL_M && altitude_agl < *max_altitude_m - 10.0 {
                     state = State::DrogueDescent {
                         ground_altitude_m: *ground_altitude_m,
                     };
@@ -239,9 +242,11 @@ async fn altimeter_task(
                 }
             }
             State::DrogueDescent { ground_altitude_m } => {
-                baro_data.send((baro_measurement.temperature, altitude - *ground_altitude_m));
+                let altitude_agl = altitude - *ground_altitude_m;
 
-                if altitude < MAIN_CHUTE_AGL_M + *ground_altitude_m {
+                baro_data.send((baro_measurement.temperature, altitude_agl));
+
+                if altitude_agl < MAIN_CHUTE_AGL_M {
                     state = State::MainDescent {
                         ground_altitude_m: *ground_altitude_m,
                     };
@@ -249,8 +254,11 @@ async fn altimeter_task(
                 }
             }
             State::MainDescent { ground_altitude_m } => {
-                baro_data.send((baro_measurement.temperature, altitude - *ground_altitude_m));
+                let altitude_agl = altitude - *ground_altitude_m;
+
+                baro_data.send((baro_measurement.temperature, altitude_agl));
             }
+            _ => {}
         }
 
         ticker.next().await;
@@ -269,7 +277,7 @@ async fn send_altimeter_packet_task(
     pyro2_cont: Peri<'static, PE12>,
 
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    mut baro_data: watch::DynReceiver<'static, (f32, f32)>,
+    mut baro_data: watch::Receiver<'static, NoopRawMutex, (f32, f32), 1>,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);

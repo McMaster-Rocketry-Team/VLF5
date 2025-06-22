@@ -71,16 +71,16 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(power_led_task(
         p.PA2,
         p.PA7,
-        gps_data.dyn_receiver().unwrap(),
+        gps_data.receiver().unwrap(),
     ));
 
-    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.dyn_sender()));
+    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.sender()));
     
     spawner.must_spawn(send_beacon_packet_task(
         p.ADC1,
         p.PB0,
         vlp_avionics_client,
-        gps_data.dyn_receiver().unwrap(),
+        gps_data.receiver().unwrap(),
     ));
 
     spawner.must_spawn(lora_daemon_task(
@@ -106,7 +106,7 @@ async fn main(spawner: Spawner) {
 async fn power_led_task(
     blue_led: Peri<'static, PA2>,
     green_led: Peri<'static, PA7>,
-    mut gps_data: watch::DynReceiver<'static, GPSData>,
+    mut gps_data: watch::Receiver<'static, NoopRawMutex, GPSData, 2>,
 ) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
     let mut green_led = Output::new(green_led, Level::High, Speed::Low);
@@ -135,7 +135,7 @@ async fn gps_task(
     usart1: Peri<'static, USART1>,
     rx: Peri<'static, PA10>,
     tx: Peri<'static, PB14>,
-    gps_data_sender: watch::DynSender<'static, GPSData>,
+    gps_data_sender: watch::Sender<'static, NoopRawMutex, GPSData, 2>,
 ) {
     bind_interrupts!(struct Irqs {
         USART1 => usart::BufferedInterruptHandler<USART1>;
@@ -150,6 +150,7 @@ async fn gps_task(
 
     run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
         let gps_data = gps_data.data;
+        info!("{:?}", gps_data);
         gps_data_sender.send(gps_data);
     })
     .await;
@@ -160,7 +161,7 @@ async fn send_beacon_packet_task(
     adc1: Peri<'static, ADC1>,
     pb0: Peri<'static, PB0>,
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    mut gps_data: watch::DynReceiver<'static, GPSData>,
+    mut gps_data: watch::Receiver<'static, NoopRawMutex, GPSData, 2>,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);
