@@ -2,14 +2,20 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 
+mod buzzer_task;
 mod clock_config;
 mod e22;
+mod pyro_task;
 mod time;
 mod utils;
 
 use core::mem;
 
-use crate::clock_config::vlf5_clock_config;
+use crate::{
+    buzzer_task::{buzzer_task, BuzzerTone},
+    clock_config::vlf5_clock_config,
+    pyro_task::{pyro_task, ContinuityUpdate},
+};
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
@@ -35,15 +41,21 @@ use embassy_stm32::{
     time::Hertz,
     usart::{self, BufferedUart, Config as UartConfig},
 };
-use embassy_sync::watch;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_sync::{
+    blocking_mutex::raw::NoopRawMutex,
+    mutex::Mutex,
+    pubsub::{self, PubSubBehavior},
+};
+use embassy_sync::{signal, watch};
 use embassy_time::{Delay, Duration, Ticker, Timer};
-use firmware_common_new::gps::{run_gps_uart_receiver, GPSData};
-use firmware_common_new::vlp::client::VLPAvionics;
 use firmware_common_new::vlp::lora::LoraPhy;
 use firmware_common_new::vlp::lora_config::LoraConfig;
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
-use firmware_common_new::vlp::packets::VLPDownlinkPacket;
+use firmware_common_new::vlp::{client::VLPAvionics, packets::VLPUplinkPacket};
+use firmware_common_new::{
+    gps::{run_gps_uart_receiver, GPSData},
+    vlp::packets::fire_pyro::PyroSelect,
+};
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
@@ -67,20 +79,38 @@ async fn main(spawner: Spawner) {
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let gps_data =
         singleton!(: watch::Watch<NoopRawMutex, GPSData, 2> = watch::Watch::new()).unwrap();
+    let continuity_update =
+        singleton!(: watch::Watch<NoopRawMutex, ContinuityUpdate, 1> = watch::Watch::new())
+            .unwrap();
+    let fire_signal =
+        singleton!(: signal::Signal<NoopRawMutex, PyroSelect> = signal::Signal::new()).unwrap();
+    let tone_queue =
+        singleton!(: pubsub::PubSubChannel<NoopRawMutex, BuzzerTone, 10, 1, 2> = pubsub::PubSubChannel::new()).unwrap();
+    spawner.must_spawn(power_led_task(p.PA2, p.PA7, gps_data.receiver().unwrap()));
 
-    spawner.must_spawn(power_led_task(
-        p.PA2,
-        p.PA7,
-        gps_data.receiver().unwrap(),
+    spawner.must_spawn(pyro_task(
+        p.PE9,
+        p.PE13,
+        p.EXTI13,
+        p.PD8,
+        p.PD13,
+        p.PD9,
+        p.PE12,
+        p.EXTI12,
+        continuity_update.dyn_sender(),
+        fire_signal,
     ));
 
+    spawner.must_spawn(buzzer_task(p.PC15, tone_queue.dyn_subscriber().unwrap()));
+
     spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.sender()));
-    
+
     spawner.must_spawn(send_beacon_packet_task(
         p.ADC1,
         p.PB0,
         vlp_avionics_client,
         gps_data.receiver().unwrap(),
+        continuity_update.receiver().unwrap(),
     ));
 
     spawner.must_spawn(lora_daemon_task(
@@ -100,6 +130,10 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH3,
         p.DMA1_CH2,
     ));
+
+    tone_queue.publish_immediate(BuzzerTone(2000, 250, 250));
+    tone_queue.publish_immediate(BuzzerTone(3000, 250, 250));
+    tone_queue.publish_immediate(BuzzerTone(4000, 250, 250));
 }
 
 #[embassy_executor::task]
@@ -162,6 +196,7 @@ async fn send_beacon_packet_task(
     pb0: Peri<'static, PB0>,
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     mut gps_data: watch::Receiver<'static, NoopRawMutex, GPSData, 2>,
+    mut continuity_update: watch::Receiver<'static, NoopRawMutex, ContinuityUpdate, 1>,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);
@@ -184,24 +219,49 @@ async fn send_beacon_packet_task(
     };
 
     gps_data.get().await;
-
+    continuity_update.get().await;
     let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
         let gps_data = gps_data.try_get().unwrap();
+        let continuity_update = continuity_update.try_get().unwrap();
         let battery_voltage = read_battery_voltage();
-        info!(
-            "satellites: {}, fixed: {}, batt v: {}V",
-            gps_data.num_of_fix_satellites,
-            gps_data.lat_lon.is_some(),
-            battery_voltage
-        );
 
-        vlp_avionics_client.send(VLPDownlinkPacket::GPSBeacon(GPSBeaconPacket::new(
+        let packet = GPSBeaconPacket::new(
             gps_data.lat_lon,
             gps_data.num_of_fix_satellites,
             battery_voltage,
-        )));
+            continuity_update.pyro1_continuity,
+            continuity_update.pyro1_fire,
+            continuity_update.pyro2_continuity,
+            continuity_update.pyro2_fire,
+            continuity_update.short_circuit,
+        );
+        info!("TX: {}", packet);
+
+        vlp_avionics_client.send(packet.into());
         ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn receive_vlp_task(
+    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
+    fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
+    mut tone_queue: pubsub::DynPublisher<'static, BuzzerTone>,
+) {
+    loop {
+        let (packet, _) = vlp_avionics_client.receive().await;
+        info!("RX: {}", packet);
+
+        match packet {
+            VLPUplinkPacket::FirePyro(fire_pyro_packet) => {
+                tone_queue.publish(BuzzerTone(3000, 500, 500)).await;
+                tone_queue.publish(BuzzerTone(3000, 500, 500)).await;
+                tone_queue.publish(BuzzerTone(3000, 500, 500)).await;
+                fire_signal.signal(fire_pyro_packet.pyro);
+            }
+            _ => {}
+        }
     }
 }
 

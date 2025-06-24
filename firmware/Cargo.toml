@@ -81,6 +81,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "ground_test"
+path = "src/main_ground_test.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "sd_test"
 path = "src/sd_test.rs"
 test = false
