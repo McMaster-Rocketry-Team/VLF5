@@ -1,13 +1,18 @@
 // only use std during testing
 #![cfg_attr(not(test), no_std)]
 #![no_main]
+#![feature(impl_trait_in_assoc_type)]
 
+mod tasks;
 mod clock_config;
 mod e22;
 mod time;
 mod utils;
 
-use crate::clock_config::vlf5_clock_config;
+use crate::{
+    tasks::buzzer_task::{buzzer_task, BuzzerTone},
+    clock_config::vlf5_clock_config,
+};
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
@@ -24,7 +29,11 @@ use embassy_stm32::peripherals::{
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::Peri;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
+use embassy_sync::{
+    blocking_mutex::raw::NoopRawMutex,
+    mutex::Mutex,
+    pubsub::{self, PubSubBehavior as _},
+};
 use embassy_time::{Delay, Duration, Ticker, Timer};
 use firmware_common_new::vlp::client::VLPGroundStation;
 use firmware_common_new::vlp::lora::LoraPhy;
@@ -36,7 +45,7 @@ use lora_phy::LoRa;
 const VLP_KEY: [u8; 32] = [42u8; 32];
 
 /// This program acts as a simple ground station, it simply logs everything it receives from lora to the console.
-/// 
+///
 /// Blue led blinks means powered on
 /// Every time a valid lora packet is received, green led blinks once
 #[embassy_executor::main]
@@ -45,9 +54,11 @@ async fn main(spawner: Spawner) {
 
     let vlp_gcm_client =
         singleton!(: VLPGroundStation<NoopRawMutex> = VLPGroundStation::new()).unwrap();
+    let tone_queue =
+        singleton!(: pubsub::PubSubChannel<NoopRawMutex, BuzzerTone, 10, 1, 2> = pubsub::PubSubChannel::new()).unwrap();
 
     spawner.must_spawn(power_led_task(p.PA2));
-
+    spawner.must_spawn(buzzer_task(p.PC15, tone_queue.dyn_subscriber().unwrap()));
     spawner.must_spawn(lora_daemon_task(
         vlp_gcm_client,
         p.SPI3,
@@ -65,6 +76,11 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH3,
         p.DMA1_CH2,
     ));
+
+    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
+    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
+    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
+    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
 
     let mut green_led = Output::new(p.PA7, Level::High, Speed::Low);
     loop {

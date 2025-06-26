@@ -14,6 +14,7 @@ defmt-rtt-pipe = { path = "../../Rust_Monorepo/defmt-rtt-pipe" }
 embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", features = [
     "arch-cortex-m",
     "executor-thread",
+    "nightly",
 ] }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy.git" }
 embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", features = [
@@ -56,12 +57,6 @@ biquad = "0.5.0"
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
 
 
-# [[bin]]
-# name = "firmware"
-# path = "src/main.rs"
-# test = false
-# bench = false
-
 [[bin]]
 name = "beacon"
 path = "src/main_beacon.rs"
@@ -74,6 +69,7 @@ path = "src/main_gcm.rs"
 test = false
 bench = false
 
+# Testing Entry Points
 [[bin]]
 name = "altimeter_test"
 path = "src/main_altimeter_test.rs"
@@ -81,44 +77,38 @@ test = false
 bench = false
 
 [[bin]]
-name = "ground_test"
-path = "src/main_ground_test.rs"
+name = "blinky"
+path = "src/main_blinky.rs"
 test = false
 bench = false
 
 [[bin]]
-name = "sd_test"
-path = "src/sd_test.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "sensors_test"
-path = "src/sensors_test.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "pyro_test"
-path = "src/pyro_test.rs"
+name = "can_test"
+path = "src/main_can_test.rs"
 test = false
 bench = false
 
 [[bin]]
 name = "mag_test"
-path = "src/mag_test.rs"
+path = "src/main_mag_test.rs"
 test = false
 bench = false
 
 [[bin]]
-name = "can_main"
-path = "src/can_main.rs"
+name = "pyro_test"
+path = "src/main_pyro_test.rs"
 test = false
 bench = false
 
 [[bin]]
-name = "blinky"
-path = "src/main_blinky.rs"
+name = "sd_test"
+path = "src/main_sd_test.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "sensors_test"
+path = "src/main_sensors_test.rs"
 test = false
 bench = false
 

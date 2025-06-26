@@ -1,6 +1,7 @@
 // only use std during testing
 #![cfg_attr(not(test), no_std)]
 #![no_main]
+#![feature(impl_trait_in_assoc_type)]
 
 mod time;
 mod utils;
@@ -9,9 +10,15 @@ use {defmt_rtt_pipe as _, panic_probe as _};
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
-use embassy_stm32::time::mhz;
+use embassy_stm32::i2c::{Config as I2cConfig, I2c};
+use embassy_stm32::time::{mhz, Hertz};
+use embassy_stm32::{bind_interrupts, i2c, peripherals};
+use embassy_time::Timer;
+
+bind_interrupts!(struct Irqs {
+    I2C2_EV => i2c::EventInterruptHandler<peripherals::I2C2>;
+    I2C2_ER => i2c::ErrorInterruptHandler<peripherals::I2C2>;
+});
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -85,24 +92,25 @@ async fn main(_spawner: Spawner) {
     // red_led: PB1
     // green_led: PA7
     // blue_led: PA2
-    let mut red_led = Output::new(p.PB1, Level::Low, Speed::Low);
 
-    // https://www.notion.so/mcmasterrocketry/VLF5-1c0d3a029ea580f882dfee3f98b0b897?pvs=4#1ebd3a029ea5807e8651fe9f530ff869
-    let mut pyro_n_en = Output::new(p.PE9, Level::Low, Speed::Low);
-    let mut pyro_pg = ExtiInput::new(p.PE13, p.EXTI13, Pull::Up);
+    let mut config = I2cConfig::default();
+    config.sda_pullup = true;
+    config.scl_pullup = true;
+    let mut i2c = I2c::new(
+        p.I2C2,
+        p.PB10,
+        p.PB11,
+        Irqs,
+        p.DMA1_CH7,
+        p.DMA1_CH6,
+        Hertz(100_000),
+        config,
+    );
 
-    // high: enable pyro
-    let mut pyro1_ctrl = Output::new(p.PD8, Level::High, Speed::Low);
-    let mut pyro1_cont = Input::new(p.PD13, Pull::Up);
-
-    let mut pyro2_ctrl = Output::new(p.PD9, Level::High, Speed::Low);
-    let mut pyro2_cont = ExtiInput::new(p.PE12, p.EXTI12, Pull::Up);
-
+    let mut data = [0u8; 1];
     loop {
-        pyro_pg.wait_for_any_edge().await;
-        // power good: low
-        red_led.set_level(pyro_pg.get_level());
-        // info!("pyro1_cont: {}", pyro1_cont.is_low());
-        // info!("pyro2_cont: {}", pyro2_cont.is_low());
+        i2c.write_read(0b0011110, &[0x4F], &mut data).await.unwrap();
+        info!("who am i: {}", data[0]);
+        Timer::after_millis(500).await;
     }
 }

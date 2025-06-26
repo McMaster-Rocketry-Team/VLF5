@@ -1,22 +1,25 @@
-// only use std during testing
-#![cfg_attr(not(test), no_std)]
+#![no_std]
 #![no_main]
-
-mod time;
-mod utils;
+#![feature(impl_trait_in_assoc_type)]
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_stm32::i2c::{Config as I2cConfig, I2c};
-use embassy_stm32::time::{mhz, Hertz};
-use embassy_stm32::{bind_interrupts, i2c, peripherals};
-use embassy_time::Timer;
+use embassy_stm32::sdmmc::DataBlock;
+use embassy_stm32::time::mhz;
+use embassy_stm32::{
+    bind_interrupts, peripherals,
+    rng::{self, Rng},
+};
+use embassy_stm32::{
+    crc::{Config as CrcConfig, Crc, InputReverseConfig, PolySize},
+    sdmmc::{self, Sdmmc},
+};
 
 bind_interrupts!(struct Irqs {
-    I2C2_EV => i2c::EventInterruptHandler<peripherals::I2C2>;
-    I2C2_ER => i2c::ErrorInterruptHandler<peripherals::I2C2>;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
+    SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
 });
 
 #[embassy_executor::main]
@@ -86,30 +89,58 @@ async fn main(_spawner: Spawner) {
         config
     };
     let p = embassy_stm32::init(config);
-    info!("Hello VLF5!");
-    // PS: PA3 (low: force pwm)
-    // red_led: PB1
-    // green_led: PA7
-    // blue_led: PA2
 
-    let mut config = I2cConfig::default();
-    config.sda_pullup = true;
-    config.scl_pullup = true;
-    let mut i2c = I2c::new(
-        p.I2C2,
-        p.PB10,
-        p.PB11,
+    info!("Hello VLF5!");
+
+    let mut sdmmc = Sdmmc::new_4bit(
+        p.SDMMC1,
         Irqs,
-        p.DMA1_CH7,
-        p.DMA1_CH6,
-        Hertz(100_000),
-        config,
+        p.PC12,
+        p.PD2,
+        p.PC8,
+        p.PC9,
+        p.PC10,
+        p.PC11,
+        Default::default(),
     );
 
-    let mut data = [0u8; 1];
-    loop {
-        i2c.write_read(0b0011110, &[0x4F], &mut data).await.unwrap();
-        info!("who am i: {}", data[0]);
-        Timer::after_millis(500).await;
+    info!("Configured clock: {}", sdmmc.clock().0);
+    sdmmc.init_sd_card(mhz(1)).await.unwrap();
+
+    // let size = sdcard.num_bytes().unwrap();
+    // let block_count = (size / 512) as u32;
+    // info!("Card size is {} bytes, {} blocks", size, block_count);
+
+    let mut rng = Rng::new(p.RNG, Irqs);
+    let crc_config =
+        CrcConfig::new(InputReverseConfig::None, false, PolySize::Width8, 69, 69).unwrap();
+    let mut crc = Crc::new(p.CRC, crc_config);
+
+    let mut block = DataBlock([0u8; 512]);
+    for block_i in 0..10 {
+        info!(
+            "Testing block {} ({}MiB).....",
+            block_i,
+            (block_i as f32) * 512.0 / 1024.0 / 1024.0
+        );
+
+        rng.async_fill_bytes(&mut block.0[..508]).await.unwrap();
+        crc.reset();
+        let check_sum = crc.feed_bytes(&block.0[..508]);
+        block.0[508..512].copy_from_slice(&check_sum.to_le_bytes());
+
+        sdmmc.write_block(block_i, &block).await.unwrap();
+
+        sdmmc.read_block(block_i, &mut block).await.unwrap();
+
+        crc.reset();
+        let check_sum = crc.feed_bytes(&block.0[..508]);
+        let check_sum2 = u32::from_le_bytes(block.0[508..512].try_into().unwrap());
+        if check_sum != check_sum2 {
+            info!("Failed, checksum mismatch: {} != {}", check_sum, check_sum2);
+            break;
+        }
     }
+
+    info!("SD Card test passed!")
 }

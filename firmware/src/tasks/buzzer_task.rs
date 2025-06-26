@@ -7,11 +7,28 @@ use embassy_sync::pubsub;
 use embassy_time::{Duration, Ticker, Timer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuzzerTone(
-    pub u32, // frequency
-    pub u32, // duration (ms)
-    pub u32, // silent duration (ms)
-);
+pub enum BuzzerTone {
+    Low(
+        /// Duration
+        u32,
+        /// Silent duration
+        u32,
+    ),
+    High(
+        /// Duration
+        u32,
+        /// Silent duration
+        u32,
+    ),
+    Custom(
+        /// Frequency
+        u32,
+        /// Duration
+        u32,
+        /// Silent duration
+        u32,
+    ),
+}
 
 #[embassy_executor::task]
 pub async fn buzzer_task(
@@ -21,7 +38,13 @@ pub async fn buzzer_task(
     let mut buzzer_ctrl = Output::new(buzzer_ctrl, Level::Low, Speed::Low);
 
     loop {
-        let BuzzerTone(frequency, duration, silent_duration) = tone_queue.next_message_pure().await;
+        let (frequency, duration, silent_duration) = match tone_queue.next_message_pure().await {
+            BuzzerTone::Low(duration, silent_duration) => (2600, duration, silent_duration),
+            BuzzerTone::High(duration, silent_duration) => (3000, duration, silent_duration),
+            BuzzerTone::Custom(frequency, duration, silent_duration) => {
+                (frequency, duration, silent_duration)
+            }
+        };
 
         let mut ticker = Ticker::every(Duration::from_hz(frequency as u64 * 2));
         for _ in 0..(frequency * duration / 1000) {

@@ -1,20 +1,20 @@
 // only use std during testing
 #![cfg_attr(not(test), no_std)]
 #![no_main]
+#![feature(impl_trait_in_assoc_type)]
 
-mod buzzer_task;
 mod clock_config;
 mod e22;
-mod pyro_task;
+mod tasks;
 mod time;
 mod utils;
 
 use core::mem;
 
 use crate::{
-    buzzer_task::{buzzer_task, BuzzerTone},
     clock_config::vlf5_clock_config,
-    pyro_task::{pyro_task, ContinuityUpdate},
+    tasks::buzzer_task::{buzzer_task, BuzzerTone},
+    tasks::pyro_task::{pyro_task, ContinuityUpdate},
 };
 
 use {defmt_rtt_pipe as _, panic_probe as _};
@@ -131,9 +131,10 @@ async fn main(spawner: Spawner) {
         p.DMA1_CH2,
     ));
 
-    tone_queue.publish_immediate(BuzzerTone(2000, 250, 250));
-    tone_queue.publish_immediate(BuzzerTone(3000, 250, 250));
-    tone_queue.publish_immediate(BuzzerTone(4000, 250, 250));
+    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
+    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
+    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
+    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
 }
 
 #[embassy_executor::task]
@@ -247,7 +248,7 @@ async fn send_beacon_packet_task(
 async fn receive_vlp_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
-    mut tone_queue: pubsub::DynPublisher<'static, BuzzerTone>,
+    tone_queue: pubsub::DynPublisher<'static, BuzzerTone>,
 ) {
     loop {
         let (packet, _) = vlp_avionics_client.receive().await;
@@ -255,9 +256,12 @@ async fn receive_vlp_task(
 
         match packet {
             VLPUplinkPacket::FirePyro(fire_pyro_packet) => {
-                tone_queue.publish(BuzzerTone(3000, 500, 500)).await;
-                tone_queue.publish(BuzzerTone(3000, 500, 500)).await;
-                tone_queue.publish(BuzzerTone(3000, 500, 500)).await;
+                tone_queue.publish_immediate(BuzzerTone::Low(500, 500));
+                Timer::after_millis(1000).await;
+                tone_queue.publish_immediate(BuzzerTone::Low(500, 500));
+                Timer::after_millis(1000).await;
+                tone_queue.publish_immediate(BuzzerTone::Low(500, 500));
+                Timer::after_millis(1000).await;
                 fire_signal.signal(fire_pyro_packet.pyro);
             }
             _ => {}

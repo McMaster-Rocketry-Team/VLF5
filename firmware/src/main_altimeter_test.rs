@@ -1,6 +1,7 @@
 // only use std during testing
 #![cfg_attr(not(test), no_std)]
 #![no_main]
+#![feature(impl_trait_in_assoc_type)]
 
 mod clock_config;
 mod e22;

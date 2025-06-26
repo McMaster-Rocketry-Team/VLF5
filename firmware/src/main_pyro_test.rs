@@ -1,25 +1,18 @@
-#![no_std]
+// only use std during testing
+#![cfg_attr(not(test), no_std)]
 #![no_main]
+#![feature(impl_trait_in_assoc_type)]
+
+mod time;
+mod utils;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_stm32::sdmmc::DataBlock;
+use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::gpio::{Input, Level, Output, Pull, Speed};
 use embassy_stm32::time::mhz;
-use embassy_stm32::{
-    bind_interrupts, peripherals,
-    rng::{self, Rng},
-};
-use embassy_stm32::{
-    crc::{Config as CrcConfig, Crc, InputReverseConfig, PolySize},
-    sdmmc::{self, Sdmmc},
-};
-
-bind_interrupts!(struct Irqs {
-    RNG => rng::InterruptHandler<peripherals::RNG>;
-    SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
-});
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -88,58 +81,29 @@ async fn main(_spawner: Spawner) {
         config
     };
     let p = embassy_stm32::init(config);
-
     info!("Hello VLF5!");
+    // PS: PA3 (low: force pwm)
+    // red_led: PB1
+    // green_led: PA7
+    // blue_led: PA2
+    let mut red_led = Output::new(p.PB1, Level::Low, Speed::Low);
 
-    let mut sdmmc = Sdmmc::new_4bit(
-        p.SDMMC1,
-        Irqs,
-        p.PC12,
-        p.PD2,
-        p.PC8,
-        p.PC9,
-        p.PC10,
-        p.PC11,
-        Default::default(),
-    );
+    // https://www.notion.so/mcmasterrocketry/VLF5-1c0d3a029ea580f882dfee3f98b0b897?pvs=4#1ebd3a029ea5807e8651fe9f530ff869
+    let mut pyro_n_en = Output::new(p.PE9, Level::Low, Speed::Low);
+    let mut pyro_pg = ExtiInput::new(p.PE13, p.EXTI13, Pull::Up);
 
-    info!("Configured clock: {}", sdmmc.clock().0);
-    sdmmc.init_sd_card(mhz(1)).await.unwrap();
+    // high: enable pyro
+    let mut pyro1_ctrl = Output::new(p.PD8, Level::High, Speed::Low);
+    let mut pyro1_cont = Input::new(p.PD13, Pull::Up);
 
-    // let size = sdcard.num_bytes().unwrap();
-    // let block_count = (size / 512) as u32;
-    // info!("Card size is {} bytes, {} blocks", size, block_count);
+    let mut pyro2_ctrl = Output::new(p.PD9, Level::High, Speed::Low);
+    let mut pyro2_cont = ExtiInput::new(p.PE12, p.EXTI12, Pull::Up);
 
-    let mut rng = Rng::new(p.RNG, Irqs);
-    let crc_config =
-        CrcConfig::new(InputReverseConfig::None, false, PolySize::Width8, 69, 69).unwrap();
-    let mut crc = Crc::new(p.CRC, crc_config);
-
-    let mut block = DataBlock([0u8; 512]);
-    for block_i in 0..10 {
-        info!(
-            "Testing block {} ({}MiB).....",
-            block_i,
-            (block_i as f32) * 512.0 / 1024.0 / 1024.0
-        );
-
-        rng.async_fill_bytes(&mut block.0[..508]).await.unwrap();
-        crc.reset();
-        let check_sum = crc.feed_bytes(&block.0[..508]);
-        block.0[508..512].copy_from_slice(&check_sum.to_le_bytes());
-
-        sdmmc.write_block(block_i, &block).await.unwrap();
-
-        sdmmc.read_block(block_i, &mut block).await.unwrap();
-
-        crc.reset();
-        let check_sum = crc.feed_bytes(&block.0[..508]);
-        let check_sum2 = u32::from_le_bytes(block.0[508..512].try_into().unwrap());
-        if check_sum != check_sum2 {
-            info!("Failed, checksum mismatch: {} != {}", check_sum, check_sum2);
-            break;
-        }
+    loop {
+        pyro_pg.wait_for_any_edge().await;
+        // power good: low
+        red_led.set_level(pyro_pg.get_level());
+        // info!("pyro1_cont: {}", pyro1_cont.is_low());
+        // info!("pyro2_cont: {}", pyro2_cont.is_low());
     }
-
-    info!("SD Card test passed!")
 }
