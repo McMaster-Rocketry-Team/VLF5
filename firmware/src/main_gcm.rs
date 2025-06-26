@@ -3,36 +3,43 @@
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 
-mod tasks;
 mod clock_config;
 mod e22;
+mod tasks;
 mod time;
 mod utils;
 
 use crate::{
-    tasks::buzzer_task::{buzzer_task, BuzzerTone},
     clock_config::vlf5_clock_config,
+    tasks::buzzer_task::{buzzer_task, BuzzerTone},
 };
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use cortex_m::singleton;
+use cortex_m_rt::entry;
 use defmt::info;
 use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
-use embassy_executor::Spawner;
-use embassy_stm32::exti::ExtiInput;
-use embassy_stm32::gpio::{Level, Output, Pull, Speed};
+use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
 use embassy_stm32::peripherals::{
     DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::Peri;
+use embassy_stm32::{
+    exti::ExtiInput,
+    interrupt::{self, InterruptExt as _, Priority},
+};
+use embassy_stm32::{
+    gpio::{Level, Output, Pull, Speed},
+    Peripherals,
+};
 use embassy_sync::{
-    blocking_mutex::raw::NoopRawMutex,
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     mutex::Mutex,
-    pubsub::{self, PubSubBehavior as _},
+    pubsub::{self, PubSubBehavior},
 };
 use embassy_time::{Delay, Duration, Ticker, Timer};
 use firmware_common_new::vlp::client::VLPGroundStation;
@@ -48,17 +55,49 @@ const VLP_KEY: [u8; 32] = [42u8; 32];
 ///
 /// Blue led blinks means powered on
 /// Every time a valid lora packet is received, green led blinks once
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(vlf5_clock_config());
 
+#[entry]
+fn main() -> ! {
+    embassy_stm32::init(vlf5_clock_config());
+
+    let tone_queue =
+        singleton!(: pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1> = pubsub::PubSubChannel::new()).unwrap();
+
+    static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
+    #[embassy_stm32::interrupt]
+    unsafe fn USART2() {
+        EXECUTOR_HIGH.on_interrupt()
+    }
+
+    interrupt::USART2.set_priority(Priority::P6);
+    let spawner = EXECUTOR_HIGH.start(interrupt::USART2);
+    spawner.must_spawn(high_prio_main(spawner, tone_queue.subscriber().unwrap()));
+
+    let executor_low = singleton!(: Executor = Executor::new()).unwrap();
+    executor_low.run(|spawner| {
+        spawner.must_spawn(low_prio_main(spawner, tone_queue));
+    })
+}
+
+#[embassy_executor::task]
+async fn high_prio_main(
+    spawner: SendSpawner,
+    tone_queue: pubsub::Subscriber<'static, CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
+) {
+    let p = unsafe { Peripherals::steal() };
+    spawner.must_spawn(buzzer_task(p.PC15, tone_queue));
+}
+
+#[embassy_executor::task]
+async fn low_prio_main(
+    spawner: Spawner,
+    tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
+) {
+    let p = unsafe { Peripherals::steal() };
     let vlp_gcm_client =
         singleton!(: VLPGroundStation<NoopRawMutex> = VLPGroundStation::new()).unwrap();
-    let tone_queue =
-        singleton!(: pubsub::PubSubChannel<NoopRawMutex, BuzzerTone, 10, 1, 2> = pubsub::PubSubChannel::new()).unwrap();
 
     spawner.must_spawn(power_led_task(p.PA2));
-    spawner.must_spawn(buzzer_task(p.PC15, tone_queue.dyn_subscriber().unwrap()));
     spawner.must_spawn(lora_daemon_task(
         vlp_gcm_client,
         p.SPI3,
@@ -78,9 +117,6 @@ async fn main(spawner: Spawner) {
     ));
 
     tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
-    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
-    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
-    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
 
     let mut green_led = Output::new(p.PA7, Level::High, Speed::Low);
     loop {

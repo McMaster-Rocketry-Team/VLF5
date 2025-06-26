@@ -23,35 +23,32 @@ use crate::{
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use cortex_m::singleton;
+use cortex_m_rt::entry;
 use defmt::info;
-use e22::E22;
-use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
-use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Pull, Speed};
-use embassy_stm32::peripherals::{
-    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA7, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
-};
-use embassy_stm32::spi::{Config as SpiConfig, Spi};
+use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
+use embassy_stm32::interrupt;
+use embassy_stm32::peripherals::{PA2, PA7};
 use embassy_stm32::Peri;
 use embassy_stm32::{
     adc::{self, Adc, AdcChannel as _},
-    exti::ExtiInput,
     peripherals::{ADC1, PB0},
 };
 use embassy_stm32::{
     bind_interrupts,
     peripherals::{PA10, PB14, USART1},
-    time::Hertz,
     usart::{self, BufferedUart, Config as UartConfig},
 };
+use embassy_stm32::{
+    gpio::{Level, Output, Speed},
+    interrupt::{InterruptExt as _, Priority},
+    Peripherals,
+};
 use embassy_sync::{
-    blocking_mutex::raw::NoopRawMutex,
-    mutex::Mutex,
-    pubsub::{self, PubSubBehavior},
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
+    pubsub::{self, PubSubBehavior as _},
 };
 use embassy_sync::{signal, watch};
-use embassy_time::{Delay, Duration, Ticker, Timer};
-use firmware_common_new::vlp::lora::LoraPhy;
+use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::vlp::lora_config::LoraConfig;
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
 use firmware_common_new::vlp::{client::VLPAvionics, packets::VLPUplinkPacket};
@@ -59,9 +56,6 @@ use firmware_common_new::{
     gps::{run_gps_uart_receiver, GPSData},
     vlp::packets::fire_pyro::PyroSelect,
 };
-use lora_phy::iv::GenericSx126xInterfaceVariant;
-use lora_phy::sx126x::{self, Sx126x};
-use lora_phy::LoRa;
 use time::Clock;
 
 const VLP_KEY: [u8; 32] = [42u8; 32];
@@ -71,9 +65,45 @@ const VLP_KEY: [u8; 32] = [42u8; 32];
 ///
 /// Blue led blinks when gps no fix
 /// Green led blinks when gps fix
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    let p = embassy_stm32::init(vlf5_clock_config());
+
+#[entry]
+fn main() -> ! {
+    embassy_stm32::init(vlf5_clock_config());
+
+    let tone_queue: &mut pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1> =
+        singleton!(: pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1> = pubsub::PubSubChannel::new()).unwrap();
+
+    static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
+    #[embassy_stm32::interrupt]
+    unsafe fn USART2() {
+        EXECUTOR_HIGH.on_interrupt()
+    }
+
+    interrupt::USART2.set_priority(Priority::P6);
+    let spawner = EXECUTOR_HIGH.start(interrupt::USART2);
+    spawner.must_spawn(high_prio_main(spawner, tone_queue.subscriber().unwrap()));
+
+    let executor_low = singleton!(: Executor = Executor::new()).unwrap();
+    executor_low.run(|spawner| {
+        spawner.must_spawn(low_prio_main(spawner, tone_queue));
+    })
+}
+
+#[embassy_executor::task]
+async fn high_prio_main(
+    spawner: SendSpawner,
+    tone_queue: pubsub::Subscriber<'static, CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
+) {
+    let p = unsafe { Peripherals::steal() };
+    spawner.must_spawn(buzzer_task(p.PC15, tone_queue));
+}
+
+#[embassy_executor::task]
+async fn low_prio_main(
+    spawner: Spawner,
+    tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
+) {
+    let p = unsafe { Peripherals::steal() };
 
     // PS: PA3 (low: force pwm)
     let ps = Output::new(p.PA3, Level::Low, Speed::Low);
@@ -87,8 +117,7 @@ async fn main(spawner: Spawner) {
             .unwrap();
     let fire_signal =
         singleton!(: signal::Signal<NoopRawMutex, PyroSelect> = signal::Signal::new()).unwrap();
-    let tone_queue =
-        singleton!(: pubsub::PubSubChannel<NoopRawMutex, BuzzerTone, 10, 1, 2> = pubsub::PubSubChannel::new()).unwrap();
+
     spawner.must_spawn(power_led_task(p.PA2, p.PA7, gps_data.receiver().unwrap()));
 
     spawner.must_spawn(pyro_task(
@@ -104,8 +133,6 @@ async fn main(spawner: Spawner) {
         fire_signal,
     ));
 
-    spawner.must_spawn(buzzer_task(p.PC15, tone_queue.dyn_subscriber().unwrap()));
-
     spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.sender()));
 
     spawner.must_spawn(send_beacon_packet_task(
@@ -114,6 +141,12 @@ async fn main(spawner: Spawner) {
         vlp_avionics_client,
         gps_data.receiver().unwrap(),
         continuity_update.receiver().unwrap(),
+    ));
+
+    spawner.must_spawn(receive_vlp_task(
+        vlp_avionics_client,
+        fire_signal,
+        tone_queue,
     ));
 
     spawner.must_spawn(vlp_avionics_daemon_task(
@@ -195,9 +228,7 @@ async fn gps_task(
     let mut uart1 = BufferedUart::new(usart1, rx, tx, tx_buffer, rx_buffer, Irqs, config).unwrap();
 
     run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
-        let gps_data = gps_data.data;
-        info!("{:?}", gps_data);
-        gps_data_sender.send(gps_data);
+        gps_data_sender.send(gps_data.data);
     })
     .await;
 }
@@ -259,7 +290,7 @@ async fn send_beacon_packet_task(
 async fn receive_vlp_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
-    tone_queue: pubsub::DynPublisher<'static, BuzzerTone>,
+    tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
 ) {
     loop {
         let (packet, _) = vlp_avionics_client.receive().await;

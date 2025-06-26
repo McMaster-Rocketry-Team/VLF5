@@ -3,7 +3,7 @@ use embassy_stm32::{
     peripherals::PC15,
     Peri,
 };
-use embassy_sync::pubsub;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub};
 use embassy_time::{Duration, Ticker, Timer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub enum BuzzerTone {
 #[embassy_executor::task]
 pub async fn buzzer_task(
     buzzer_ctrl: Peri<'static, PC15>,
-    mut tone_queue: pubsub::DynSubscriber<'static, BuzzerTone>,
+    mut tone_queue:  pubsub::Subscriber<'static, CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
 ) {
     let mut buzzer_ctrl = Output::new(buzzer_ctrl, Level::Low, Speed::Low);
 
