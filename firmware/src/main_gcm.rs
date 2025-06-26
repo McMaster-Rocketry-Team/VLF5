@@ -124,7 +124,7 @@ async fn lora_daemon_task(
     rx_dma: Peri<'static, DMA1_CH2>,
 ) {
     let mut spi_config = SpiConfig::default();
-    spi_config.frequency = Hertz(250_000);
+    spi_config.frequency = Hertz(1_000_000);
     let spi3 =
         Mutex::<NoopRawMutex, _>::new(Spi::new(spi3, sck, mosi, miso, tx_dma, rx_dma, spi_config));
     let lora_spi_device =

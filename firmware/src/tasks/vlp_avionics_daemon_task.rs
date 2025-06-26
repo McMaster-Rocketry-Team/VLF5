@@ -21,7 +21,7 @@ use lora_phy::LoRa;
 use crate::e22::E22;
 
 #[embassy_executor::task]
-async fn vlp_avionics_daemon_task(
+pub async fn vlp_avionics_daemon_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     vlp_key: &'static [u8; 32],
     lora_config: LoraConfig,
@@ -41,7 +41,7 @@ async fn vlp_avionics_daemon_task(
     rx_dma: Peri<'static, DMA1_CH2>,
 ) {
     let mut spi_config = SpiConfig::default();
-    spi_config.frequency = Hertz(250_000);
+    spi_config.frequency = Hertz(1_000_000);
     let spi3 =
         Mutex::<NoopRawMutex, _>::new(Spi::new(spi3, sck, mosi, miso, tx_dma, rx_dma, spi_config));
     let lora_spi_device =
@@ -68,11 +68,3 @@ async fn vlp_avionics_daemon_task(
     let mut daemon = vlp_avionics_client.daemon(&mut lora, vlp_key);
     daemon.run().await;
 }
-
-// LoraConfig {
-//     frequency: 915_100_000,
-//     sf: 12,
-//     bw: 250000,
-//     cr: 8,
-//     power: 22,
-// }

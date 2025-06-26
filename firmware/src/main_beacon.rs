@@ -13,8 +13,11 @@ use core::mem;
 
 use crate::{
     clock_config::vlf5_clock_config,
-    tasks::buzzer_task::{buzzer_task, BuzzerTone},
-    tasks::pyro_task::{pyro_task, ContinuityUpdate},
+    tasks::{
+        buzzer_task::{buzzer_task, BuzzerTone},
+        pyro_task::{pyro_task, ContinuityUpdate},
+        vlp_avionics_daemon_task::vlp_avionics_daemon_task,
+    },
 };
 
 use {defmt_rtt_pipe as _, panic_probe as _};
@@ -113,8 +116,16 @@ async fn main(spawner: Spawner) {
         continuity_update.receiver().unwrap(),
     ));
 
-    spawner.must_spawn(lora_daemon_task(
+    spawner.must_spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
+        &VLP_KEY,
+        LoraConfig {
+            frequency: 915_100_000,
+            sf: 12,
+            bw: 250000,
+            cr: 8,
+            power: 22,
+        },
         p.SPI3,
         p.PB3,
         p.PD6,
@@ -267,60 +278,4 @@ async fn receive_vlp_task(
             _ => {}
         }
     }
-}
-
-#[embassy_executor::task]
-async fn lora_daemon_task(
-    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    spi3: Peri<'static, SPI3>,
-    sck: Peri<'static, PB3>,
-    mosi: Peri<'static, PD6>,
-    miso: Peri<'static, PB4>,
-    cs: Peri<'static, PC7>,
-    reset: Peri<'static, PD5>,
-    dio1: Peri<'static, PD4>,
-    dio1_exti: Peri<'static, EXTI4>,
-    busy: Peri<'static, PD1>,
-    busy_exti: Peri<'static, EXTI1>,
-    txen: Peri<'static, PD0>,
-    rxen: Peri<'static, PA8>,
-    tx_dma: Peri<'static, DMA1_CH3>,
-    rx_dma: Peri<'static, DMA1_CH2>,
-) {
-    let mut spi_config = SpiConfig::default();
-    spi_config.frequency = Hertz(250_000);
-    let spi3 =
-        Mutex::<NoopRawMutex, _>::new(Spi::new(spi3, sck, mosi, miso, tx_dma, rx_dma, spi_config));
-    let lora_spi_device =
-        SpiDeviceWithConfig::new(&spi3, Output::new(cs, Level::High, Speed::High), spi_config);
-
-    let config = sx126x::Config {
-        chip: E22,
-        tcxo_ctrl: None,
-        use_dcdc: false,
-        rx_boost: true,
-    };
-    let iv = GenericSx126xInterfaceVariant::new(
-        Output::new(reset, Level::High, Speed::Low),
-        ExtiInput::new(dio1, dio1_exti, Pull::Down),
-        ExtiInput::new(busy, busy_exti, Pull::Down),
-        Some(Output::new(rxen, Level::High, Speed::High)),
-        Some(Output::new(txen, Level::High, Speed::High)),
-    )
-    .unwrap();
-    let sx1262 = Sx126x::new(lora_spi_device, iv, config);
-    let mut lora = LoRa::new(sx1262, false, Delay).await.unwrap();
-    info!("LoRa initialized");
-    let mut lora = LoraPhy::new(
-        &mut lora,
-        LoraConfig {
-            frequency: 915_100_000,
-            sf: 12,
-            bw: 250000,
-            cr: 8,
-            power: 22,
-        },
-    );
-    let mut daemon = vlp_avionics_client.daemon(&mut lora, &VLP_KEY);
-    daemon.run().await;
 }

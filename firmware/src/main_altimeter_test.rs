@@ -15,7 +15,7 @@ use crate::{clock_config::vlf5_clock_config, e22::E22};
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
-use biquad::{Biquad, Coefficients, DirectForm2Transposed, ToHertz as _, Type, Q_BUTTERWORTH_F32};
+use biquad::{Coefficients, DirectForm2Transposed, ToHertz as _, Type, Q_BUTTERWORTH_F32};
 use cortex_m::singleton;
 use defmt::info;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
