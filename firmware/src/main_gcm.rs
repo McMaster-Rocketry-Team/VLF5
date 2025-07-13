@@ -11,7 +11,7 @@ mod utils;
 
 use crate::{
     clock_config::vlf5_clock_config,
-    tasks::buzzer_task::{buzzer_task, BuzzerTone},
+    tasks::buzzer_task::{BuzzerTone, buzzer_task},
 };
 
 use {defmt_rtt_pipe as _, panic_probe as _};
@@ -22,19 +22,19 @@ use defmt::info;
 use e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
+use embassy_stm32::Peri;
 use embassy_stm32::peripherals::{
     DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA2, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::Peri;
+use embassy_stm32::{
+    Peripherals,
+    gpio::{Level, Output, Pull, Speed},
+};
 use embassy_stm32::{
     exti::ExtiInput,
     interrupt::{self, InterruptExt as _, Priority},
-};
-use embassy_stm32::{
-    gpio::{Level, Output, Pull, Speed},
-    Peripherals,
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
@@ -42,12 +42,15 @@ use embassy_sync::{
     pubsub::{self, PubSubBehavior},
 };
 use embassy_time::{Delay, Duration, Ticker, Timer};
-use firmware_common_new::vlp::client::VLPGroundStation;
 use firmware_common_new::vlp::lora::LoraPhy;
 use firmware_common_new::vlp::lora_config::LoraConfig;
+use firmware_common_new::vlp::{
+    client::VLPGroundStation,
+    packets::fire_pyro::{FirePyroPacket, PyroSelect},
+};
+use lora_phy::LoRa;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x};
-use lora_phy::LoRa;
 
 const VLP_KEY: [u8; 32] = [42u8; 32];
 
@@ -117,6 +120,18 @@ async fn low_prio_main(
     ));
 
     tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
+
+    // pyro 1 is main, pyro 2 is drogue
+    // info!("sending.....");
+    // let result = vlp_gcm_client
+    //     .send(
+    //         FirePyroPacket {
+    //             pyro: PyroSelect::Pyro1,
+    //         }
+    //         .into(),
+    //     )
+    //     .await;
+    // info!("{:?}", result.err());
 
     let mut green_led = Output::new(p.PA7, Level::High, Speed::Low);
     loop {
