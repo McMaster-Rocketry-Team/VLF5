@@ -19,7 +19,6 @@ embassy-executor = { git = "https://github.com/embassy-rs/embassy.git", features
 ] }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy.git" }
 embassy-stm32 = { git = "https://github.com/embassy-rs/embassy.git", features = [
-    "memory-x",
     "stm32h743vi",
     "time-driver-any",
     "exti",
