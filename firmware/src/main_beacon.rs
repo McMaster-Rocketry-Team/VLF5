@@ -5,6 +5,7 @@
 
 mod clock_config;
 mod e22;
+mod ms5607;
 mod tasks;
 mod time;
 mod utils;
@@ -13,22 +14,27 @@ use core::mem;
 
 use crate::{
     clock_config::vlf5_clock_config,
+    ms5607::MS5607,
     tasks::{
-        buzzer_task::{buzzer_task, BuzzerTone},
-        pyro_task::{pyro_task, ContinuityUpdate},
+        buzzer_task::{BuzzerTone, buzzer_task},
+        pyro_task::{ContinuityUpdate, pyro_task},
         vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
 };
-
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use cortex_m::singleton;
 use cortex_m_rt::entry;
 use defmt::info;
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
-use embassy_stm32::interrupt;
-use embassy_stm32::peripherals::{PA2, PA7};
 use embassy_stm32::Peri;
+use embassy_stm32::peripherals::{PA2, PA7};
+use embassy_stm32::{
+    Peripherals,
+    gpio::{Level, Output, Speed},
+    interrupt::{InterruptExt as _, Priority},
+};
 use embassy_stm32::{
     adc::{self, Adc, AdcChannel as _},
     peripherals::{ADC1, PB0},
@@ -39,12 +45,16 @@ use embassy_stm32::{
     usart::{self, BufferedUart, Config as UartConfig},
 };
 use embassy_stm32::{
-    gpio::{Level, Output, Speed},
-    interrupt::{InterruptExt as _, Priority},
-    Peripherals,
+    interrupt,
+    peripherals::{DMA1_CH4, DMA1_CH5, PA5, PA6, PC6, PD7, SPI1},
+};
+use embassy_stm32::{
+    spi::{Config as SpiConfig, Spi},
+    time::Hertz,
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
+    mutex::Mutex,
     pubsub::{self, PubSubBehavior as _},
 };
 use embassy_sync::{signal, watch};
@@ -53,7 +63,7 @@ use firmware_common_new::vlp::lora_config::LoraConfig;
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
 use firmware_common_new::vlp::{client::VLPAvionics, packets::VLPUplinkPacket};
 use firmware_common_new::{
-    gps::{run_gps_uart_receiver, GPSData},
+    gps::{GPSData, run_gps_uart_receiver},
     vlp::packets::fire_pyro::PyroSelect,
 };
 use time::Clock;
@@ -76,7 +86,7 @@ fn main() -> ! {
     static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
     #[embassy_stm32::interrupt]
     unsafe fn USART2() {
-        EXECUTOR_HIGH.on_interrupt()
+        unsafe { EXECUTOR_HIGH.on_interrupt() }
     }
 
     interrupt::USART2.set_priority(Priority::P6);
@@ -112,6 +122,9 @@ async fn low_prio_main(
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let gps_data =
         singleton!(: watch::Watch<NoopRawMutex, GPSData, 2> = watch::Watch::new()).unwrap();
+    // (temperature, asl altitude)
+    let baro_data =
+        singleton!(: watch::Watch<NoopRawMutex, (f32, f32), 1> = watch::Watch::new()).unwrap();
     let continuity_update =
         singleton!(: watch::Watch<NoopRawMutex, ContinuityUpdate, 1> = watch::Watch::new())
             .unwrap();
@@ -119,6 +132,17 @@ async fn low_prio_main(
         singleton!(: signal::Signal<NoopRawMutex, PyroSelect> = signal::Signal::new()).unwrap();
 
     spawner.must_spawn(power_led_task(p.PA2, p.PA7, gps_data.receiver().unwrap()));
+
+    spawner.must_spawn(altimeter_task(
+        p.SPI1,
+        p.PA5,
+        p.PD7,
+        p.PA6,
+        p.PC6,
+        p.DMA1_CH4,
+        p.DMA1_CH5,
+        baro_data.sender(),
+    ));
 
     spawner.must_spawn(pyro_task(
         p.PE9,
@@ -141,6 +165,7 @@ async fn low_prio_main(
         vlp_avionics_client,
         gps_data.receiver().unwrap(),
         continuity_update.receiver().unwrap(),
+        baro_data.receiver().unwrap(),
     ));
 
     spawner.must_spawn(receive_vlp_task(
@@ -234,12 +259,44 @@ async fn gps_task(
 }
 
 #[embassy_executor::task]
+async fn altimeter_task(
+    spi1: Peri<'static, SPI1>,
+    sck: Peri<'static, PA5>,
+    mosi: Peri<'static, PD7>,
+    miso: Peri<'static, PA6>,
+    cs: Peri<'static, PC6>,
+    tx_dma: Peri<'static, DMA1_CH4>,
+    rx_dma: Peri<'static, DMA1_CH5>,
+    baro_data: watch::Sender<'static, NoopRawMutex, (f32, f32), 1>,
+) {
+    // baro
+    let mut spi_config = SpiConfig::default();
+    spi_config.frequency = Hertz(250_000);
+    let spi1 =
+        Mutex::<NoopRawMutex, _>::new(Spi::new(spi1, sck, mosi, miso, tx_dma, rx_dma, spi_config));
+    let baro_spi_device =
+        SpiDeviceWithConfig::new(&spi1, Output::new(cs, Level::High, Speed::High), spi_config);
+    let baro_buffer = singleton!(: [u8; 8] = [0; 8]).unwrap();
+    let mut baro = MS5607::new(baro_spi_device, baro_buffer);
+    baro.reset().await.unwrap();
+    info!("Barometer initialized");
+
+    let mut ticker = Ticker::every(Duration::from_hz(100));
+    loop {
+        let measurement = baro.read().await.unwrap();
+        baro_data.send((measurement.data.temperature, measurement.data.altitude()));
+        ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
 async fn send_beacon_packet_task(
     adc1: Peri<'static, ADC1>,
     pb0: Peri<'static, PB0>,
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     mut gps_data: watch::Receiver<'static, NoopRawMutex, GPSData, 2>,
     mut continuity_update: watch::Receiver<'static, NoopRawMutex, ContinuityUpdate, 1>,
+    mut baro_data: watch::Receiver<'static, NoopRawMutex, (f32, f32), 1>,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);
@@ -263,16 +320,22 @@ async fn send_beacon_packet_task(
 
     gps_data.get().await;
     continuity_update.get().await;
+    baro_data.get().await;
     let mut ticker = Ticker::every(Duration::from_millis(1000));
+    let mut nonce = 0;
     loop {
         let gps_data = gps_data.try_get().unwrap();
         let continuity_update = continuity_update.try_get().unwrap();
         let battery_voltage = read_battery_voltage();
+        let (temperature, altitude) = baro_data.try_get().unwrap();
 
         let packet = GPSBeaconPacket::new(
+            nonce,
             gps_data.lat_lon,
             gps_data.num_of_fix_satellites,
             battery_voltage,
+            temperature,
+            altitude,
             continuity_update.pyro1_continuity,
             continuity_update.pyro1_fire,
             continuity_update.pyro2_continuity,
@@ -283,6 +346,7 @@ async fn send_beacon_packet_task(
 
         vlp_avionics_client.send(packet.into());
         ticker.next().await;
+        nonce = nonce.wrapping_add(1);
     }
 }
 
