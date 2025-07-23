@@ -207,6 +207,18 @@ async fn low_prio_main(
 }
 
 #[embassy_executor::task]
+async fn periodic_beep_task(
+    tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
+){
+    let mut ticker = Ticker::every(Duration::from_millis(3000));
+
+    loop {
+        ticker.next().await;
+        tone_queue.publish_immediate(BuzzerTone::Low(100, 100));
+    }
+}
+
+#[embassy_executor::task]
 async fn power_led_task(
     blue_led: Peri<'static, PA2>,
     green_led: Peri<'static, PA7>,

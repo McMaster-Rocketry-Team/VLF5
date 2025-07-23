@@ -98,7 +98,7 @@ async fn main(spawner: Spawner) {
     info!("CAN Device ID: {}", can_node_id);
 
     let can_sender =
-        singleton!(: CanSender<NoopRawMutex, 4> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id))
+        singleton!(: CanSender<NoopRawMutex, 4> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, None))
             .unwrap();
 
     bind_interrupts!(struct Irqs {
