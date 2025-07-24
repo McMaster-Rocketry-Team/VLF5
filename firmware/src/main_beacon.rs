@@ -3,8 +3,10 @@
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 
+mod avionics_mode;
 mod clock_config;
 mod e22;
+mod lsm6dsm;
 mod ms5607;
 mod tasks;
 mod time;
@@ -17,6 +19,7 @@ use crate::{
     ms5607::MS5607,
     tasks::{
         buzzer_task::{BuzzerTone, buzzer_task},
+        gps_task::gps_task,
         pyro_task::{ContinuityUpdate, pyro_task},
         vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
@@ -59,12 +62,14 @@ use embassy_sync::{
 };
 use embassy_sync::{signal, watch};
 use embassy_time::{Duration, Ticker, Timer};
-use firmware_common_new::vlp::lora_config::LoraConfig;
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
 use firmware_common_new::vlp::{client::VLPAvionics, packets::VLPUplinkPacket};
 use firmware_common_new::{
     gps::{GPSData, run_gps_uart_receiver},
     vlp::packets::fire_pyro::PyroSelect,
+};
+use firmware_common_new::{
+    sensor_reading::SensorReading, time::BootTimestamp, vlp::lora_config::LoraConfig,
 };
 use time::Clock;
 
@@ -120,8 +125,9 @@ async fn low_prio_main(
     mem::forget(ps); // forget ps pin so it does not get reset to Hi-Z when main function finishes
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
-    let gps_data =
-        singleton!(: watch::Watch<NoopRawMutex, GPSData, 2> = watch::Watch::new()).unwrap();
+    let gps_reading =
+        singleton!(: watch::Watch<NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2> = watch::Watch::new())
+            .unwrap();
     // (temperature, asl altitude)
     let baro_data =
         singleton!(: watch::Watch<NoopRawMutex, (f32, f32), 1> = watch::Watch::new()).unwrap();
@@ -131,7 +137,11 @@ async fn low_prio_main(
     let fire_signal =
         singleton!(: signal::Signal<NoopRawMutex, PyroSelect> = signal::Signal::new()).unwrap();
 
-    spawner.must_spawn(power_led_task(p.PA2, p.PA7, gps_data.receiver().unwrap()));
+    spawner.must_spawn(power_led_task(
+        p.PA2,
+        p.PA7,
+        gps_reading.receiver().unwrap(),
+    ));
 
     spawner.must_spawn(altimeter_task(
         p.SPI1,
@@ -157,13 +167,13 @@ async fn low_prio_main(
         fire_signal,
     ));
 
-    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_data.sender()));
+    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_reading.dyn_sender()));
 
     spawner.must_spawn(send_beacon_packet_task(
         p.ADC1,
         p.PB0,
         vlp_avionics_client,
-        gps_data.receiver().unwrap(),
+        gps_reading.receiver().unwrap(),
         continuity_update.receiver().unwrap(),
         baro_data.receiver().unwrap(),
     ));
@@ -209,7 +219,7 @@ async fn low_prio_main(
 #[embassy_executor::task]
 async fn periodic_beep_task(
     tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
-){
+) {
     let mut ticker = Ticker::every(Duration::from_millis(3000));
 
     loop {
@@ -222,7 +232,7 @@ async fn periodic_beep_task(
 async fn power_led_task(
     blue_led: Peri<'static, PA2>,
     green_led: Peri<'static, PA7>,
-    mut gps_data: watch::Receiver<'static, NoopRawMutex, GPSData, 2>,
+    mut gps_data: watch::Receiver<'static, NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2>,
 ) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
     let mut green_led = Output::new(green_led, Level::High, Speed::Low);
@@ -230,7 +240,7 @@ async fn power_led_task(
     let mut ticker = Ticker::every(Duration::from_millis(1000));
     loop {
         let gps_fixed = if let Some(gps_data) = gps_data.try_get() {
-            gps_data.lat_lon.is_some()
+            gps_data.data.lat_lon.is_some()
         } else {
             false
         };
@@ -244,30 +254,6 @@ async fn power_led_task(
         led.set_high();
         ticker.next().await;
     }
-}
-
-#[embassy_executor::task]
-async fn gps_task(
-    usart1: Peri<'static, USART1>,
-    rx: Peri<'static, PA10>,
-    tx: Peri<'static, PB14>,
-    gps_data_sender: watch::Sender<'static, NoopRawMutex, GPSData, 2>,
-) {
-    bind_interrupts!(struct Irqs {
-        USART1 => usart::BufferedInterruptHandler<USART1>;
-    });
-
-    let tx_buffer = singleton!(: [u8; 64] = [0; 64]).unwrap();
-    let rx_buffer = singleton!(: [u8; 64] = [0; 64]).unwrap();
-    let mut config = UartConfig::default();
-    config.baudrate = 9600;
-
-    let mut uart1 = BufferedUart::new(usart1, rx, tx, tx_buffer, rx_buffer, Irqs, config).unwrap();
-
-    run_gps_uart_receiver(&mut uart1, Clock, |gps_data| {
-        gps_data_sender.send(gps_data.data);
-    })
-    .await;
 }
 
 #[embassy_executor::task]
@@ -306,7 +292,7 @@ async fn send_beacon_packet_task(
     adc1: Peri<'static, ADC1>,
     pb0: Peri<'static, PB0>,
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    mut gps_data: watch::Receiver<'static, NoopRawMutex, GPSData, 2>,
+    mut gps_data: watch::Receiver<'static, NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2>,
     mut continuity_update: watch::Receiver<'static, NoopRawMutex, ContinuityUpdate, 1>,
     mut baro_data: watch::Receiver<'static, NoopRawMutex, (f32, f32), 1>,
 ) {
@@ -343,8 +329,8 @@ async fn send_beacon_packet_task(
 
         let packet = GPSBeaconPacket::new(
             nonce,
-            gps_data.lat_lon,
-            gps_data.num_of_fix_satellites,
+            gps_data.data.lat_lon,
+            gps_data.data.num_of_fix_satellites,
             battery_voltage,
             temperature,
             altitude,

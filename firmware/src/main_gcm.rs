@@ -8,6 +8,9 @@ mod e22;
 mod tasks;
 mod time;
 mod utils;
+mod lsm6dsm;
+mod avionics_mode;
+mod ms5607;
 
 use crate::{
     clock_config::vlf5_clock_config,

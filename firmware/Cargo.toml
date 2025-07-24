@@ -59,6 +59,12 @@ embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
 
 
 [[bin]]
+name = "main"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "beacon"
 path = "src/main_beacon.rs"
 test = false
@@ -84,32 +90,14 @@ test = false
 bench = false
 
 [[bin]]
-name = "can_test"
-path = "src/main_can_test.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "mag_test"
 path = "src/main_mag_test.rs"
 test = false
 bench = false
 
 [[bin]]
-name = "pyro_test"
-path = "src/main_pyro_test.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "sd_test"
 path = "src/main_sd_test.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "sensors_test"
-path = "src/main_sensors_test.rs"
 test = false
 bench = false
 
