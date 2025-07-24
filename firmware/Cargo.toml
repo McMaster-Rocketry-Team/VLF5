@@ -52,6 +52,7 @@ embedded-sdmmc = { version = "0.8.1", default-features = false, features = [
     "defmt-log",
 ] }
 biquad = "0.5.0"
+binary_macros = { git = "https://github.com/PegasisForever/binary_macros.git" }
 
 
 [patch.crates-io]

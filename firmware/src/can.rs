@@ -10,17 +10,26 @@ use embassy_stm32::{
     },
     peripherals::{FDCAN2, PB5, PB6},
 };
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, pubsub};
 use embassy_time::{Duration, Instant, Ticker};
-use firmware_common_new::can_bus::{
-    CanBusFrame, CanBusRX, CanBusTX,
-    id::can_node_id_from_serial_number,
-    messages::node_status::{NodeHealth, NodeMode, NodeStatusMessage},
-    node_types::VOID_LAKE_NODE_TYPE,
-    receiver::CanReceiver,
-    sender::CanSender,
+use firmware_common_new::{
+    can_bus::{
+        CanBusFrame, CanBusRX, CanBusTX,
+        id::can_node_id_from_serial_number,
+        messages::{
+            CanBusMessageEnum,
+            node_status::{NodeHealth, NodeMode, NodeStatusMessage},
+        },
+        node_types::VOID_LAKE_NODE_TYPE,
+        receiver::{CanReceiver, ReceivedCanBusMessage},
+        sender::CanSender,
+    },
+    sensor_reading::SensorReading,
+    time::BootTimestamp,
 };
 use stm32_device_signature::device_id;
+
+use crate::can_central::{self, CanCentral};
 
 pub async fn start_can_bus_tasks(
     spawner: &Spawner,
@@ -30,6 +39,7 @@ pub async fn start_can_bus_tasks(
 ) -> (
     &'static CanSender<NoopRawMutex, 4>,
     &'static CanReceiver<NoopRawMutex, 4, 1>,
+    &'static CanCentral<NoopRawMutex>,
 ) {
     let can_node_id = can_node_id_from_serial_number(device_id());
     info!("CAN Device ID: {}", can_node_id);
@@ -39,6 +49,7 @@ pub async fn start_can_bus_tasks(
             .unwrap();
     let can_receiver =
         singleton!(: CanReceiver<NoopRawMutex, 4, 1> = CanReceiver::new(can_node_id)).unwrap();
+    let can_central = singleton!(: CanCentral<NoopRawMutex> = CanCentral::new()).unwrap();
 
     bind_interrupts!(struct Irqs {
         FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
@@ -53,8 +64,10 @@ pub async fn start_can_bus_tasks(
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
     spawner.must_spawn(node_status_task(can_sender));
+    let can_receiver_sub = can_receiver.subscriber().unwrap();
+    spawner.must_spawn(can_message_receive_task(can_central, can_receiver_sub));
 
-    (can_sender, can_receiver)
+    (can_sender, can_receiver, can_central)
 }
 
 #[embassy_executor::task]
@@ -134,5 +147,32 @@ async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, 4>) {
             )
             .await;
         ticker.next().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn can_message_receive_task(
+    can_central: &'static CanCentral<NoopRawMutex>,
+    mut can_receiver_sub: pubsub::Subscriber<
+        'static,
+        NoopRawMutex,
+        SensorReading<BootTimestamp, ReceivedCanBusMessage>,
+        4,
+        1,
+        1,
+    >,
+) {
+    loop {
+        let SensorReading {
+            timestamp_us, data, ..
+        } = can_receiver_sub.next_message_pure().await;
+
+        match data.message {
+            CanBusMessageEnum::Reset(reset_message) => {}
+            CanBusMessageEnum::NodeStatus(node_status_message) => {
+                can_central.on_receive_node_status(timestamp_us, &data.id, &node_status_message)
+            }
+            _ => {}
+        }
     }
 }

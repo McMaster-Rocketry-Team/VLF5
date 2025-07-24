@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 
+use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
@@ -50,9 +51,9 @@ mod ms5607;
 mod tasks;
 mod time;
 mod utils;
+mod can_central;
 
-// TODO: read from base64
-const VLP_KEY: [u8; 32] = [42u8; 32];
+static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
     frequency: 915_100_000,
     sf: 12,
@@ -180,12 +181,6 @@ async fn low_prio_main(
     let gps_reading =
         singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2> = Watch::new())
             .unwrap();
-    let baro_reading =
-        singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, BaroData>, 1> = Watch::new())
-            .unwrap();
-    let imu_reading =
-        singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, IMUData>, 1> = Watch::new())
-            .unwrap();
 
     let continuity_update =
         singleton!(: watch::Watch<NoopRawMutex, ContinuityUpdate, 1> = watch::Watch::new())
@@ -212,7 +207,7 @@ async fn low_prio_main(
     spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_reading.dyn_sender()));
     spawner.must_spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
-        &VLP_KEY,
+        VLP_KEY.try_into().unwrap(),
         LORA_CONFIG.clone(),
         p.SPI3,
         p.PB3,

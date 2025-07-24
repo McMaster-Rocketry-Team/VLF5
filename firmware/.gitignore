@@ -2,3 +2,4 @@
 /vendor
 .rocket-cli.toml
 logs
+vlp.key
