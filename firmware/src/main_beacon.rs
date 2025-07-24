@@ -26,6 +26,7 @@ use crate::{
 };
 use {defmt_rtt_pipe as _, panic_probe as _};
 
+use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
 use defmt::info;
@@ -41,11 +42,6 @@ use embassy_stm32::{
 use embassy_stm32::{
     adc::{self, Adc, AdcChannel as _},
     peripherals::{ADC1, PB0},
-};
-use embassy_stm32::{
-    bind_interrupts,
-    peripherals::{PA10, PB14, USART1},
-    usart::{self, BufferedUart, Config as UartConfig},
 };
 use embassy_stm32::{
     interrupt,
@@ -65,15 +61,14 @@ use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
 use firmware_common_new::vlp::{client::VLPAvionics, packets::VLPUplinkPacket};
 use firmware_common_new::{
-    gps::{GPSData, run_gps_uart_receiver},
+    gps::GPSData,
     vlp::packets::fire_pyro::PyroSelect,
 };
 use firmware_common_new::{
     sensor_reading::SensorReading, time::BootTimestamp, vlp::lora_config::LoraConfig,
 };
-use time::Clock;
 
-const VLP_KEY: [u8; 32] = [42u8; 32];
+static VLP_KEY: &[u8] = base64!("file:vlp.key");
 
 /// This program acts as a GPS beacon, sends the current position to GCM over lora
 /// using `GPSBeaconPacket` every second
@@ -142,6 +137,7 @@ async fn low_prio_main(
         p.PA7,
         gps_reading.receiver().unwrap(),
     ));
+    spawner.must_spawn(periodic_beep_task(tone_queue));
 
     spawner.must_spawn(altimeter_task(
         p.SPI1,
@@ -186,7 +182,7 @@ async fn low_prio_main(
 
     spawner.must_spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
-        &VLP_KEY,
+        VLP_KEY.try_into().unwrap(),
         LoraConfig {
             frequency: 915_100_000,
             sf: 12,

@@ -14,7 +14,7 @@ use embassy_stm32::{
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
-    pubsub::{PubSubBehavior as _, PubSubChannel, Subscriber},
+    pubsub::{self, PubSubBehavior as _, PubSubChannel, Subscriber},
     signal::Signal,
     watch::{self, Watch},
 };
@@ -40,18 +40,21 @@ use crate::{
         vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
 };
+use receive_vlp_task::receive_vlp_task;
 
 mod avionics_mode;
 mod bootloader;
 mod can;
+mod can_central;
 mod clock_config;
 mod e22;
+mod low_power_mode;
 mod lsm6dsm;
 mod ms5607;
+mod receive_vlp_task;
 mod tasks;
 mod time;
 mod utils;
-mod can_central;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
@@ -61,6 +64,8 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
     cr: 8,
     power: 22,
 };
+pub const MAIN_BULKHEAD_NODE_ID: u16 = 0;
+pub const DROGUE_BULKHEAD_NODE_ID: u16 = 1;
 
 #[entry]
 fn main() -> ! {
@@ -192,6 +197,8 @@ async fn low_prio_main(
         p.PA7,
         gps_reading.dyn_receiver().unwrap(),
     ));
+    spawner.must_spawn(periodic_beep_task(tone_queue));
+
     spawner.must_spawn(pyro_task(
         p.PE9,
         p.PE13,
@@ -224,7 +231,17 @@ async fn low_prio_main(
         p.DMA1_CH3,
         p.DMA1_CH2,
     ));
-    start_can_bus_tasks(&spawner, p.FDCAN2, p.PB5, p.PB6).await;
+    let (can_sender, _can_receiver, can_central) =
+        start_can_bus_tasks(&spawner, p.FDCAN2, p.PB5, p.PB6).await;
+
+    spawner.must_spawn(receive_vlp_task(
+        vlp_avionics_client,
+        avionics_mode,
+        fire_signal,
+        tone_queue,
+        can_sender,
+        can_central,
+    ));
 
     spawner.must_spawn(watchdog_task(p.IWDG1));
 
@@ -232,6 +249,18 @@ async fn low_prio_main(
     tone_queue.publish_immediate(BuzzerTone::High(250, 250));
     tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
     tone_queue.publish_immediate(BuzzerTone::High(250, 250));
+}
+
+#[embassy_executor::task]
+async fn periodic_beep_task(
+    tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
+) {
+    let mut ticker = Ticker::every(Duration::from_millis(3000));
+
+    loop {
+        ticker.next().await;
+        tone_queue.publish_immediate(BuzzerTone::Low(100, 100));
+    }
 }
 
 #[embassy_executor::task]
