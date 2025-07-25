@@ -102,6 +102,7 @@ pub async fn baro_task(
     let mut ticker = Ticker::every(Duration::from_hz(200));
     loop {
         let mode = avionics_mode.try_get().unwrap();
+        // TODO: also read sensor during low power mode
         if mode.sensors_active() {
             baro_reading_sender.send(baro.read().await.unwrap());
             ticker.next().await;

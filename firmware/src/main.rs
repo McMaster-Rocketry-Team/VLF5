@@ -43,6 +43,7 @@ use crate::{
 use receive_vlp_task::receive_vlp_task;
 
 mod avionics_mode;
+mod landed_mode;
 mod bootloader;
 mod can;
 mod can_central;
@@ -168,6 +169,7 @@ async fn low_prio_main(
     >,
 ) {
     let p = unsafe { Peripherals::steal() };
+    // TODO
     let ps = Output::new(p.PA3, Level::Low, Speed::Low);
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
