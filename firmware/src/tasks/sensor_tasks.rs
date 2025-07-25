@@ -38,7 +38,7 @@ pub async fn imu_task(
         'static,
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, IMUData>,
-        1,
+        2,
     >,
     mut avionics_mode: watch::Receiver<'static, CriticalSectionRawMutex, AvionicsMode, 10>,
 ) {
@@ -83,7 +83,7 @@ pub async fn baro_task(
         'static,
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, BaroData>,
-        1,
+        2,
     >,
     mut avionics_mode: watch::Receiver<'static, CriticalSectionRawMutex, AvionicsMode, 10>,
 ) {

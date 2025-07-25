@@ -60,10 +60,7 @@ use embassy_sync::{signal, watch};
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::vlp::packets::gps_beacon::GPSBeaconPacket;
 use firmware_common_new::vlp::{client::VLPAvionics, packets::VLPUplinkPacket};
-use firmware_common_new::{
-    gps::GPSData,
-    vlp::packets::fire_pyro::PyroSelect,
-};
+use firmware_common_new::{gps::GPSData, vlp::packets::fire_pyro::PyroSelect};
 use firmware_common_new::{
     sensor_reading::SensorReading, time::BootTimestamp, vlp::lora_config::LoraConfig,
 };
@@ -121,7 +118,7 @@ async fn low_prio_main(
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let gps_reading =
-        singleton!(: watch::Watch<NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2> = watch::Watch::new())
+        singleton!(: watch::Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3> = watch::Watch::new())
             .unwrap();
     // (temperature, asl altitude)
     let baro_data =
@@ -163,7 +160,7 @@ async fn low_prio_main(
         fire_signal,
     ));
 
-    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_reading.dyn_sender()));
+    spawner.must_spawn(gps_task(p.USART1, p.PA10, p.PB14, gps_reading.sender()));
 
     spawner.must_spawn(send_beacon_packet_task(
         p.ADC1,
@@ -228,7 +225,12 @@ async fn periodic_beep_task(
 async fn power_led_task(
     blue_led: Peri<'static, PA2>,
     green_led: Peri<'static, PA7>,
-    mut gps_data: watch::Receiver<'static, NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2>,
+    mut gps_data: watch::Receiver<
+        'static,
+        CriticalSectionRawMutex,
+        SensorReading<BootTimestamp, GPSData>,
+        3,
+    >,
 ) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
     let mut green_led = Output::new(green_led, Level::High, Speed::Low);
@@ -288,7 +290,12 @@ async fn send_beacon_packet_task(
     adc1: Peri<'static, ADC1>,
     pb0: Peri<'static, PB0>,
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    mut gps_data: watch::Receiver<'static, NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2>,
+    mut gps_data: watch::Receiver<
+        'static,
+        CriticalSectionRawMutex,
+        SensorReading<BootTimestamp, GPSData>,
+        3,
+    >,
     mut continuity_update: watch::Receiver<'static, NoopRawMutex, ContinuityUpdate, 1>,
     mut baro_data: watch::Receiver<'static, NoopRawMutex, (f32, f32), 1>,
 ) {

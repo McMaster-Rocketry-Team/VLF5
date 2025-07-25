@@ -1,11 +1,18 @@
-use embassy_futures::{join::join3, select::select};
+use embassy_futures::{join::join4, select::select};
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     watch::{self, Watch},
 };
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
-    can_bus::{messages::CanBusMessageEnum, node_types::AMP_NODE_TYPE},
+    can_bus::{
+        messages::{
+            CanBusMessageEnum,
+            avionics_status::{AvionicsStatusMessage, FlightStage},
+        },
+        node_types::AMP_NODE_TYPE,
+        sender::CanSender,
+    },
     gps::GPSData,
     sensor_reading::SensorReading,
     time::BootTimestamp,
@@ -20,6 +27,7 @@ pub async fn landed_mode(
     can_central: &'static CanCentral<NoopRawMutex>,
     mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
     mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
     mut can_receiver_sub: CanReceiverSub,
 ) {
     let packet_builder = LandedTelemetryPacketBuilder::<NoopRawMutex>::new();
@@ -85,10 +93,27 @@ pub async fn landed_mode(
         }
     };
 
-    let fut = join3(
+    let send_avionics_status_fut = async {
+        let mut ticker = Ticker::every(Duration::from_hz(1));
+
+        loop {
+            can_sender
+                .send(
+                    AvionicsStatusMessage {
+                        flight_stage: FlightStage::LowPower,
+                    }
+                    .into(),
+                )
+                .await;
+            ticker.next().await;
+        }
+    };
+
+    let fut = join4(
         update_packet_sensor_fut,
         update_packet_can_fut,
         send_packet_fut,
+        send_avionics_status_fut,
     );
 
     let wait_landed_mode_end_fut = async {
