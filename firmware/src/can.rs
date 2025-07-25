@@ -1,3 +1,5 @@
+use core::cell::RefCell;
+
 use cortex_m::singleton;
 use defmt::info;
 use embassy_executor::Spawner;
@@ -10,22 +12,26 @@ use embassy_stm32::{
     },
     peripherals::{FDCAN2, PB5, PB6},
 };
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, pubsub};
+use embassy_sync::{
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
+    mutex::Mutex,
+    pubsub,
+};
 use embassy_time::{Duration, Instant, Ticker};
 use firmware_common_new::{
     can_bus::{
         CanBusFrame, CanBusRX, CanBusTX,
-        id::can_node_id_from_serial_number,
+        id::{CanBusExtendedId, can_node_id_from_serial_number},
         messages::{
-            CanBusMessageEnum,
+            CanBusMessageEnum, PRE_UNIX_TIME_MESSAGE_TYPE, UNIX_TIME_MESSAGE_TYPE,
             node_status::{NodeHealth, NodeMode, NodeStatusMessage},
         },
         node_types::VOID_LAKE_NODE_TYPE,
         receiver::{CanReceiver, ReceivedCanBusMessage},
-        sender::CanSender,
+        sender::{CanSender, create_unix_time_frame_data},
     },
     sensor_reading::SensorReading,
-    time::BootTimestamp,
+    time::{BootTimestamp, Clock},
 };
 use stm32_device_signature::device_id;
 
@@ -44,29 +50,14 @@ pub type CanReceiverSub = pubsub::Subscriber<
     1,
 >;
 
-pub async fn start_can_bus_tasks(
-    spawner: &Spawner,
+pub fn init_can_bus(
     fdcan2: Peri<'static, FDCAN2>,
     pb5: Peri<'static, PB5>,
     pb6: Peri<'static, PB6>,
-    unix_clock: &'static UnixClock,
 ) -> (
-    &'static CanSender<NoopRawMutex, 16>,
-    &'static CanReceiver<NoopRawMutex, 4, 2>,
-    &'static CanCentral<NoopRawMutex>,
+    &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
+    CanRx<'static>,
 ) {
-    let can_node_id = can_node_id_from_serial_number(device_id());
-    info!("CAN Device ID: {}", can_node_id);
-
-    let unix_clock_ref: &'static &'static UnixClock =
-        singleton!(: &'static UnixClock = &unix_clock).unwrap();
-    let can_sender =
-        singleton!(: CanSender<NoopRawMutex, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, Some(unix_clock_ref), Some(&defmt_rtt_pipe::PIPE)))
-            .unwrap();
-    let can_receiver =
-        singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
-    let can_central = singleton!(: CanCentral<NoopRawMutex> = CanCentral::new()).unwrap();
-
     bind_interrupts!(struct Irqs {
         FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
         FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
@@ -76,6 +67,68 @@ pub async fn start_can_bus_tasks(
     can.set_bitrate(1_000_000);
     let can = can.into_normal_mode();
     let (tx, rx, _) = can.split();
+    let tx = singleton!(: Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>> = Mutex::new(RefCell::new(tx))).unwrap();
+
+    (tx, rx)
+}
+
+#[embassy_executor::task]
+pub async fn can_bus_broadcast_unix_time_task(
+    tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
+    unix_clock: &'static UnixClock,
+) {
+    let can_node_id = can_node_id_from_serial_number(device_id());
+    let pre_unix_frame_id: u32 = CanBusExtendedId::new(
+        1,
+        PRE_UNIX_TIME_MESSAGE_TYPE,
+        VOID_LAKE_NODE_TYPE,
+        can_node_id,
+    )
+    .into();
+    let unix_frame_id: u32 =
+        CanBusExtendedId::new(1, UNIX_TIME_MESSAGE_TYPE, VOID_LAKE_NODE_TYPE, can_node_id).into();
+
+    let mut ticker = Ticker::every(Duration::from_hz(1));
+    loop {
+        ticker.next().await;
+        if !unix_clock.is_ready() {
+            continue;
+        }
+
+        let tx = tx.lock().await;
+        let mut tx = tx.borrow_mut();
+
+        tx.write(&Frame::new_extended(pre_unix_frame_id, &[]).unwrap())
+            .await;
+        tx.write(
+            &Frame::new_extended(
+                unix_frame_id,
+                &create_unix_time_frame_data(unix_clock.now_us()),
+            )
+            .unwrap(),
+        )
+        .await;
+    }
+}
+
+pub async fn start_can_bus_low_prio_tasks(
+    spawner: &Spawner,
+    tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
+    rx: CanRx<'static>,
+) -> (
+    &'static CanSender<NoopRawMutex, 16>,
+    &'static CanReceiver<NoopRawMutex, 4, 2>,
+    &'static CanCentral<NoopRawMutex>,
+) {
+    let can_node_id = can_node_id_from_serial_number(device_id());
+    info!("CAN Device ID: {}", can_node_id);
+
+    let can_sender =
+        singleton!(: CanSender<NoopRawMutex, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, Some(&defmt_rtt_pipe::PIPE)))
+            .unwrap();
+    let can_receiver =
+        singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
+    let can_central = singleton!(: CanCentral<NoopRawMutex> = CanCentral::new()).unwrap();
 
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
@@ -91,15 +144,20 @@ pub async fn start_can_bus_tasks(
 }
 
 #[embassy_executor::task]
-async fn can_bus_tx_task(can_sender: &'static CanSender<NoopRawMutex, 16>, tx: CanTx<'static>) {
-    struct TxWrapper(CanTx<'static>);
+async fn can_bus_tx_task(
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
+) {
+    struct TxWrapper(&'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>);
     impl CanBusTX for TxWrapper {
         type Error = FrameCreateError;
 
         async fn send(&mut self, id: u32, data: &[u8]) -> Result<(), Self::Error> {
             let frame = Frame::new_extended(id, data)?;
 
-            self.0.write(&frame).await;
+            let tx = self.0.lock().await;
+            let mut tx = tx.borrow_mut();
+            tx.write(&frame).await;
             // FIXME: not a big problem for now, but will be a problem if we implement OTA
             // it needs to flush all the can frames before rebooting
             // tx.flush_all().await;

@@ -2,6 +2,8 @@
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 
+use core::cell::RefCell;
+
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use binary_macros::base64;
@@ -10,12 +12,14 @@ use cortex_m_rt::entry;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
 use embassy_stm32::{
     Peri, Peripherals,
+    can::{CanRx, CanTx},
     gpio::{Level, Output, Speed},
     interrupt::{self, InterruptExt as _, Priority},
     peripherals::{PA2, PA7},
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
+    mutex::Mutex,
     pubsub::{self, PubSubBehavior as _, PubSubChannel, Subscriber},
     signal::Signal,
     watch::{self, Watch},
@@ -38,7 +42,7 @@ use firmware_common_new::{
 use crate::{
     avionics_mode::AvionicsMode,
     bootloader::watchdog_task,
-    can::start_can_bus_tasks,
+    can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
     tasks::{
         buzzer_task::{BuzzerTone, buzzer_task},
@@ -80,7 +84,7 @@ pub const DROGUE_BULKHEAD_NODE_ID: u16 = 1;
 
 #[entry]
 fn main() -> ! {
-    embassy_stm32::init(vlf5_clock_config());
+    let p = embassy_stm32::init(vlf5_clock_config());
 
     let tone_queue =
         singleton!(: PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1> = PubSubChannel::new()).unwrap();
@@ -96,6 +100,8 @@ fn main() -> ! {
             .unwrap();
     let unix_clock = singleton!(: UnixClock = UnixClock::new()).unwrap();
 
+    let (can_tx, can_rx) = init_can_bus(p.FDCAN2, p.PB5, p.PB6);
+
     static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
     #[embassy_stm32::interrupt]
     unsafe fn USART2() {
@@ -106,6 +112,7 @@ fn main() -> ! {
     let spawner = EXECUTOR_HIGH.start(interrupt::USART2);
     spawner.must_spawn(high_prio_main(
         spawner,
+        can_tx,
         tone_queue.subscriber().unwrap(),
         avionics_mode,
         imu_reading_watch,
@@ -118,6 +125,8 @@ fn main() -> ! {
     executor_low.run(|spawner| {
         spawner.must_spawn(low_prio_main(
             spawner,
+            can_tx,
+            can_rx,
             tone_queue,
             avionics_mode,
             imu_reading_watch,
@@ -131,6 +140,7 @@ fn main() -> ! {
 #[embassy_executor::task]
 async fn high_prio_main(
     spawner: SendSpawner,
+    can_tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     tone_queue: Subscriber<'static, CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
     imu_reading_watch: &'static Watch<
@@ -180,11 +190,14 @@ async fn high_prio_main(
         unix_clock,
         gps_reading_watch.receiver().unwrap(),
     ));
+    spawner.must_spawn(can_bus_broadcast_unix_time_task(can_tx, unix_clock));
 }
 
 #[embassy_executor::task]
 async fn low_prio_main(
     spawner: Spawner,
+    can_tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
+    can_rx: CanRx<'static>,
     tone_queue: &'static PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
     imu_reading_watch: &'static Watch<
@@ -265,7 +278,7 @@ async fn low_prio_main(
         p.DMA1_CH2,
     ));
     let (can_sender, _can_receiver, can_central) =
-        start_can_bus_tasks(&spawner, p.FDCAN2, p.PB5, p.PB6, unix_clock).await;
+        start_can_bus_low_prio_tasks(&spawner, can_tx, can_rx).await;
 
     spawner.must_spawn(receive_vlp_task(
         vlp_avionics_client,
@@ -286,7 +299,6 @@ async fn low_prio_main(
         can_sender,
         unix_clock,
     ));
-    spawner.must_spawn(broadcast_unix_time_task(can_sender, unix_clock));
 
     spawner.must_spawn(watchdog_task(p.IWDG1));
 
@@ -394,19 +406,5 @@ async fn broadcast_baro_measurement_task(
                 .into(),
             )
             .await;
-    }
-}
-
-#[embassy_executor::task]
-async fn broadcast_unix_time_task(
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
-    unix_clock: &'static UnixClock,
-) {
-    let mut ticker = Ticker::every(Duration::from_hz(1));
-    loop {
-        if unix_clock.is_ready() {
-            can_sender.send_unix_time();
-        }
-        ticker.next().await;
     }
 }

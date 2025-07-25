@@ -2,8 +2,9 @@ use core::cell::RefCell;
 
 use embassy_sync::blocking_mutex::{Mutex, raw::RawMutex};
 use embassy_time::Instant;
-use firmware_common_new::can_bus::{
-    id::CanBusExtendedId, messages::node_status::NodeStatusMessage,
+use firmware_common_new::{
+    can_bus::{id::CanBusExtendedId, messages::node_status::NodeStatusMessage},
+    vlp::packets::self_test_result::NodeStatus as VlpNodeStatus,
 };
 use heapless::{FnvIndexMap, Vec};
 
@@ -23,6 +24,21 @@ impl CanNode {
 
     pub fn rebooted_in_last_5s(&self) -> bool {
         self.status.uptime_s < 5
+    }
+}
+
+impl Into<VlpNodeStatus> for CanNode {
+    fn into(self) -> VlpNodeStatus {
+        if self.is_online() {
+            VlpNodeStatus {
+                health: self.status.health,
+                mode: self.status.mode,
+                rebooted_in_last_5s: self.rebooted_in_last_5s(),
+                custom_status: self.status.custom_status,
+            }
+        } else {
+            VlpNodeStatus::offline()
+        }
     }
 }
 
@@ -84,6 +100,16 @@ impl<R: RawMutex> CanCentral<R> {
                     .take(N)
                     .cloned(),
             );
+
+            vec
+        })
+    }
+
+    pub fn get_all_nodes(&self) -> Vec<CanNode, 16> {
+        self.nodes.lock(|r| {
+            let nodes = r.borrow();
+            let mut vec = Vec::new();
+            vec.extend(nodes.values().cloned());
 
             vec
         })

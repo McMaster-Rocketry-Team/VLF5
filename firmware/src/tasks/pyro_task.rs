@@ -1,4 +1,5 @@
 use core::cell::RefCell;
+use embassy_futures::join::join4;
 use embassy_stm32::{
     exti::ExtiInput,
     gpio::{Input, Level, Output, Pull, Speed},
@@ -11,7 +12,6 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::vlp::packets::fire_pyro::PyroSelect;
-use futures::join;
 
 #[derive(Clone, defmt::Format, PartialEq, Eq)]
 pub struct ContinuityUpdate {
@@ -131,5 +131,5 @@ pub async fn pyro_task(
         }
     };
 
-    join!(pyro1_cont_fut, pyro2_cont_fut, pyro_pg_fut, fire_fut);
+    join4(pyro1_cont_fut, pyro2_cont_fut, pyro_pg_fut, fire_fut).await;
 }

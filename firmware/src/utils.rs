@@ -1,8 +1,6 @@
+use core::future::Future;
+use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Timer};
-use futures::{
-    future::{select, Either},
-    pin_mut, Future,
-};
 
 #[macro_export]
 macro_rules! sleep {
@@ -21,9 +19,8 @@ macro_rules! checkBit {
 
 pub async fn run_with_timeout<F: Future>(ms: u64, future: F) -> Result<F::Output, u64> {
     let timeout_fut = Timer::after(Duration::from_millis(ms));
-    pin_mut!(future);
     match select(timeout_fut, future).await {
-        Either::Left(_) => Err(ms),
-        Either::Right((result, _)) => Ok(result),
+        Either::First(_) => Err(ms),
+        Either::Second(result) => Ok(result),
     }
 }
