@@ -11,12 +11,12 @@ use firmware_common_new::{
     vlp::client::VLPAvionics,
 };
 
-use crate::{avionics_mode::AvionicsMode, can_central::CanCentral, tasks::unix_clock::UnixClock};
+use crate::{avionics_mode::AvionicsMode, can_central::CanCentral};
 
 pub async fn self_test_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
-    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
     can_central: &'static CanCentral<NoopRawMutex>,
 ) {
 

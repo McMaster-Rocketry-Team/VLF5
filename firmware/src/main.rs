@@ -349,7 +349,7 @@ async fn broadcast_imu_measurement_task(
         SensorReading<BootTimestamp, IMUData>,
         2,
     >,
-    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
     unix_clock: &'static UnixClock,
 ) {
     loop {
@@ -377,7 +377,7 @@ async fn broadcast_baro_measurement_task(
         SensorReading<BootTimestamp, BaroData>,
         2,
     >,
-    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
     unix_clock: &'static UnixClock,
 ) {
     loop {
@@ -399,7 +399,7 @@ async fn broadcast_baro_measurement_task(
 
 #[embassy_executor::task]
 async fn broadcast_unix_time_task(
-    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
     unix_clock: &'static UnixClock,
 ) {
     let mut ticker = Ticker::every(Duration::from_hz(1));

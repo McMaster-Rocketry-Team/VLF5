@@ -26,7 +26,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    avionics_mode::AvionicsMode, can_central::CanCentral, tasks::{buzzer_task::BuzzerTone, unix_clock::UnixClock}, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
+    avionics_mode::AvionicsMode, can_central::CanCentral, tasks::buzzer_task::BuzzerTone, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
 };
 
 #[embassy_executor::task]
@@ -35,7 +35,7 @@ pub async fn receive_vlp_task(
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
     fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
     tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
-    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, 16>,
     can_central: &'static CanCentral<NoopRawMutex>,
 ) {
     let avionics_mode_sender = avionics_mode.sender();

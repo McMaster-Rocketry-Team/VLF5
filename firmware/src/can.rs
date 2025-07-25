@@ -30,8 +30,9 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    bootloader::{configure_next_boot, BootOption},
-    can_central::CanCentral, tasks::unix_clock::UnixClock,
+    bootloader::{BootOption, configure_next_boot},
+    can_central::CanCentral,
+    tasks::unix_clock::UnixClock,
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -50,15 +51,17 @@ pub async fn start_can_bus_tasks(
     pb6: Peri<'static, PB6>,
     unix_clock: &'static UnixClock,
 ) -> (
-    &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    &'static CanSender<NoopRawMutex, 16>,
     &'static CanReceiver<NoopRawMutex, 4, 2>,
     &'static CanCentral<NoopRawMutex>,
 ) {
     let can_node_id = can_node_id_from_serial_number(device_id());
     info!("CAN Device ID: {}", can_node_id);
 
+    let unix_clock_ref: &'static &'static UnixClock =
+        singleton!(: &'static UnixClock = &unix_clock).unwrap();
     let can_sender =
-        singleton!(: CanSender<NoopRawMutex, &'static UnixClock, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, unix_clock, Some(&defmt_rtt_pipe::PIPE)))
+        singleton!(: CanSender<NoopRawMutex, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, Some(unix_clock_ref), Some(&defmt_rtt_pipe::PIPE)))
             .unwrap();
     let can_receiver =
         singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
@@ -78,13 +81,17 @@ pub async fn start_can_bus_tasks(
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
     spawner.must_spawn(node_status_task(can_sender));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
-    spawner.must_spawn(can_message_receive_task(can_node_id, can_central, can_receiver_sub));
+    spawner.must_spawn(can_message_receive_task(
+        can_node_id,
+        can_central,
+        can_receiver_sub,
+    ));
 
     (can_sender, can_receiver, can_central)
 }
 
 #[embassy_executor::task]
-async fn can_bus_tx_task(can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>, tx: CanTx<'static>) {
+async fn can_bus_tx_task(can_sender: &'static CanSender<NoopRawMutex, 16>, tx: CanTx<'static>) {
     struct TxWrapper(CanTx<'static>);
     impl CanBusTX for TxWrapper {
         type Error = FrameCreateError;
@@ -145,7 +152,7 @@ async fn can_bus_rx_task(
 }
 
 #[embassy_executor::task]
-async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>) {
+async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, 16>) {
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         can_sender
