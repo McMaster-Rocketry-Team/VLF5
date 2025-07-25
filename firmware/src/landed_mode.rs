@@ -19,7 +19,7 @@ use firmware_common_new::{
     vlp::{client::VLPAvionics, packets::landed_telemetry::LandedTelemetryPacketBuilder},
 };
 
-use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral};
+use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, tasks::unix_clock::UnixClock};
 
 pub async fn landed_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
@@ -27,7 +27,7 @@ pub async fn landed_mode(
     can_central: &'static CanCentral<NoopRawMutex>,
     mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
     mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
     mut can_receiver_sub: CanReceiverSub,
 ) {
     let packet_builder = LandedTelemetryPacketBuilder::<NoopRawMutex>::new();

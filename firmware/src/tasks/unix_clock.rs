@@ -80,3 +80,10 @@ impl UnixClock {
         })
     }
 }
+
+impl firmware_common_new::time::Clock for &UnixClock {
+    fn now_us(&self) -> u64 {
+        let now = Instant::now().as_micros();
+        self.convert_to_unix_us(now).unwrap_or(now)
+    }
+}

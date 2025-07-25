@@ -2,6 +2,8 @@
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
 
+use {defmt_rtt_pipe as _, panic_probe as _};
+
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -263,7 +265,7 @@ async fn low_prio_main(
         p.DMA1_CH2,
     ));
     let (can_sender, _can_receiver, can_central) =
-        start_can_bus_tasks(&spawner, p.FDCAN2, p.PB5, p.PB6).await;
+        start_can_bus_tasks(&spawner, p.FDCAN2, p.PB5, p.PB6, unix_clock).await;
 
     spawner.must_spawn(receive_vlp_task(
         vlp_avionics_client,
@@ -284,6 +286,7 @@ async fn low_prio_main(
         can_sender,
         unix_clock,
     ));
+    spawner.must_spawn(broadcast_unix_time_task(can_sender, unix_clock));
 
     spawner.must_spawn(watchdog_task(p.IWDG1));
 
@@ -346,7 +349,7 @@ async fn broadcast_imu_measurement_task(
         SensorReading<BootTimestamp, IMUData>,
         2,
     >,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
     unix_clock: &'static UnixClock,
 ) {
     loop {
@@ -374,7 +377,7 @@ async fn broadcast_baro_measurement_task(
         SensorReading<BootTimestamp, BaroData>,
         2,
     >,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
     unix_clock: &'static UnixClock,
 ) {
     loop {
@@ -391,5 +394,19 @@ async fn broadcast_baro_measurement_task(
                 .into(),
             )
             .await;
+    }
+}
+
+#[embassy_executor::task]
+async fn broadcast_unix_time_task(
+    can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
+    unix_clock: &'static UnixClock,
+) {
+    let mut ticker = Ticker::every(Duration::from_hz(1));
+    loop {
+        if unix_clock.is_ready() {
+            can_sender.send_unix_time();
+        }
+        ticker.next().await;
     }
 }

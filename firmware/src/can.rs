@@ -30,8 +30,8 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    bootloader::{BootOption, configure_next_boot},
-    can_central::CanCentral,
+    bootloader::{configure_next_boot, BootOption},
+    can_central::CanCentral, tasks::unix_clock::UnixClock,
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -48,8 +48,9 @@ pub async fn start_can_bus_tasks(
     fdcan2: Peri<'static, FDCAN2>,
     pb5: Peri<'static, PB5>,
     pb6: Peri<'static, PB6>,
+    unix_clock: &'static UnixClock,
 ) -> (
-    &'static CanSender<NoopRawMutex, 16>,
+    &'static CanSender<NoopRawMutex, &'static UnixClock, 16>,
     &'static CanReceiver<NoopRawMutex, 4, 2>,
     &'static CanCentral<NoopRawMutex>,
 ) {
@@ -57,7 +58,7 @@ pub async fn start_can_bus_tasks(
     info!("CAN Device ID: {}", can_node_id);
 
     let can_sender =
-        singleton!(: CanSender<NoopRawMutex, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, None))
+        singleton!(: CanSender<NoopRawMutex, &'static UnixClock, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, unix_clock, Some(&defmt_rtt_pipe::PIPE)))
             .unwrap();
     let can_receiver =
         singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
@@ -83,7 +84,7 @@ pub async fn start_can_bus_tasks(
 }
 
 #[embassy_executor::task]
-async fn can_bus_tx_task(can_sender: &'static CanSender<NoopRawMutex, 16>, tx: CanTx<'static>) {
+async fn can_bus_tx_task(can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>, tx: CanTx<'static>) {
     struct TxWrapper(CanTx<'static>);
     impl CanBusTX for TxWrapper {
         type Error = FrameCreateError;
@@ -144,7 +145,7 @@ async fn can_bus_rx_task(
 }
 
 #[embassy_executor::task]
-async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, 16>) {
+async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, &'static UnixClock, 16>) {
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         can_sender
