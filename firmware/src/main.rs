@@ -80,8 +80,6 @@ fn main() -> ! {
         singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, IMUData>, 1> = Watch::new()).unwrap();
     let baro_reading_watch =
         singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, BaroData>, 1> = Watch::new()).unwrap();
-    let battery_v_watch =
-        singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, f32>, 1> = Watch::new()).unwrap();
 
     static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
     #[embassy_stm32::interrupt]
@@ -97,7 +95,6 @@ fn main() -> ! {
         avionics_mode,
         imu_reading_watch,
         baro_reading_watch,
-        battery_v_watch.sender(),
     ));
 
     let executor_low = singleton!(: Executor = Executor::new()).unwrap();
@@ -108,7 +105,6 @@ fn main() -> ! {
             avionics_mode,
             imu_reading_watch,
             baro_reading_watch,
-            battery_v_watch,
         ));
     })
 }
@@ -126,12 +122,6 @@ async fn high_prio_main(
     baro_reading_watch: &'static Watch<
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, BaroData>,
-        1,
-    >,
-    battery_v_reading_sender: watch::Sender<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, f32>,
         1,
     >,
 ) {
@@ -159,7 +149,6 @@ async fn high_prio_main(
         baro_reading_watch.sender(),
         avionics_mode.receiver().unwrap(),
     ));
-    spawner.must_spawn(adc_task(p.ADC1, p.PB0, battery_v_reading_sender));
 }
 
 #[embassy_executor::task]
@@ -177,7 +166,6 @@ async fn low_prio_main(
         SensorReading<BootTimestamp, BaroData>,
         1,
     >,
-    battery_v_watch: &'static Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, f32>, 1>,
 ) {
     let p = unsafe { Peripherals::steal() };
     let ps = Output::new(p.PA3, Level::Low, Speed::Low);
@@ -186,6 +174,8 @@ async fn low_prio_main(
     let gps_reading =
         singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, GPSData>, 2> = Watch::new())
             .unwrap();
+    let battery_v_watch =
+        singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 1> = Watch::new()).unwrap();
 
     let continuity_update =
         singleton!(: watch::Watch<NoopRawMutex, ContinuityUpdate, 1> = watch::Watch::new())
@@ -199,6 +189,7 @@ async fn low_prio_main(
     ));
     spawner.must_spawn(periodic_beep_task(tone_queue));
 
+    spawner.must_spawn(adc_task(p.ADC1, p.PB0, battery_v_watch.sender()));
     spawner.must_spawn(pyro_task(
         p.PE9,
         p.PE13,

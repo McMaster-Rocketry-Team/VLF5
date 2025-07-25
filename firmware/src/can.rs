@@ -29,7 +29,19 @@ use firmware_common_new::{
 };
 use stm32_device_signature::device_id;
 
-use crate::can_central::CanCentral;
+use crate::{
+    bootloader::{BootOption, configure_next_boot},
+    can_central::CanCentral,
+};
+
+pub type CanReceiverSub = pubsub::Subscriber<
+    'static,
+    NoopRawMutex,
+    SensorReading<BootTimestamp, ReceivedCanBusMessage>,
+    4,
+    2,
+    1,
+>;
 
 pub async fn start_can_bus_tasks(
     spawner: &Spawner,
@@ -38,7 +50,7 @@ pub async fn start_can_bus_tasks(
     pb6: Peri<'static, PB6>,
 ) -> (
     &'static CanSender<NoopRawMutex, 16>,
-    &'static CanReceiver<NoopRawMutex, 4, 1>,
+    &'static CanReceiver<NoopRawMutex, 4, 2>,
     &'static CanCentral<NoopRawMutex>,
 ) {
     let can_node_id = can_node_id_from_serial_number(device_id());
@@ -48,7 +60,7 @@ pub async fn start_can_bus_tasks(
         singleton!(: CanSender<NoopRawMutex, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, None))
             .unwrap();
     let can_receiver =
-        singleton!(: CanReceiver<NoopRawMutex, 4, 1> = CanReceiver::new(can_node_id)).unwrap();
+        singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
     let can_central = singleton!(: CanCentral<NoopRawMutex> = CanCentral::new()).unwrap();
 
     bind_interrupts!(struct Irqs {
@@ -65,7 +77,7 @@ pub async fn start_can_bus_tasks(
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
     spawner.must_spawn(node_status_task(can_sender));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
-    spawner.must_spawn(can_message_receive_task(can_central, can_receiver_sub));
+    spawner.must_spawn(can_message_receive_task(can_node_id, can_central, can_receiver_sub));
 
     (can_sender, can_receiver, can_central)
 }
@@ -94,7 +106,7 @@ async fn can_bus_tx_task(can_sender: &'static CanSender<NoopRawMutex, 16>, tx: C
 
 #[embassy_executor::task]
 async fn can_bus_rx_task(
-    can_receiver: &'static CanReceiver<NoopRawMutex, 4, 1>,
+    can_receiver: &'static CanReceiver<NoopRawMutex, 4, 2>,
     rx: CanRx<'static>,
 ) {
     struct RxWrapper(CanRx<'static>);
@@ -152,15 +164,9 @@ async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, 16>) {
 
 #[embassy_executor::task]
 async fn can_message_receive_task(
+    self_can_id: u16,
     can_central: &'static CanCentral<NoopRawMutex>,
-    mut can_receiver_sub: pubsub::Subscriber<
-        'static,
-        NoopRawMutex,
-        SensorReading<BootTimestamp, ReceivedCanBusMessage>,
-        4,
-        1,
-        1,
-    >,
+    mut can_receiver_sub: CanReceiverSub,
 ) {
     loop {
         let SensorReading {
@@ -168,7 +174,16 @@ async fn can_message_receive_task(
         } = can_receiver_sub.next_message_pure().await;
 
         match data.message {
-            CanBusMessageEnum::Reset(reset_message) => {}
+            CanBusMessageEnum::Reset(reset_message) => {
+                if reset_message.node_id == self_can_id || reset_message.reset_all {
+                    configure_next_boot(if reset_message.into_bootloader {
+                        BootOption::Bootloader
+                    } else {
+                        BootOption::Application
+                    });
+                    cortex_m::peripheral::SCB::sys_reset();
+                }
+            }
             CanBusMessageEnum::NodeStatus(node_status_message) => {
                 can_central.on_receive_node_status(timestamp_us, &data.id, &node_status_message)
             }

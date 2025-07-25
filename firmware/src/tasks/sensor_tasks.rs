@@ -122,7 +122,7 @@ pub async fn adc_task(
     battery_v_pin: Peri<'static, PB0>,
     battery_v_reading_sender: watch::Sender<
         'static,
-        CriticalSectionRawMutex,
+        NoopRawMutex,
         SensorReading<BootTimestamp, f32>,
         1,
     >,
