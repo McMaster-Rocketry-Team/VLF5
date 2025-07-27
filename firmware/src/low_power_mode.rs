@@ -1,17 +1,16 @@
-use embassy_futures::{join::join4, select::select};
+use core::cell::RefCell;
+
+use embassy_futures::{join::join3, select::select};
 use embassy_sync::{
+    blocking_mutex::Mutex as BlockingMutex,
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     watch::{self, Watch},
 };
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
-        messages::{
-            CanBusMessageEnum,
-            avionics_status::{AvionicsStatusMessage, FlightStage},
-        },
+        messages::{CanBusMessageEnum, vl_status::FlightStage},
         node_types::AMP_NODE_TYPE,
-        sender::CanSender,
     },
     gps::GPSData,
     readings::BaroData,
@@ -29,9 +28,13 @@ pub async fn low_power_mode(
     mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
     mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
     mut baro_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, BaroData>>,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
     mut can_receiver_sub: CanReceiverSub,
+    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
 ) {
+    flight_stage.lock(|r| {
+        *r.borrow_mut() = FlightStage::LowPower;
+    });
+
     let packet_builder = LowPowerTelemetryPacketBuilder::<NoopRawMutex>::new();
 
     let update_packet_sensor_fut = async {
@@ -83,27 +86,10 @@ pub async fn low_power_mode(
         }
     };
 
-    let send_avionics_status_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(1));
-
-        loop {
-            can_sender
-                .send(
-                    AvionicsStatusMessage {
-                        flight_stage: FlightStage::LowPower,
-                    }
-                    .into(),
-                )
-                .await;
-            ticker.next().await;
-        }
-    };
-
-    let fut = join4(
+    let fut = join3(
         update_packet_sensor_fut,
         update_packet_can_fut,
         send_packet_fut,
-        send_avionics_status_fut,
     );
 
     let wait_low_power_mode_end_fut = async {

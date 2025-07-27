@@ -18,6 +18,7 @@ use embassy_stm32::{
     peripherals::{PA2, PA7},
 };
 use embassy_sync::{
+    blocking_mutex::Mutex as BlockingMutex,
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     mutex::Mutex,
     pubsub::{self, PubSubBehavior as _, PubSubChannel, Subscriber},
@@ -27,8 +28,10 @@ use embassy_sync::{
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
+        custom_status::vl_custom_status::VLCustomStatus,
         messages::{
             baro_measurement::BaroMeasurementMessage, imu_measurement::IMUMeasurementMessage,
+            vl_status::FlightStage,
         },
         sender::CanSender,
     },
@@ -44,6 +47,9 @@ use crate::{
     bootloader::watchdog_task,
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
+    landed_mode::landed_mode,
+    low_power_mode::low_power_mode,
+    self_test_mode::self_test_mode,
     tasks::{
         buzzer_task::{BuzzerTone, buzzer_task},
         gps_task::gps_task,
@@ -98,6 +104,7 @@ fn main() -> ! {
     let gps_reading_watch =
         singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3> = Watch::new())
             .unwrap();
+    let vl_status = singleton!(: BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>> = BlockingMutex::new(RefCell::new(VLCustomStatus { imu_ok: false, baro_ok: false, mag_ok: false, gps_ok: false, sd_ok: false, can_bus_ok: false }))).unwrap();
     let unix_clock = singleton!(: UnixClock = UnixClock::new()).unwrap();
 
     let (can_tx, can_rx) = init_can_bus(p.FDCAN2, p.PB5, p.PB6);
@@ -118,6 +125,7 @@ fn main() -> ! {
         imu_reading_watch,
         baro_reading_watch,
         gps_reading_watch,
+        vl_status,
         unix_clock,
     ));
 
@@ -132,6 +140,7 @@ fn main() -> ! {
             imu_reading_watch,
             baro_reading_watch,
             gps_reading_watch,
+            vl_status,
             unix_clock,
         ));
     })
@@ -158,6 +167,7 @@ async fn high_prio_main(
         SensorReading<BootTimestamp, GPSData>,
         3,
     >,
+    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
     unix_clock: &'static UnixClock,
 ) {
     let p = unsafe { Peripherals::steal() };
@@ -215,6 +225,7 @@ async fn low_prio_main(
         SensorReading<BootTimestamp, GPSData>,
         3,
     >,
+    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
     unix_clock: &'static UnixClock,
 ) {
     let p = unsafe { Peripherals::steal() };
@@ -222,7 +233,7 @@ async fn low_prio_main(
     let ps = Output::new(p.PA3, Level::Low, Speed::Low);
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
-
+    let flight_stage = singleton!(:BlockingMutex<NoopRawMutex, RefCell<FlightStage>> = BlockingMutex::new(RefCell::new(FlightStage::Armed))).unwrap();
     let battery_v_watch =
         singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 1> = Watch::new())
             .unwrap();
@@ -277,8 +288,14 @@ async fn low_prio_main(
         p.DMA1_CH3,
         p.DMA1_CH2,
     ));
-    let (can_sender, _can_receiver, can_central) =
-        start_can_bus_low_prio_tasks(&spawner, can_tx, can_rx).await;
+    let (can_sender, can_receiver, can_central) = start_can_bus_low_prio_tasks(
+        &spawner,
+        can_tx,
+        can_rx,
+        flight_stage,
+        battery_v_watch.dyn_receiver().unwrap(),
+    )
+    .await;
 
     spawner.must_spawn(receive_vlp_task(
         vlp_avionics_client,
@@ -306,6 +323,47 @@ async fn low_prio_main(
     tone_queue.publish_immediate(BuzzerTone::High(250, 250));
     tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
     tone_queue.publish_immediate(BuzzerTone::High(250, 250));
+
+    loop {
+        match avionics_mode.try_get().unwrap() {
+            AvionicsMode::Armed => todo!(),
+            AvionicsMode::SelfTest => {
+                self_test_mode(
+                    vlp_avionics_client,
+                    avionics_mode,
+                    can_central,
+                    vl_status,
+                    flight_stage,
+                )
+                .await
+            }
+            AvionicsMode::LowPower => {
+                low_power_mode(
+                    vlp_avionics_client,
+                    avionics_mode,
+                    can_central,
+                    gps_reading_watch.dyn_receiver().unwrap(),
+                    battery_v_watch.dyn_receiver().unwrap(),
+                    baro_reading_watch.dyn_receiver().unwrap(),
+                    can_receiver.subscriber().unwrap(),
+                    flight_stage,
+                )
+                .await
+            }
+            AvionicsMode::Landed => {
+                landed_mode(
+                    vlp_avionics_client,
+                    avionics_mode,
+                    can_central,
+                    gps_reading_watch.dyn_receiver().unwrap(),
+                    battery_v_watch.dyn_receiver().unwrap(),
+                    can_receiver.subscriber().unwrap(),
+                    flight_stage,
+                )
+                .await
+            }
+        }
+    }
 }
 
 #[embassy_executor::task]

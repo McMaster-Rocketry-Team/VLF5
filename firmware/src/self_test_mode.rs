@@ -1,21 +1,21 @@
 use core::cell::RefCell;
 
-use embassy_futures::{join::join3, select::select};
+use embassy_futures::{join::join, select::select};
 use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     blocking_mutex::Mutex as BlockingMutex,
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     watch::Watch,
 };
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
-        messages::avionics_status::{AvionicsStatusMessage, FlightStage},
+        custom_status::vl_custom_status::VLCustomStatus,
+        messages::vl_status::FlightStage,
         node_types::{
             AERO_RUST_NODE_TYPE, AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
             PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE, PAYLOAD_EPS2_NODE_TYPE,
             PAYLOAD_ROCKET_WIFI_NODE_TYPE,
         },
-        sender::CanSender,
     },
     vlp::{
         client::VLPAvionics,
@@ -28,24 +28,16 @@ use crate::{
     can_central::CanCentral,
 };
 
-// TODO: other tasks should update this struct
-#[derive(Debug, defmt::Format, Clone)]
-pub struct VLSelfTestStatus {
-    pub imu_ok: bool,
-    pub baro_ok: bool,
-    pub mag_ok: bool,
-    pub gps_ok: bool,
-    pub sd_ok: bool,
-    pub can_bus_ok: bool,
-}
-
 pub async fn self_test_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
     can_central: &'static CanCentral<NoopRawMutex>,
-    vl_self_test_status: &'static BlockingMutex<CriticalSectionRawMutex,RefCell<VLSelfTestStatus>>
+    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
+    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
 ) {
+    flight_stage.lock(|r| {
+        *r.borrow_mut() = FlightStage::SelfTest;
+    });
     let packet_builder = SelfTestResultPacketBuilder::<NoopRawMutex>::new();
 
     let update_node_status_fut = async {
@@ -95,7 +87,7 @@ pub async fn self_test_mode(
                     }
                 }
 
-                vl_self_test_status.lock(|r|{
+                vl_status.lock(|r| {
                     let vl_self_test_status = r.borrow();
                     packet.imu_ok = vl_self_test_status.imu_ok;
                     packet.baro_ok = vl_self_test_status.baro_ok;
@@ -120,27 +112,7 @@ pub async fn self_test_mode(
         }
     };
 
-    let send_avionics_status_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(1));
-
-        loop {
-            can_sender
-                .send(
-                    AvionicsStatusMessage {
-                        flight_stage: FlightStage::SelfTest,
-                    }
-                    .into(),
-                )
-                .await;
-            ticker.next().await;
-        }
-    };
-
-    let fut = join3(
-        update_node_status_fut,
-        send_packet_fut,
-        send_avionics_status_fut,
-    );
+    let fut = join(update_node_status_fut, send_packet_fut);
 
     let wait_self_test_mode_end_fut = async {
         let mut receiver = avionics_mode.receiver().unwrap();
