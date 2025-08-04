@@ -4,6 +4,7 @@ use embedded_hal_async::spi::{ErrorKind, SpiDevice};
 use firmware_common_new::readings::IMUData;
 use firmware_common_new::sensor_reading::SensorReading;
 use firmware_common_new::time::BootTimestamp;
+use nalgebra::Vector3;
 
 use crate::sleep;
 
@@ -137,16 +138,16 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Ok(SensorReading::new(
             Instant::now().as_micros(),
             IMUData {
-                acc: [
+                acc: Vector3::new(
                     acc_x as f32 * acc_scale,
                     acc_y as f32 * acc_scale,
                     acc_z as f32 * acc_scale,
-                ],
-                gyro: [
+                ),
+                gyro: Vector3::new(
                     gyro_x as f32 * gyro_scale,
                     gyro_y as f32 * gyro_scale,
                     gyro_z as f32 * gyro_scale,
-                ],
+                ),
             },
         ))
     }

@@ -34,7 +34,7 @@ impl Into<VlpNodeStatus> for CanNode {
                 health: self.status.health,
                 mode: self.status.mode,
                 rebooted_in_last_5s: self.rebooted_in_last_5s(),
-                custom_status: self.status.custom_status,
+                custom_status: self.status.custom_status_raw,
             }
         } else {
             VlpNodeStatus::offline()

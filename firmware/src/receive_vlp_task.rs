@@ -35,7 +35,7 @@ pub async fn receive_vlp_task(
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
     fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
     tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex>,
     can_central: &'static CanCentral<NoopRawMutex>,
 ) {
     let avionics_mode_sender = avionics_mode.sender();
@@ -58,26 +58,22 @@ pub async fn receive_vlp_task(
                     DeviceToReset::All => NodeSelection::All,
                     DeviceToReset::AMPOut1 => {
                         can_sender
-                            .send(AmpResetOutputMessage { output: 1 }.into())
-                            .await;
+                            .send(AmpResetOutputMessage { output: 1 }.into());
                         NodeSelection::None
                     }
                     DeviceToReset::AMPOut2 => {
                         can_sender
-                            .send(AmpResetOutputMessage { output: 2 }.into())
-                            .await;
+                            .send(AmpResetOutputMessage { output: 2 }.into());
                         NodeSelection::None
                     }
                     DeviceToReset::AMPOut3 => {
                         can_sender
-                            .send(AmpResetOutputMessage { output: 3 }.into())
-                            .await;
+                            .send(AmpResetOutputMessage { output: 3 }.into());
                         NodeSelection::None
                     }
                     DeviceToReset::AMPOut4 => {
                         can_sender
-                            .send(AmpResetOutputMessage { output: 4 }.into())
-                            .await;
+                            .send(AmpResetOutputMessage { output: 4 }.into());
                         NodeSelection::None
                     }
 
@@ -110,8 +106,7 @@ pub async fn receive_vlp_task(
                                     into_bootloader: false,
                                 }
                                 .into(),
-                            )
-                            .await;
+                            );
                     }
                     NodeSelection::NodeType(node_type) => {
                         for node in can_central.get_nodes::<4>(node_type) {
@@ -123,8 +118,7 @@ pub async fn receive_vlp_task(
                                         into_bootloader: false,
                                     }
                                     .into(),
-                                )
-                                .await;
+                                );
                         }
                     }
                     NodeSelection::NodeId(node_id) => {
@@ -136,8 +130,7 @@ pub async fn receive_vlp_task(
                                     into_bootloader: false,
                                 }
                                 .into(),
-                            )
-                            .await;
+                            );
                     }
                     NodeSelection::None => {}
                 }
@@ -153,8 +146,7 @@ pub async fn receive_vlp_task(
                                 node_id: eps1.id,
                             }
                             .into(),
-                        )
-                        .await;
+                        );
                 }
 
                 for eps2 in can_central.get_nodes::<2>(PAYLOAD_EPS2_NODE_TYPE) {
@@ -167,8 +159,7 @@ pub async fn receive_vlp_task(
                                 node_id: eps2.id,
                             }
                             .into(),
-                        )
-                        .await;
+                        );
                 }
             }
             VLPUplinkPacket::AMPOutputOverwrite(packet) => {
@@ -181,8 +172,7 @@ pub async fn receive_vlp_task(
                             out4: packet.out4,
                         }
                         .into(),
-                    )
-                    .await;
+                    );
             }
             VLPUplinkPacket::FirePyro(packet) => {
                 if avionics_mode.try_get() == Some(AvionicsMode::Armed) {

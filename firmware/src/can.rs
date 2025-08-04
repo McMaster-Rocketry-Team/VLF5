@@ -13,16 +13,27 @@ use embassy_stm32::{
     peripherals::{FDCAN2, PB5, PB6},
 };
 use embassy_sync::{
-    blocking_mutex::{raw::{CriticalSectionRawMutex, NoopRawMutex}, Mutex as BlockingMutex},
+    blocking_mutex::{
+        Mutex as BlockingMutex,
+        raw::{CriticalSectionRawMutex, NoopRawMutex},
+    },
     mutex::Mutex,
     pubsub, watch,
 };
 use embassy_time::{Duration, Instant, Ticker};
 use firmware_common_new::{
     can_bus::{
-        id::{can_node_id_from_serial_number, CanBusExtendedId}, messages::{
-            node_status::{NodeHealth, NodeMode, NodeStatusMessage}, vl_status::{FlightStage, VLStatusMessage}, CanBusMessageEnum, PRE_UNIX_TIME_MESSAGE_TYPE, UNIX_TIME_MESSAGE_TYPE
-        }, node_types::VOID_LAKE_NODE_TYPE, receiver::{CanReceiver, ReceivedCanBusMessage}, sender::{create_unix_time_frame_data, CanSender}, CanBusFrame, CanBusRX, CanBusTX
+        CanBusFrame, CanBusRX, CanBusTX,
+        custom_status::vl_custom_status::VLCustomStatus,
+        id::{CanBusExtendedId, can_node_id_from_serial_number},
+        messages::{
+            CanBusMessageEnum, PRE_UNIX_TIME_MESSAGE_TYPE, UNIX_TIME_MESSAGE_TYPE,
+            node_status::{NodeHealth, NodeMode, NodeStatusMessage},
+            vl_status::{FlightStage, VLStatusMessage},
+        },
+        node_types::VOID_LAKE_NODE_TYPE,
+        receiver::{CanReceiver, ReceivedCanBusMessage},
+        sender::{CanSender, create_unix_time_frame_data},
     },
     sensor_reading::SensorReading,
     time::{BootTimestamp, Clock},
@@ -110,9 +121,9 @@ pub async fn start_can_bus_low_prio_tasks(
     tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     rx: CanRx<'static>,
     flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
-    battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>
+    battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
 ) -> (
-    &'static CanSender<NoopRawMutex, 16>,
+    &'static CanSender<NoopRawMutex>,
     &'static CanReceiver<NoopRawMutex, 4, 2>,
     &'static CanCentral<NoopRawMutex>,
 ) {
@@ -120,7 +131,7 @@ pub async fn start_can_bus_low_prio_tasks(
     info!("CAN Device ID: {}", can_node_id);
 
     let can_sender =
-        singleton!(: CanSender<NoopRawMutex, 16> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, Some(&defmt_rtt_pipe::PIPE)))
+        singleton!(: CanSender<NoopRawMutex> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, Some(&defmt_rtt_pipe::PIPE)))
             .unwrap();
     let can_receiver =
         singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
@@ -128,7 +139,11 @@ pub async fn start_can_bus_low_prio_tasks(
 
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
-    spawner.must_spawn(node_status_task(can_sender, flight_stage, battery_v_reading));
+    spawner.must_spawn(node_status_task(
+        can_sender,
+        flight_stage,
+        battery_v_reading,
+    ));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
     spawner.must_spawn(can_message_receive_task(
         can_node_id,
@@ -141,7 +156,7 @@ pub async fn start_can_bus_low_prio_tasks(
 
 #[embassy_executor::task]
 async fn can_bus_tx_task(
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex>,
     tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
 ) {
     struct TxWrapper(&'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>);
@@ -206,32 +221,38 @@ async fn can_bus_rx_task(
 }
 
 #[embassy_executor::task]
-async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, 16>, 
- flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
- mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+async fn node_status_task(
+    can_sender: &'static CanSender<NoopRawMutex>,
+    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
+    mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
 ) {
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         can_sender
             .send(
-                NodeStatusMessage {
-                    uptime_s: Instant::now().as_secs() as u32,
-                    health: NodeHealth::Healthy,
-                    mode: NodeMode::Operational,
-                    custom_status: 0,
+                NodeStatusMessage::new(
+                    Instant::now().as_secs() as u32,
+                    NodeHealth::Healthy,
+                    NodeMode::Operational,
+                    VLCustomStatus {
+                        imu_ok: true,
+                        baro_ok: true,
+                        mag_ok: true,
+                        gps_ok: true,
+                        sd_ok: true,
+                        can_bus_ok: true,
+                    },
+                )
+                .into(),
+            );
+        can_sender
+            .send(
+                VLStatusMessage {
+                    flight_stage: flight_stage.borrow().clone().into_inner(),
+                    battery_mv: (battery_v_reading.try_get().unwrap().data * 1000.0) as u16,
                 }
                 .into(),
-            )
-            .await;
-        can_sender
-        .send(
-            VLStatusMessage {
-                flight_stage: flight_stage.borrow().clone().into_inner(),
-                battery_mv: (battery_v_reading.try_get().unwrap().data * 1000.0) as u16
-            }
-            .into(),
-        )
-        .await;
+            );
         ticker.next().await;
     }
 }

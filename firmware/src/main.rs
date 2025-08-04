@@ -230,7 +230,7 @@ async fn low_prio_main(
 ) {
     let p = unsafe { Peripherals::steal() };
     // TODO
-    let ps = Output::new(p.PA3, Level::Low, Speed::Low);
+    let mut ps = Output::new(p.PA3, Level::Low, Speed::Low);
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let flight_stage = singleton!(:BlockingMutex<NoopRawMutex, RefCell<FlightStage>> = BlockingMutex::new(RefCell::new(FlightStage::Armed))).unwrap();
@@ -326,8 +326,12 @@ async fn low_prio_main(
 
     loop {
         match avionics_mode.try_get().unwrap() {
-            AvionicsMode::Armed => todo!(),
+            AvionicsMode::Armed => {
+                ps.set_low();
+                todo!()
+            }
             AvionicsMode::SelfTest => {
+                ps.set_high();
                 self_test_mode(
                     vlp_avionics_client,
                     avionics_mode,
@@ -338,6 +342,7 @@ async fn low_prio_main(
                 .await
             }
             AvionicsMode::LowPower => {
+                ps.set_high();
                 low_power_mode(
                     vlp_avionics_client,
                     avionics_mode,
@@ -351,6 +356,7 @@ async fn low_prio_main(
                 .await
             }
             AvionicsMode::Landed => {
+                ps.set_high();
                 landed_mode(
                     vlp_avionics_client,
                     avionics_mode,
@@ -419,23 +425,21 @@ async fn broadcast_imu_measurement_task(
         SensorReading<BootTimestamp, IMUData>,
         2,
     >,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex>,
     unix_clock: &'static UnixClock,
 ) {
     loop {
         let imu_reading = imu_reading_sub.get().await;
-        can_sender
-            .send(
-                IMUMeasurementMessage::new(
-                    unix_clock
-                        .convert_to_unix_us(imu_reading.timestamp_us)
-                        .unwrap_or(imu_reading.timestamp_us),
-                    &imu_reading.data.acc,
-                    &imu_reading.data.gyro,
-                )
-                .into(),
+        can_sender.send(
+            IMUMeasurementMessage::new(
+                unix_clock
+                    .convert_to_unix_us(imu_reading.timestamp_us)
+                    .unwrap_or(imu_reading.timestamp_us),
+                &imu_reading.data.acc,
+                &imu_reading.data.gyro,
             )
-            .await;
+            .into(),
+        );
     }
 }
 
@@ -447,22 +451,20 @@ async fn broadcast_baro_measurement_task(
         SensorReading<BootTimestamp, BaroData>,
         2,
     >,
-    can_sender: &'static CanSender<NoopRawMutex, 16>,
+    can_sender: &'static CanSender<NoopRawMutex>,
     unix_clock: &'static UnixClock,
 ) {
     loop {
         let baro_reading = baro_reading_sub.get().await;
-        can_sender
-            .send(
-                BaroMeasurementMessage::new(
-                    unix_clock
-                        .convert_to_unix_us(baro_reading.timestamp_us)
-                        .unwrap_or(baro_reading.timestamp_us),
-                    baro_reading.data.pressure,
-                    baro_reading.data.temperature,
-                )
-                .into(),
+        can_sender.send(
+            BaroMeasurementMessage::new(
+                unix_clock
+                    .convert_to_unix_us(baro_reading.timestamp_us)
+                    .unwrap_or(baro_reading.timestamp_us),
+                baro_reading.data.pressure,
+                baro_reading.data.temperature,
             )
-            .await;
+            .into(),
+        );
     }
 }
