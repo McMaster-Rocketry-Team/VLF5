@@ -1,5 +1,6 @@
 /target
 /vendor
 .rocket-cli.toml
+.rocket-cli.log
 logs
 vlp.key

@@ -38,7 +38,6 @@ cortex-m-rt = "0.7.5"
 firmware-common-new = { path = "../../Rust_Monorepo/firmware-common-new", default-features = false, features = [
     "bootloader",
 ] }
-# stm32g0 and stm32g4 have the same memory location for device signature
 stm32-device-signature = { version = "0.3.3", features = ["stm32h74x"] }
 embedded-can = "0.4.1"
 salty = "0.3.0"
@@ -61,8 +60,7 @@ opt-level = "z"
 incremental = true
 
 [profile.release]
-codegen-units = 1
-debug = false
+debug = true
 lto = true
 opt-level = "z"
 incremental = true

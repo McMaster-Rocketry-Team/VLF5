@@ -1,20 +1,18 @@
 use cortex_m::singleton;
 use embassy_executor::Spawner;
 use embassy_stm32::{
-    bind_interrupts,
+    Peri, bind_interrupts,
     can::{
-        self,
+        self, CanConfigurator, CanRx, CanTx, Frame,
         enums::{BusError, FrameCreateError},
         frame::Envelope,
-        CanConfigurator, CanRx, CanTx, Frame,
     },
     peripherals::{FDCAN2, PB5, PB6},
-    Peri,
 };
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use firmware_common_new::can_bus::{
-    id::can_node_id_from_serial_number, node_types::OZYS_NODE_TYPE, receiver::CanReceiver,
-    sender::CanSender, CanBusFrame, CanBusRX, CanBusTX,
+    CanBusFrame, CanBusRX, CanBusTX, id::can_node_id_from_serial_number,
+    node_types::OZYS_NODE_TYPE, receiver::CanReceiver, sender::CanSender,
 };
 use stm32_device_signature::device_id;
 
@@ -32,15 +30,15 @@ pub fn start_can_bus_tasks(
     log_info!("CAN Device ID: {}", can_node_id);
 
     let can_sender =
-        singleton!(: CanSender<NoopRawMutex, 4> = CanSender::new(OZYS_NODE_TYPE, can_node_id))
+        singleton!(: CanSender<NoopRawMutex, 4> = CanSender::new(OZYS_NODE_TYPE, can_node_id, None))
             .unwrap();
     let can_receiver =
         singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
 
-        bind_interrupts!(struct Irqs {
-            FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
-            FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
-        });
+    bind_interrupts!(struct Irqs {
+        FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
+        FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
+    });
 
     let mut can = CanConfigurator::new(fdcan2, pb5, pb6, Irqs);
     can.set_bitrate(1_000_000);

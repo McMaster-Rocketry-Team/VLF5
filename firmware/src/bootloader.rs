@@ -19,7 +19,7 @@ use embassy_time::{Duration, Ticker};
 /// If the main application failed to start, the watchdog will reset the device and
 /// due to the magic number in BACKUP_RAM\[0\], the device will stay in bootloader.
 #[unsafe(link_section = ".backup_ram")]
-static mut BACKUP_RAM: MaybeUninit<[u32; 256]> = MaybeUninit::uninit();
+static mut BACKUP_RAM: MaybeUninit<[u32; 2]> = MaybeUninit::uninit();
 
 pub enum BootOption {
     Bootloader,

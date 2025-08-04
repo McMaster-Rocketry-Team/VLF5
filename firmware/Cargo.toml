@@ -92,6 +92,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "imu_test"
+path = "src/main_imu_test.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "mag_test"
 path = "src/main_mag_test.rs"
 test = false

@@ -1,12 +1,10 @@
-use embassy_time::Instant;
+use embassy_time::{Instant, Timer};
 use embedded_hal_async::spi::Error;
 use embedded_hal_async::spi::{ErrorKind, SpiDevice};
 use firmware_common_new::readings::IMUData;
 use firmware_common_new::sensor_reading::SensorReading;
 use firmware_common_new::time::BootTimestamp;
 use nalgebra::Vector3;
-
-use crate::sleep;
 
 const WHO_AM_I: u8 = 0x0F;
 const STATUS_REG: u8 = 0x1E;
@@ -42,9 +40,9 @@ impl<B: SpiDevice> LSM6DSM<B> {
     */
     pub async fn low_power(&mut self) -> Result<(), ErrorKind> {
         self.write_register(CTRL1_XL, 0b0011_1100).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
         self.write_register(CTRL2_G, 0b0011_1100).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
         Ok(())
     }
 
@@ -56,9 +54,9 @@ impl<B: SpiDevice> LSM6DSM<B> {
     */
     pub async fn normal_mode(&mut self) -> Result<(), ErrorKind> {
         self.write_register(CTRL1_XL, 0b1010_1100).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
         self.write_register(CTRL2_G, 0b1010_1100).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
         Ok(())
     }
 
@@ -90,7 +88,7 @@ impl<B: SpiDevice> LSM6DSM<B> {
     */
     pub async fn reset(&mut self) -> Result<(), ErrorKind> {
         self.write_register(CTRL3_C, 0b10000101).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
 
         let id = self.verify_identity().await?;
         if id != 0x6A {
@@ -98,9 +96,9 @@ impl<B: SpiDevice> LSM6DSM<B> {
         }
 
         self.write_register(CTRL1_XL, 0b1010_01_00).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
         self.write_register(CTRL2_G, 0b1010_11_00).await?;
-        sleep!(10);
+        Timer::after_millis(10).await;
 
         Ok(())
     }

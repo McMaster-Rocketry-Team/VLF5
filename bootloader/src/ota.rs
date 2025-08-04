@@ -1,3 +1,5 @@
+use core::cell::RefCell;
+
 use binary_macros::base64;
 use embassy_stm32::{
     Peri,
@@ -17,12 +19,13 @@ use firmware_common_new::{
 use heapless::Vec;
 use salty::Sha512;
 
-use crate::{APP_ADDRESS, BootOption, configure_next_boot};
+use crate::{BootOption, app_address, configure_next_boot};
 
-static PUBLIC_KEY: &[u8] = base64!("file:pub.key");
+static PUBLIC_KEY: &[u8] = base64!("file:../../Rust_Monorepo/bootloader/public.key");
 
 #[embassy_executor::task]
 pub async fn ota_task(
+    ota_started: &'static RefCell<bool>,
     can_sender: &'static CanSender<NoopRawMutex, 4>,
     can_receiver: &'static CanReceiver<NoopRawMutex, 4, 2>,
     flash: Peri<'static, FLASH>,
@@ -32,7 +35,7 @@ pub async fn ota_task(
     const PAGE_SIZE: u32 = 2 * 1024;
     let mut sha512 = Sha512::new();
     let mut signature = Vec::<u8, 64>::new();
-    let firmware_start_address = APP_ADDRESS - 0x08000000;
+    let firmware_start_address = app_address() - 0x08000000;
     let mut firmware_write_offset = firmware_start_address;
     let mut last_sequence_number = 0u8;
     let mut write_buffer = Vec::<u8, WRITE_SIZE>::new();
@@ -47,6 +50,10 @@ pub async fn ota_task(
             && data_transfer.destination_node_id == can_receiver.self_node_id()
         {
             if data_transfer.start_of_transfer {
+                {
+                    let mut ota_started = ota_started.borrow_mut();
+                    *ota_started = true;
+                }
                 sha512 = Sha512::new();
                 signature.clear();
                 firmware_write_offset = firmware_start_address;
@@ -103,15 +110,13 @@ pub async fn ota_task(
                 }
             }
 
-            can_sender
-                .send(
-                    AckMessage {
-                        crc: message.crc,
-                        node_id: message.id.node_id,
-                    }
-                    .into(),
-                )
-                .await;
+            can_sender.send(
+                AckMessage {
+                    crc: message.crc,
+                    node_id: message.id.node_id,
+                }
+                .into(),
+            );
 
             if data_transfer.end_of_transfer {
                 log_info!("firmware received");

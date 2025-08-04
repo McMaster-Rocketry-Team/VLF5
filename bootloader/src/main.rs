@@ -9,7 +9,7 @@ mod can;
 mod clock_config;
 mod ota;
 
-use core::{mem::MaybeUninit, ptr::write_volatile};
+use core::{cell::RefCell, mem::MaybeUninit, ptr::write_volatile};
 
 use crate::clock_config::vlf5_clock_config;
 use can::start_can_bus_tasks;
@@ -54,7 +54,7 @@ use {defmt_rtt as _, panic_probe as _};
 /// If the main application failed to start, the watchdog will reset the device and
 /// due to the magic number in BACKUP_RAM\[0\], the device will stay in bootloader.
 #[unsafe(link_section = ".backup_ram")]
-static mut BACKUP_RAM: MaybeUninit<[u32; 256]> = MaybeUninit::uninit();
+static mut BACKUP_RAM: MaybeUninit<[u32; 2]> = MaybeUninit::uninit();
 
 pub enum BootOption {
     Bootloader,
@@ -75,8 +75,12 @@ pub fn configure_next_boot(boot_option: BootOption) {
     }
 }
 
-// this needs to be the same as the APP section origin in memory.x
-pub const APP_ADDRESS: u32 = 0x08010000;
+pub fn app_address() -> u32 {
+    unsafe extern "C" {
+        static __app_address: u32;
+    }
+    unsafe { &__app_address as *const u32 as u32 }
+}
 
 #[entry]
 fn main() -> ! {
@@ -96,20 +100,22 @@ fn main() -> ! {
         unsafe {
             let mut p = cortex_m::Peripherals::steal();
             p.SCB.invalidate_icache();
-            p.SCB.vtor.write(APP_ADDRESS);
-            cortex_m::asm::bootload(APP_ADDRESS as *const u32);
+            p.SCB.vtor.write(app_address());
+            cortex_m::asm::bootload(app_address() as *const u32);
         }
     }
 
     // enter DFU only if magic number detected
     log_info!("DFU!");
     let executor = singleton!(: Executor = Executor::new()).unwrap();
+    let ota_started = singleton!(: RefCell<bool> = RefCell::new(false)).unwrap();
     executor.run(|spawner| {
         spawner.must_spawn(status_led_task(p.PB1, p.PA7));
         let (can_sender, can_receiver) = start_can_bus_tasks(&spawner, p.FDCAN2, p.PB5, p.PB6);
         spawner.must_spawn(node_status_task(can_sender));
         spawner.must_spawn(can_reset_task(can_receiver));
-        spawner.must_spawn(ota_task(can_sender, can_receiver, p.FLASH));
+        spawner.must_spawn(ota_task(ota_started, can_sender, can_receiver, p.FLASH));
+        spawner.must_spawn(ota_timeout_task(ota_started));
     });
 }
 
@@ -141,15 +147,14 @@ async fn node_status_task(can_sender: &'static CanSender<NoopRawMutex, 4>) {
     loop {
         can_sender
             .send(
-                NodeStatusMessage {
-                    uptime_s: Instant::now().as_secs() as u32,
-                    health: NodeHealth::Healthy,
-                    mode: NodeMode::Maintainance,
-                    custom_status: 0,
-                }
+                NodeStatusMessage::new_no_custom_status(
+                    Instant::now().as_secs() as u32,
+                    NodeHealth::Healthy,
+                    NodeMode::Maintenance,
+                )
                 .into(),
             )
-            .await;
+            ;
         ticker.next().await;
     }
 }
@@ -176,6 +181,16 @@ async fn can_reset_task(can_receiver: &'static CanReceiver<NoopRawMutex, 4, 2>) 
         }
     }
 }
+
+#[embassy_executor::task]
+async fn ota_timeout_task(ota_started: &'static RefCell<bool>) {
+    Timer::after_secs(2).await;
+    if !*ota_started.borrow() {
+        configure_next_boot(BootOption::Application);
+        cortex_m::peripheral::SCB::sys_reset();
+    }
+}
+
 #[unsafe(no_mangle)]
 #[cfg_attr(target_os = "none", unsafe(link_section = ".HardFault.user"))]
 #[cfg(not(feature = "defmt"))]
