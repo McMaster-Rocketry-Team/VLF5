@@ -149,7 +149,7 @@ async fn altimeter_task(
     let mut state = State::Init { count: 0 };
     loop {
         let baro_measurement = baro.read().await.unwrap().data;
-        let altitude = baro_measurement.altitude();
+        let altitude = baro_measurement.altitude_asl();
         // let altitude = lowpass.run(altitude);
 
         match &mut state {

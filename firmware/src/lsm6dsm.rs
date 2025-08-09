@@ -11,6 +11,10 @@ const STATUS_REG: u8 = 0x1E;
 const CTRL1_XL: u8 = 0x10;
 const CTRL2_G: u8 = 0x11;
 const CTRL3_C: u8 = 0x12;
+const CTRL4_C: u8 = 0x13;
+const CTRL6_C: u8 = 0x15;
+const DRDY_PULSE_CFG: u8 = 0x0B;
+const INT1_CTRL: u8 = 0x0D;
 const OUTX_L_G: u8 = 0x22;
 
 pub struct LSM6DSM<B: SpiDevice> {
@@ -22,42 +26,9 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Self { spi: spi_device }
     }
 
-    pub async fn verify_identity(&mut self) -> Result<u8, ErrorKind> {
+    async fn verify_identity(&mut self) -> Result<u8, ErrorKind> {
         let id = self.read_register(WHO_AM_I).await?;
         Ok(id)
-    }
-
-    pub async fn check_status(&mut self) -> Result<u8, ErrorKind> {
-        let status = self.read_register(STATUS_REG).await?;
-        Ok(status)
-    }
-
-    /*
-       Set the sensor to low power mode
-
-       CTRL1_XL (10h) - 0b0011_11_00;  Set odr to 52Hz, full scale to 16g, low cutoff freq, high BW
-       CTRL2_G (11h) - 0b0011_11_00;   Set odr to 52Hz, full scale to 2000dps, low cutoff freq, high BW
-    */
-    pub async fn low_power(&mut self) -> Result<(), ErrorKind> {
-        self.write_register(CTRL1_XL, 0b0011_1100).await?;
-        Timer::after_millis(10).await;
-        self.write_register(CTRL2_G, 0b0011_1100).await?;
-        Timer::after_millis(10).await;
-        Ok(())
-    }
-
-    /*
-       Set the sensor to normal mode (out of low power mode)
-
-       CTRL1_XL (10h) - 0b1010_11_00; Set odr (acceleration) to 6.66KHz, full scale to 16g, low cutoff freq, high BW
-       CTRL2_G (11h) - 0b1010_11_00;  Set odr (Gyro) to 6.66KHz, full scale to 2000dps, low cutoff freq, high BW
-    */
-    pub async fn normal_mode(&mut self) -> Result<(), ErrorKind> {
-        self.write_register(CTRL1_XL, 0b1010_1100).await?;
-        Timer::after_millis(10).await;
-        self.write_register(CTRL2_G, 0b1010_1100).await?;
-        Timer::after_millis(10).await;
-        Ok(())
     }
 
     async fn read_register(&mut self, address: u8) -> Result<u8, ErrorKind> {
@@ -79,39 +50,49 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Ok(())
     }
 
-    /*
-       Reset the sensor
+    pub async fn power_down(&mut self) -> Result<(), ErrorKind> {
+        self.write_register(CTRL1_XL, 0).await?;
+        self.write_register(CTRL2_G, 0).await?;
 
-       CTRL1_XL (10h) - 0b1010_01_00; Set odr (acceleration) to 1.66KHz, full scale to +-16g, low cutoff freq, high BW
-       CTRL2_G (11h) - 0b1010_11_00;  Set odr (Gyro) to 1.66KHz, full scale to 2000dps, low cutoff freq, high BW
-       CTRL3_C (12h) - 0b1000_01_01;  Reboots memory content/software, 4-wire SPI, enable block data update
-    */
+        Ok(())
+    }
+
+    pub async fn power_up(&mut self) -> Result<(), ErrorKind> {
+        // set acc ODR to 416Hz, bandwidth 104Hz, full scale to +-16g
+        self.write_register(CTRL1_XL, 0b0110_01_1_0).await?;
+        // set gyro ODR to 416Hz, full scale to +-2000dps
+        self.write_register(CTRL2_G, 0b0110_11_0_0).await?;
+        // enable gyro filter
+        self.write_register(CTRL4_C, 0b0000_0001).await?;
+        // gyro bandwidth 121Hz
+        self.write_register(CTRL6_C, 0b0000_0010).await?;
+
+        // pulse int1 when data ready
+        self.write_register(DRDY_PULSE_CFG, 0b1000_0000).await?;
+        // enable gyro and acc data ready on int1
+        self.write_register(INT1_CTRL, 0b0000_0011).await?;
+
+        Timer::after_millis(1).await;
+
+        Ok(())
+    }
+
     pub async fn reset(&mut self) -> Result<(), ErrorKind> {
+        Timer::after_millis(20).await; // wait for initialize
+
+        // reset
         self.write_register(CTRL3_C, 0b10000101).await?;
-        Timer::after_millis(10).await;
+        Timer::after_millis(20).await; // wait for initialize
 
         let id = self.verify_identity().await?;
         if id != 0x6A {
             return Err(ErrorKind::Other);
         }
 
-        self.write_register(CTRL1_XL, 0b1010_01_00).await?;
-        Timer::after_millis(10).await;
-        self.write_register(CTRL2_G, 0b1010_11_00).await?;
-        Timer::after_millis(10).await;
-
         Ok(())
     }
 
     pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, IMUData>, ErrorKind> {
-        let status = self.check_status().await?;
-        let new_gyro_data = status & 0x02 != 0;
-        let new_accel_data = status & 0x01 != 0;
-
-        if !new_gyro_data && !new_accel_data {
-            return Err(ErrorKind::Other);
-        }
-
         let mut buffer = [0u8; 13];
         self.spi
             .transfer(

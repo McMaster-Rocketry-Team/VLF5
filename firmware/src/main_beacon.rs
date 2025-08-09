@@ -280,7 +280,7 @@ async fn altimeter_task(
     let mut ticker = Ticker::every(Duration::from_hz(100));
     loop {
         let measurement = baro.read().await.unwrap();
-        baro_data.send((measurement.data.temperature, measurement.data.altitude()));
+        baro_data.send((measurement.data.temperature, measurement.data.altitude_asl()));
         ticker.next().await;
     }
 }
