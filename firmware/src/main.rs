@@ -428,8 +428,9 @@ async fn broadcast_imu_measurement_task(
     can_sender: &'static CanSender<NoopRawMutex>,
     unix_clock: &'static UnixClock,
 ) {
+    imu_reading_sub.get().await;
     loop {
-        let imu_reading = imu_reading_sub.get().await;
+        let imu_reading = imu_reading_sub.changed().await;
         can_sender.send(
             IMUMeasurementMessage::new(
                 unix_clock
@@ -454,8 +455,9 @@ async fn broadcast_baro_measurement_task(
     can_sender: &'static CanSender<NoopRawMutex>,
     unix_clock: &'static UnixClock,
 ) {
+    baro_reading_sub.get().await;
     loop {
-        let baro_reading = baro_reading_sub.get().await;
+        let baro_reading = baro_reading_sub.changed().await;
         can_sender.send(
             BaroMeasurementMessage::new(
                 unix_clock

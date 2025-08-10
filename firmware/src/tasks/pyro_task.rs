@@ -97,7 +97,7 @@ pub async fn pyro_task(
         loop {
             let pyro = fire_signal.wait().await;
             match pyro {
-                PyroSelect::Pyro1 => {
+                PyroSelect::PyroMain => {
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
                         state.pyro1_fire = true;
@@ -112,7 +112,7 @@ pub async fn pyro_task(
                         continuity_update.send(state.clone());
                     });
                 }
-                PyroSelect::Pyro2 => {
+                PyroSelect::PyroDrogue => {
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
                         state.pyro2_fire = true;

@@ -63,18 +63,20 @@ pub fn init_can_bus(
     &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     CanRx<'static>,
 ) {
-    bind_interrupts!(struct Irqs {
-        FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
-        FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
-    });
+    // bind_interrupts!(struct Irqs {
+    //     FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
+    //     FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
+    // });
 
-    let mut can = CanConfigurator::new(fdcan2, pb5, pb6, Irqs);
-    can.set_bitrate(1_000_000);
-    let can = can.into_normal_mode();
-    let (tx, rx, _) = can.split();
-    let tx = singleton!(: Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>> = Mutex::new(RefCell::new(tx))).unwrap();
+    // let mut can = CanConfigurator::new(fdcan2, pb5, pb6, Irqs);
+    // can.set_bitrate(1_000_000);
+    // let can = can.into_normal_mode();
+    // let (tx, rx, _) = can.split();
+    // let tx = singleton!(: Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>> = Mutex::new(RefCell::new(tx))).unwrap();
 
-    (tx, rx)
+    // (tx, rx)
+
+    todo!()
 }
 
 #[embassy_executor::task]
@@ -227,6 +229,7 @@ async fn node_status_task(
     mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
 ) {
     let mut ticker = Ticker::every(Duration::from_millis(500));
+    battery_v_reading.get().await;
     loop {
         can_sender
             .send(
