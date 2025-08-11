@@ -54,7 +54,7 @@ use crate::{
         buzzer_task::{BuzzerTone, buzzer_task},
         gps_task::gps_task,
         pyro_task::{ContinuityUpdate, pyro_task},
-        sensor_tasks::{adc_task, baro_task, imu_task},
+        sensor_tasks::{adc_task, imu_baro_task},
         unix_clock::{UnixClock, unix_clock_task},
         vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
@@ -172,7 +172,7 @@ async fn high_prio_main(
 ) {
     let p = unsafe { Peripherals::steal() };
     spawner.must_spawn(buzzer_task(p.PC15, tone_queue));
-    spawner.must_spawn(imu_task(
+    spawner.must_spawn(imu_baro_task(
         p.SPI4,
         p.PE2,
         p.PE6,
@@ -180,10 +180,9 @@ async fn high_prio_main(
         p.PC13,
         p.DMA2_CH1,
         p.DMA2_CH0,
+        p.PC14,
+        p.EXTI14,
         imu_reading_watch.sender(),
-        avionics_mode.receiver().unwrap(),
-    ));
-    spawner.must_spawn(baro_task(
         p.SPI1,
         p.PA5,
         p.PD7,
@@ -192,6 +191,7 @@ async fn high_prio_main(
         p.DMA1_CH4,
         p.DMA1_CH5,
         baro_reading_watch.sender(),
+        vl_status,
         avionics_mode.receiver().unwrap(),
     ));
     spawner.must_spawn(unix_clock_task(
