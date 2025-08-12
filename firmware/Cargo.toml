@@ -70,11 +70,11 @@ path = "src/main.rs"
 test = false
 bench = false
 
-[[bin]]
-name = "gcm"
-path = "src/main_gcm.rs"
-test = false
-bench = false
+# [[bin]]
+# name = "gcm"
+# path = "src/main_gcm.rs"
+# test = false
+# bench = false
 
 # Testing Entry Points
 

@@ -20,11 +20,11 @@ use firmware_common_new::{
     vlp::{client::VLPAvionics, packets::landed_telemetry::LandedTelemetryPacketBuilder},
 };
 
-use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral};
+use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, AvionicsModeWatch};
 
 pub async fn landed_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
+    avionics_mode_watch: &'static AvionicsModeWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
     mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
     mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
@@ -104,7 +104,7 @@ pub async fn landed_mode(
     );
 
     let wait_landed_mode_end_fut = async {
-        let mut receiver = avionics_mode.receiver().unwrap();
+        let mut receiver = avionics_mode_watch.receiver().unwrap();
         while receiver.get().await == AvionicsMode::Landed {}
     };
 

@@ -1,6 +1,10 @@
 use core::cell::RefCell;
 
-use crate::{avionics_mode::AvionicsMode, drivers::lsm6dsm::LSM6DSM, drivers::ms5607::MS5607};
+use crate::{
+    AvionicsModeWatch, VLStatusMutex,
+    avionics_mode::AvionicsMode,
+    drivers::{lsm6dsm::LSM6DSM, ms5607::MS5607},
+};
 use cortex_m::singleton;
 use defmt::{error, info};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
@@ -68,9 +72,11 @@ pub async fn imu_baro_task(
 
     pubsub: &'static IMUBaroReadingPubSub,
 
-    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
-    mut avionics_mode: watch::Receiver<'static, CriticalSectionRawMutex, AvionicsMode, 10>,
+    vl_status: &'static VLStatusMutex,
+    avionics_mode_watch: &'static AvionicsModeWatch,
 ) {
+    let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
+
     vl_status.lock(|s| {
         let mut s = s.borrow_mut();
         s.imu_ok = true;

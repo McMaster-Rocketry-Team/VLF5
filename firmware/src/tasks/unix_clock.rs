@@ -6,27 +6,23 @@ use embassy_stm32::{
     gpio::Pull,
     peripherals::{EXTI15, PA15},
 };
-use embassy_sync::{
-    blocking_mutex::{Mutex as BlockingMutex, raw::CriticalSectionRawMutex},
-    watch,
-};
+use embassy_sync::blocking_mutex::{Mutex as BlockingMutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
-use firmware_common_new::{gps::GPSData, sensor_reading::SensorReading, time::BootTimestamp};
+use firmware_common_new::{gps::GPSData, sensor_reading::SensorReading};
+
+use crate::GPSReadingWatch;
 
 #[embassy_executor::task]
 pub async fn unix_clock_task(
     pa15: Peri<'static, PA15>,
     exti15: Peri<'static, EXTI15>,
     unix_clock: &'static UnixClock,
-    mut gps_reading_receiver: watch::Receiver<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, GPSData>,
-        3,
-    >,
+    gps_reading_watch: &'static GPSReadingWatch,
 ) {
+    let mut gps_reading = gps_reading_watch.receiver().unwrap();
     let mut pps = ExtiInput::new(pa15, exti15, Pull::Down);
-    gps_reading_receiver.get().await;
+
+    gps_reading.get().await;
     loop {
         pps.wait_for_high().await;
         let pps_time_us = Instant::now().as_micros();
@@ -38,7 +34,7 @@ pub async fn unix_clock_task(
                     ..
                 },
             ..
-        }) = gps_reading_receiver.try_get()
+        }) = gps_reading.try_get()
         {
             if pps_time_us - reading_timestamp_us < 800_000 {
                 let current_unix_timestamp_us = ((gps_timestamp_s + 1) as u64) * 1_000_000;
@@ -85,7 +81,9 @@ impl UnixClock {
 
         self.unix_offset.lock(|offset| {
             let offset = offset.borrow();
-            offset.map(|offset| offset + now_boot_time).unwrap_or(now_boot_time)
+            offset
+                .map(|offset| offset + now_boot_time)
+                .unwrap_or(now_boot_time)
         })
     }
 }

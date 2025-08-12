@@ -24,13 +24,14 @@ use firmware_common_new::{
 };
 
 use crate::{
-    DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID, avionics_mode::AvionicsMode,
+    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID,
+    avionics_mode::{self, AvionicsMode},
     can_central::CanCentral,
 };
 
 pub async fn self_test_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
+    avionics_mode_watch: &'static AvionicsModeWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
     vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
     flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
@@ -115,7 +116,7 @@ pub async fn self_test_mode(
     let fut = join(update_node_status_fut, send_packet_fut);
 
     let wait_self_test_mode_end_fut = async {
-        let mut receiver = avionics_mode.receiver().unwrap();
+        let mut receiver = avionics_mode_watch.receiver().unwrap();
         while receiver.get().await == AvionicsMode::SelfTest {}
     };
 

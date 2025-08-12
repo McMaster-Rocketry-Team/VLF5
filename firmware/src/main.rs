@@ -50,30 +50,31 @@ use crate::{
     bootloader::watchdog_task,
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
-    modes::{landed_mode::landed_mode, low_power_mode::low_power_mode, self_test_mode::self_test_mode},
+    modes::{
+        landed_mode::landed_mode, low_power_mode::low_power_mode, self_test_mode::self_test_mode,
+    },
     tasks::{
-        buzzer_task::{buzzer_task, BuzzerTone},
+        buzzer_task::{BuzzerPubSub, BuzzerTone, buzzer_task},
         gps_task::gps_task,
-        pyro_task::{pyro_task, ContinuityUpdate},
-        sensor_tasks::{adc_task, imu_baro_task, BatteryVWatch, IMUBaroReadingPubSub},
-        unix_clock::{unix_clock_task, UnixClock},
+        pyro_task::{ContinuityUpdate, pyro_task},
+        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, adc_task, imu_baro_task},
+        unix_clock::{UnixClock, unix_clock_task},
         vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
 };
 use receive_vlp_task::receive_vlp_task;
-
 
 mod avionics_mode;
 mod bootloader;
 mod can;
 mod can_central;
 mod clock_config;
-mod receive_vlp_task;
+mod drivers;
 mod modes;
+mod receive_vlp_task;
 mod tasks;
 mod time;
 mod utils;
-mod drivers;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
@@ -98,21 +99,23 @@ pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
     main_chute_delay_us: 0,
 };
 
+pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
+pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3>;
+pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
+
 #[entry]
 fn main() -> ! {
     let p = embassy_stm32::init(vlf5_clock_config());
 
-    let tone_queue =
-        singleton!(: PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1> = PubSubChannel::new()).unwrap();
-    let avionics_mode =
-        singleton!(: Watch<CriticalSectionRawMutex, AvionicsMode, 10> = Watch::new()).unwrap();
+    let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
+    let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
     avionics_mode.sender().send(AvionicsMode::Armed);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
-    let gps_reading_watch =
-        singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3> = Watch::new())
+    let gps_reading_watch = singleton!(: GPSReadingWatch = GPSReadingWatch::new()).unwrap();
+    let vl_status =
+        singleton!(: VLStatusMutex = BlockingMutex::new(RefCell::new(VLCustomStatus::new())))
             .unwrap();
-    let vl_status = singleton!(: BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>> = BlockingMutex::new(RefCell::new(VLCustomStatus { imu_ok: false, baro_ok: false, mag_ok: false, gps_ok: false, sd_ok: false, can_bus_ok: false }))).unwrap();
     let unix_clock = singleton!(: UnixClock = UnixClock::new()).unwrap();
 
     let (can_tx, can_rx) = init_can_bus(p.FDCAN2, p.PB5, p.PB6);
@@ -128,7 +131,7 @@ fn main() -> ! {
     spawner.must_spawn(high_prio_main(
         spawner,
         can_tx,
-        tone_queue.subscriber().unwrap(),
+        buzzer_pubsub,
         avionics_mode,
         imu_baro_reading_pubsub,
         gps_reading_watch,
@@ -142,7 +145,7 @@ fn main() -> ! {
             spawner,
             can_tx,
             can_rx,
-            tone_queue,
+            buzzer_pubsub,
             avionics_mode,
             imu_baro_reading_pubsub,
             gps_reading_watch,
@@ -156,19 +159,15 @@ fn main() -> ! {
 async fn high_prio_main(
     spawner: SendSpawner,
     can_tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
-    tone_queue: Subscriber<'static, CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
-    avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
+    buzzer_pubsub: &'static BuzzerPubSub,
+    avionics_mode_watch: &'static AvionicsModeWatch,
     imu_baro_reading_pubsub: &'static IMUBaroReadingPubSub,
-    gps_reading_watch: &'static Watch<
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, GPSData>,
-        3,
-    >,
-    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
+    gps_reading_watch: &'static GPSReadingWatch,
+    vl_status: &'static VLStatusMutex,
     unix_clock: &'static UnixClock,
 ) {
     let p = unsafe { Peripherals::steal() };
-    spawner.must_spawn(buzzer_task(p.PC15, tone_queue));
+    spawner.must_spawn(buzzer_task(p.PC15, buzzer_pubsub));
     spawner.must_spawn(imu_baro_task(
         p.SPI4,
         p.PE2,
@@ -188,13 +187,13 @@ async fn high_prio_main(
         p.DMA1_CH5,
         imu_baro_reading_pubsub,
         vl_status,
-        avionics_mode.receiver().unwrap(),
+        avionics_mode_watch,
     ));
     spawner.must_spawn(unix_clock_task(
         p.PA15,
         p.EXTI15,
         unix_clock,
-        gps_reading_watch.receiver().unwrap(),
+        gps_reading_watch,
     ));
     spawner.must_spawn(can_bus_broadcast_unix_time_task(can_tx, unix_clock));
 }
@@ -204,15 +203,11 @@ async fn low_prio_main(
     spawner: Spawner,
     can_tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     can_rx: CanRx<'static>,
-    tone_queue: &'static PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
-    avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
+    buzzer_pubsub: &'static BuzzerPubSub,
+    avionics_mode_watch: &'static AvionicsModeWatch,
     imu_baro_reading_pubsub: &'static IMUBaroReadingPubSub,
-    gps_reading_watch: &'static Watch<
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, GPSData>,
-        3,
-    >,
-    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
+    gps_reading_watch: &'static GPSReadingWatch,
+    vl_status: &'static VLStatusMutex,
     unix_clock: &'static UnixClock,
 ) {
     let p = unsafe { Peripherals::steal() };
@@ -221,9 +216,7 @@ async fn low_prio_main(
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let flight_stage = singleton!(:BlockingMutex<NoopRawMutex, RefCell<FlightStage>> = BlockingMutex::new(RefCell::new(FlightStage::Armed))).unwrap();
-    let battery_v_watch =
-        singleton!(:BatteryVWatch = BatteryVWatch::new())
-            .unwrap();
+    let battery_v_watch = singleton!(:BatteryVWatch = BatteryVWatch::new()).unwrap();
 
     let continuity_update =
         singleton!(: watch::Watch<NoopRawMutex, ContinuityUpdate, 1> = watch::Watch::new())
@@ -235,7 +228,7 @@ async fn low_prio_main(
         p.PA7,
         gps_reading_watch.receiver().unwrap(),
     ));
-    spawner.must_spawn(periodic_beep_task(tone_queue));
+    spawner.must_spawn(periodic_beep_task(buzzer_pubsub));
 
     spawner.must_spawn(adc_task(p.ADC1, p.PB0, battery_v_watch));
     spawner.must_spawn(pyro_task(
@@ -286,9 +279,9 @@ async fn low_prio_main(
 
     spawner.must_spawn(receive_vlp_task(
         vlp_avionics_client,
-        avionics_mode,
+        avionics_mode_watch,
         fire_signal,
-        tone_queue,
+        buzzer_pubsub,
         can_sender,
         can_central,
     ));
@@ -301,13 +294,13 @@ async fn low_prio_main(
 
     spawner.must_spawn(watchdog_task(p.IWDG1));
 
-    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
-    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
-    tone_queue.publish_immediate(BuzzerTone::Low(250, 100));
-    tone_queue.publish_immediate(BuzzerTone::High(250, 250));
+    buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
+    buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 250));
+    buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
+    buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 250));
 
     loop {
-        match avionics_mode.try_get().unwrap() {
+        match avionics_mode_watch.try_get().unwrap() {
             AvionicsMode::Armed => {
                 ps.set_low();
                 todo!()
@@ -316,7 +309,7 @@ async fn low_prio_main(
                 ps.set_high();
                 self_test_mode(
                     vlp_avionics_client,
-                    avionics_mode,
+                    avionics_mode_watch,
                     can_central,
                     vl_status,
                     flight_stage,
@@ -327,7 +320,7 @@ async fn low_prio_main(
                 ps.set_high();
                 low_power_mode(
                     vlp_avionics_client,
-                    avionics_mode,
+                    avionics_mode_watch,
                     can_central,
                     gps_reading_watch.dyn_receiver().unwrap(),
                     battery_v_watch.dyn_receiver().unwrap(),
@@ -341,7 +334,7 @@ async fn low_prio_main(
                 ps.set_high();
                 landed_mode(
                     vlp_avionics_client,
-                    avionics_mode,
+                    avionics_mode_watch,
                     can_central,
                     gps_reading_watch.dyn_receiver().unwrap(),
                     battery_v_watch.dyn_receiver().unwrap(),
@@ -355,14 +348,13 @@ async fn low_prio_main(
 }
 
 #[embassy_executor::task]
-async fn periodic_beep_task(
-    tone_queue: &'static pubsub::PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
-) {
+async fn periodic_beep_task(buzzer_pubsub: &'static BuzzerPubSub) {
+    let buzzer_pub = buzzer_pubsub.immediate_publisher();
     let mut ticker = Ticker::every(Duration::from_millis(3000));
 
     loop {
         ticker.next().await;
-        tone_queue.publish_immediate(BuzzerTone::Low(100, 100));
+        buzzer_pub.publish_immediate(BuzzerTone::Low(100, 100));
     }
 }
 
@@ -409,7 +401,7 @@ async fn broadcast_imu_baro_measurement_task(
     let mut sub = imu_baro_pubsub.subscriber().unwrap();
     loop {
         let reading = sub.next_message_pure().await;
-        
+
         if let Some(imu_data) = reading.data.0 {
             can_sender.send(
                 IMUMeasurementMessage::new(
