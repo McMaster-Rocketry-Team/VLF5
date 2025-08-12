@@ -22,6 +22,7 @@ use firmware_common_new::{
     sensor_reading::SensorReading,
     vlp::{client::VLPAvionics, packets::telemetry::TelemetryPacketBuilder},
 };
+use nalgebra::Vector2;
 
 use crate::{
     AvionicsModeWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, FireSignal,
@@ -214,45 +215,39 @@ pub async fn armed_mode(
                             packet.flight_stage = FlightStage::Armed;
                         }
                         RocketState::PoweredAscent {
-                            tilt_deg,
                             velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
+                            altitude_agl,
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.altitude_agl = altitude_agl;
                             packet.air_speed = velocity.magnitude();
-                            packet.tilt_deg = tilt_deg;
+                            packet.tilt_deg = velocity.angle(&Vector2::new(0.0, 1.0)).to_degrees();
                             packet.flight_stage = FlightStage::PoweredAscent;
                         }
                         RocketState::Coasting {
-                            tilt_deg,
                             velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
+                            altitude_agl,
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.altitude_agl = altitude_agl;
                             packet.air_speed = velocity.magnitude();
-                            packet.tilt_deg = tilt_deg;
+                            packet.tilt_deg = velocity.angle(&Vector2::new(0.0, 1.0)).to_degrees();
                             packet.flight_stage = FlightStage::Coasting;
                         }
                         RocketState::DrogueChute {
                             vertical_velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
+                            altitude_agl,
                             ..
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.altitude_agl = altitude_agl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Coasting;
                         }
                         RocketState::MainChute {
                             vertical_velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
+                            altitude_agl,
                             ..
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.altitude_agl = altitude_agl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Coasting;
@@ -302,12 +297,12 @@ pub async fn armed_mode(
                     }
                 }
                 CanBusMessageEnum::IcarusStatus(message) => {
-                    packet.air_brakes_commanded_extension_percentage =
-                        message.commanded_extension_percentage();
+                    // TODO
+                    // packet.air_brakes_commanded_extension_percentage =
+                    //     message.commanded_extension_percentage();
                     packet.air_brakes_actual_extension_percentage =
                         message.actual_extension_percentage();
                     packet.air_brakes_servo_temp = message.servo_temperature();
-                    packet.ap_residue = message.ap_residue_m as f32;
                 }
                 CanBusMessageEnum::PayloadEPSStatus(message) => {
                     if node_type == PAYLOAD_EPS1_NODE_TYPE {
@@ -369,29 +364,21 @@ pub async fn armed_mode(
 
             let message = match state {
                 RocketState::PoweredAscent {
-                    tilt_deg,
                     velocity,
-                    altitude_asl,
-                    launch_pad_altitude_asl,
+                    altitude_agl,
                 } => Some(RocketStateMessage::new(
                     unix_clock.now_us_or_boot_time(),
-                    tilt_deg,
                     &velocity.into(),
-                    altitude_asl,
-                    launch_pad_altitude_asl,
+                    altitude_agl,
                     false,
                 )),
                 RocketState::Coasting {
-                    tilt_deg,
                     velocity,
-                    altitude_asl,
-                    launch_pad_altitude_asl,
+                    altitude_agl,
                 } => Some(RocketStateMessage::new(
                     unix_clock.now_us_or_boot_time(),
-                    tilt_deg,
                     &velocity.into(),
-                    altitude_asl,
-                    launch_pad_altitude_asl,
+                    altitude_agl,
                     true,
                 )),
                 _ => None,

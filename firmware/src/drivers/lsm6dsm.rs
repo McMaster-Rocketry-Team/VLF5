@@ -111,7 +111,7 @@ impl<B: SpiDevice> LSM6DSM<B> {
         let acc_y = i16::from_le_bytes([buffer[8], buffer[9]]);
         let acc_z = i16::from_le_bytes([buffer[10], buffer[11]]);
 
-        let acc_scale = 16.0 / 32768.0; // ±16g range
+        let acc_scale = 16.0 / 32768.0 * 9.81; // ±16g range
         let gyro_scale = 2000.0 / 32768.0; // ±2000dps range
 
         Ok(SensorReading::new(

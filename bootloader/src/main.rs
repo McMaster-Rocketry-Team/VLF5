@@ -94,12 +94,13 @@ fn main() -> ! {
     if backup_ram[0] != 0x69426942 {
         // no magic number found, boot normally
         configure_next_boot(BootOption::Bootloader);
-        let mut wdt = IndependentWatchdog::new(p.IWDG1, 1_000_000);
-        wdt.unleash();
+        // let mut wdt = IndependentWatchdog::new(p.IWDG1, 1_000_000);
+        // wdt.unleash();
 
         unsafe {
             let mut p = cortex_m::Peripherals::steal();
             p.SCB.invalidate_icache();
+            p.SCB.clean_dcache(&mut p.CPUID);
             p.SCB.vtor.write(app_address());
             cortex_m::asm::bootload(app_address() as *const u32);
         }
@@ -126,9 +127,6 @@ async fn status_led_task(red_led: Peri<'static, PB1>, green_led: Peri<'static, P
 
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
-        red_led.set_high();
-        green_led.set_high();
-        Timer::after_millis(50).await;
         red_led.set_low();
         green_led.set_low();
         Timer::after_millis(50).await;
@@ -137,6 +135,9 @@ async fn status_led_task(red_led: Peri<'static, PB1>, green_led: Peri<'static, P
         Timer::after_millis(50).await;
         red_led.set_low();
         green_led.set_low();
+        Timer::after_millis(50).await;
+        red_led.set_high();
+        green_led.set_high();
         ticker.next().await;
     }
 }

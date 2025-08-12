@@ -24,7 +24,7 @@ use embassy_sync::{
     blocking_mutex::Mutex as BlockingMutex,
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     mutex::Mutex,
-    pubsub::{self, PubSubBehavior as _, PubSubChannel, Subscriber},
+    pubsub::PubSubBehavior as _,
     signal::Signal,
     watch::{self, Watch},
 };
@@ -39,7 +39,6 @@ use firmware_common_new::{
         sender::CanSender,
     },
     gps::GPSData,
-    readings::{BaroData, IMUData},
     sensor_reading::SensorReading,
     time::BootTimestamp,
     vlp::{client::VLPAvionics, lora_config::LoraConfig, packets::fire_pyro::PyroSelect},
@@ -367,11 +366,11 @@ async fn low_prio_main(
 #[embassy_executor::task]
 async fn periodic_beep_task(buzzer_pubsub: &'static BuzzerPubSub) {
     let buzzer_pub = buzzer_pubsub.immediate_publisher();
-    let mut ticker = Ticker::every(Duration::from_millis(3000));
+    let mut ticker = Ticker::every(Duration::from_millis(5000));
 
     loop {
         ticker.next().await;
-        buzzer_pub.publish_immediate(BuzzerTone::Low(100, 100));
+        buzzer_pub.publish_immediate(BuzzerTone::Low(50, 50));
     }
 }
 
