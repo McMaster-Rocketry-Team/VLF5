@@ -8,7 +8,7 @@ use core::cell::RefCell;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
-use air_brakes_controller_core::FlightProfile;
+use air_brakes_controller_core::{FlightProfile, RocketParameters};
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -97,6 +97,12 @@ pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
     drogue_chute_delay_us: 0,
     main_chute_altitude_agl: 400.0,
     main_chute_delay_us: 0,
+};
+pub const TARGET_APOGEE_AGL: f32 = 4000.0;
+pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
+    burnout_mass: 17.0,
+    cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
+    reference_area: 0.008982476,
 };
 
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
@@ -270,14 +276,8 @@ async fn low_prio_main(
         p.DMA1_CH3,
         p.DMA1_CH2,
     ));
-    let (can_sender, can_receiver, can_central) = start_can_bus_low_prio_tasks(
-        &spawner,
-        can_tx,
-        can_rx,
-        flight_stage,
-        battery_v_watch,
-    )
-    .await;
+    let (can_sender, can_receiver, can_central) =
+        start_can_bus_low_prio_tasks(&spawner, can_tx, can_rx, flight_stage, battery_v_watch).await;
 
     spawner.must_spawn(receive_vlp_task(
         vlp_avionics_client,

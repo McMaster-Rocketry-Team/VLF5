@@ -1,13 +1,22 @@
 use core::cell::RefCell;
 
-use air_brakes_controller_core::{Measurement, RocketState, RocketStateEstimator};
-use embassy_futures::{join::join5, select::select};
-use embassy_sync::blocking_mutex::{Mutex as BlockingMutex, raw::NoopRawMutex};
+use air_brakes_controller_core::{
+    AirBrakesMPC, Measurement, RocketState, RocketStateEstimator, approximate_speed_of_sound,
+};
+use embassy_futures::{
+    join::{join, join5},
+    select::select,
+};
+use embassy_sync::{
+    blocking_mutex::{Mutex as BlockingMutex, raw::NoopRawMutex},
+    signal::Signal,
+};
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
         messages::{
             CanBusMessageEnum,
+            airbrakes_control::AirBrakesControlMessage,
             node_status::{NodeHealth, NodeMode},
             rocket_state::RocketStateMessage,
             vl_status::FlightStage,
@@ -27,6 +36,7 @@ use nalgebra::Vector2;
 use crate::{
     AvionicsModeWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, FireSignal,
     FlightStageMutex, GPSReadingWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    ROCKET_PARAMETERS, TARGET_APOGEE_AGL,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
@@ -216,38 +226,42 @@ pub async fn armed_mode(
                         }
                         RocketState::PoweredAscent {
                             velocity,
-                            altitude_agl,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
                         } => {
-                            packet.altitude_agl = altitude_agl;
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = velocity.magnitude();
                             packet.tilt_deg = velocity.angle(&Vector2::new(0.0, 1.0)).to_degrees();
                             packet.flight_stage = FlightStage::PoweredAscent;
                         }
                         RocketState::Coasting {
                             velocity,
-                            altitude_agl,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
                         } => {
-                            packet.altitude_agl = altitude_agl;
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = velocity.magnitude();
                             packet.tilt_deg = velocity.angle(&Vector2::new(0.0, 1.0)).to_degrees();
                             packet.flight_stage = FlightStage::Coasting;
                         }
                         RocketState::DrogueChute {
                             vertical_velocity,
-                            altitude_agl,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
                             ..
                         } => {
-                            packet.altitude_agl = altitude_agl;
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Coasting;
                         }
                         RocketState::MainChute {
                             vertical_velocity,
-                            altitude_agl,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
                             ..
                         } => {
-                            packet.altitude_agl = altitude_agl;
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Coasting;
@@ -365,20 +379,23 @@ pub async fn armed_mode(
             let message = match state {
                 RocketState::PoweredAscent {
                     velocity,
-                    altitude_agl,
+                    altitude_asl,
+                    launch_pad_altitude_asl,
                 } => Some(RocketStateMessage::new(
                     unix_clock.now_us_or_boot_time(),
                     &velocity.into(),
-                    altitude_agl,
+                    altitude_asl - launch_pad_altitude_asl,
                     false,
                 )),
                 RocketState::Coasting {
                     velocity,
-                    altitude_agl,
+
+                    altitude_asl,
+                    launch_pad_altitude_asl,
                 } => Some(RocketStateMessage::new(
                     unix_clock.now_us_or_boot_time(),
                     &velocity.into(),
-                    altitude_agl,
+                    altitude_asl - launch_pad_altitude_asl,
                     true,
                 )),
                 _ => None,
@@ -392,7 +409,9 @@ pub async fn armed_mode(
         }
     };
 
+    let start_airbrakes_signal = Signal::<NoopRawMutex, ()>::new();
     let update_state_estimator_fut = async {
+        let mut airbrakes_started = false;
         let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
 
         loop {
@@ -420,6 +439,17 @@ pub async fn armed_mode(
                     fire_signal.signal(pyro);
                 }
 
+                if !airbrakes_started
+                    && let RocketState::Coasting {
+                        velocity,
+                        altitude_asl,
+                        ..
+                    } = &state
+                    && velocity.magnitude() <= 0.85 * approximate_speed_of_sound(*altitude_asl)
+                {
+                    start_airbrakes_signal.signal(());
+                }
+
                 flight_stage.lock(|r| {
                     *r.borrow_mut() = match state {
                         RocketState::OnPad => FlightStage::Armed,
@@ -436,6 +466,47 @@ pub async fn armed_mode(
         }
     };
 
+    let control_airbrakes_fut = async {
+        can_sender.send(AirBrakesControlMessage::new(0.0).into());
+
+        start_airbrakes_signal.wait().await;
+        let launch_pad_altitude_asl = state_estimator.lock(|s| {
+            let estimator = s.borrow();
+            if let RocketState::Coasting {
+                launch_pad_altitude_asl,
+                ..
+            } = estimator.state()
+            {
+                launch_pad_altitude_asl
+            } else {
+                unreachable!()
+            }
+        });
+        let mut airbrakes_mpc = AirBrakesMPC::new(
+            ROCKET_PARAMETERS.clone(),
+            launch_pad_altitude_asl + TARGET_APOGEE_AGL,
+        );
+
+        let mut ticker = Ticker::every(Duration::from_hz(10));
+        loop {
+            let state = state_estimator.lock(|s| s.borrow().state());
+
+            if let RocketState::Coasting {
+                velocity,
+                altitude_asl,
+                ..
+            } = state
+            {
+                let airbrake_extension_percentage = airbrakes_mpc.update(altitude_asl, velocity);
+                can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
+            } else {
+                break;
+            }
+
+            ticker.next().await;
+        }
+    };
+
     let wait_armed_mode_end_fut = async {
         let mut receiver = avionics_mode_watch.receiver().unwrap();
         receiver.changed_and(|m| *m != AvionicsMode::Armed).await;
@@ -446,7 +517,7 @@ pub async fn armed_mode(
         update_packet_can_fut,
         send_telemetry_packet_fut,
         send_rocket_state_fut,
-        update_state_estimator_fut,
+        join(update_state_estimator_fut, control_airbrakes_fut),
     );
 
     select(fut, wait_armed_mode_end_fut).await;
