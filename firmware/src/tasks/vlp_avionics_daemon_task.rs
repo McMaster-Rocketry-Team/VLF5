@@ -18,7 +18,7 @@ use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 
-use crate::e22::E22;
+use crate::drivers::e22::E22;
 
 #[embassy_executor::task]
 pub async fn vlp_avionics_daemon_task(

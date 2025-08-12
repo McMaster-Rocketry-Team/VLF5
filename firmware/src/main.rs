@@ -1,6 +1,8 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(never_type)]
+#![feature(try_blocks)]
 
 use core::cell::RefCell;
 
@@ -48,36 +50,30 @@ use crate::{
     bootloader::watchdog_task,
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
-    landed_mode::landed_mode,
-    low_power_mode::low_power_mode,
-    self_test_mode::self_test_mode,
+    modes::{landed_mode::landed_mode, low_power_mode::low_power_mode, self_test_mode::self_test_mode},
     tasks::{
-        buzzer_task::{BuzzerTone, buzzer_task},
+        buzzer_task::{buzzer_task, BuzzerTone},
         gps_task::gps_task,
-        pyro_task::{ContinuityUpdate, pyro_task},
-        sensor_tasks::{adc_task, imu_baro_task},
-        unix_clock::{UnixClock, unix_clock_task},
+        pyro_task::{pyro_task, ContinuityUpdate},
+        sensor_tasks::{adc_task, imu_baro_task, BatteryVWatch, IMUBaroReadingPubSub},
+        unix_clock::{unix_clock_task, UnixClock},
         vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
 };
 use receive_vlp_task::receive_vlp_task;
 
-mod armed_mode;
+
 mod avionics_mode;
 mod bootloader;
 mod can;
 mod can_central;
 mod clock_config;
-mod e22;
-mod landed_mode;
-mod low_power_mode;
-mod lsm6dsm;
-mod ms5607;
 mod receive_vlp_task;
-mod self_test_mode;
+mod modes;
 mod tasks;
 mod time;
 mod utils;
+mod drivers;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
@@ -111,10 +107,8 @@ fn main() -> ! {
     let avionics_mode =
         singleton!(: Watch<CriticalSectionRawMutex, AvionicsMode, 10> = Watch::new()).unwrap();
     avionics_mode.sender().send(AvionicsMode::Armed);
-    let imu_reading_watch =
-        singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, IMUData>, 2> = Watch::new()).unwrap();
-    let baro_reading_watch =
-        singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, BaroData>, 2> = Watch::new()).unwrap();
+    let imu_baro_reading_pubsub =
+        singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
     let gps_reading_watch =
         singleton!(: Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3> = Watch::new())
             .unwrap();
@@ -136,8 +130,7 @@ fn main() -> ! {
         can_tx,
         tone_queue.subscriber().unwrap(),
         avionics_mode,
-        imu_reading_watch,
-        baro_reading_watch,
+        imu_baro_reading_pubsub,
         gps_reading_watch,
         vl_status,
         unix_clock,
@@ -151,8 +144,7 @@ fn main() -> ! {
             can_rx,
             tone_queue,
             avionics_mode,
-            imu_reading_watch,
-            baro_reading_watch,
+            imu_baro_reading_pubsub,
             gps_reading_watch,
             vl_status,
             unix_clock,
@@ -166,16 +158,7 @@ async fn high_prio_main(
     can_tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     tone_queue: Subscriber<'static, CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
-    imu_reading_watch: &'static Watch<
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, IMUData>,
-        2,
-    >,
-    baro_reading_watch: &'static Watch<
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, BaroData>,
-        2,
-    >,
+    imu_baro_reading_pubsub: &'static IMUBaroReadingPubSub,
     gps_reading_watch: &'static Watch<
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, GPSData>,
@@ -196,7 +179,6 @@ async fn high_prio_main(
         p.DMA2_CH0,
         p.PC14,
         p.EXTI14,
-        imu_reading_watch.sender(),
         p.SPI1,
         p.PA5,
         p.PD7,
@@ -204,7 +186,7 @@ async fn high_prio_main(
         p.PC6,
         p.DMA1_CH4,
         p.DMA1_CH5,
-        baro_reading_watch.sender(),
+        imu_baro_reading_pubsub,
         vl_status,
         avionics_mode.receiver().unwrap(),
     ));
@@ -224,16 +206,7 @@ async fn low_prio_main(
     can_rx: CanRx<'static>,
     tone_queue: &'static PubSubChannel<CriticalSectionRawMutex, BuzzerTone, 10, 1, 1>,
     avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
-    imu_reading_watch: &'static Watch<
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, IMUData>,
-        2,
-    >,
-    baro_reading_watch: &'static Watch<
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, BaroData>,
-        2,
-    >,
+    imu_baro_reading_pubsub: &'static IMUBaroReadingPubSub,
     gps_reading_watch: &'static Watch<
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, GPSData>,
@@ -249,7 +222,7 @@ async fn low_prio_main(
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let flight_stage = singleton!(:BlockingMutex<NoopRawMutex, RefCell<FlightStage>> = BlockingMutex::new(RefCell::new(FlightStage::Armed))).unwrap();
     let battery_v_watch =
-        singleton!(: Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 1> = Watch::new())
+        singleton!(:BatteryVWatch = BatteryVWatch::new())
             .unwrap();
 
     let continuity_update =
@@ -264,7 +237,7 @@ async fn low_prio_main(
     ));
     spawner.must_spawn(periodic_beep_task(tone_queue));
 
-    spawner.must_spawn(adc_task(p.ADC1, p.PB0, battery_v_watch.sender()));
+    spawner.must_spawn(adc_task(p.ADC1, p.PB0, battery_v_watch));
     spawner.must_spawn(pyro_task(
         p.PE9,
         p.PE13,
@@ -320,13 +293,8 @@ async fn low_prio_main(
         can_central,
     ));
 
-    spawner.must_spawn(broadcast_imu_measurement_task(
-        imu_reading_watch.receiver().unwrap(),
-        can_sender,
-        unix_clock,
-    ));
-    spawner.must_spawn(broadcast_baro_measurement_task(
-        baro_reading_watch.receiver().unwrap(),
+    spawner.must_spawn(broadcast_imu_baro_measurement_task(
+        imu_baro_reading_pubsub,
         can_sender,
         unix_clock,
     ));
@@ -363,7 +331,7 @@ async fn low_prio_main(
                     can_central,
                     gps_reading_watch.dyn_receiver().unwrap(),
                     battery_v_watch.dyn_receiver().unwrap(),
-                    baro_reading_watch.dyn_receiver().unwrap(),
+                    imu_baro_reading_pubsub,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
                 )
@@ -431,54 +399,38 @@ async fn power_led_task(
     }
 }
 
+// todo rate limit
 #[embassy_executor::task]
-async fn broadcast_imu_measurement_task(
-    mut imu_reading_sub: watch::Receiver<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, IMUData>,
-        2,
-    >,
+async fn broadcast_imu_baro_measurement_task(
+    imu_baro_pubsub: &'static IMUBaroReadingPubSub,
     can_sender: &'static CanSender<NoopRawMutex>,
     unix_clock: &'static UnixClock,
 ) {
-    imu_reading_sub.get().await;
+    let mut sub = imu_baro_pubsub.subscriber().unwrap();
     loop {
-        let imu_reading = imu_reading_sub.changed().await;
-        can_sender.send(
-            IMUMeasurementMessage::new(
-                unix_clock
-                    .convert_to_unix_us(imu_reading.timestamp_us)
-                    .unwrap_or(imu_reading.timestamp_us),
-                &imu_reading.data.acc,
-                &imu_reading.data.gyro,
-            )
-            .into(),
-        );
-    }
-}
+        let reading = sub.next_message_pure().await;
+        
+        if let Some(imu_data) = reading.data.0 {
+            can_sender.send(
+                IMUMeasurementMessage::new(
+                    unix_clock
+                        .convert_to_unix_us(reading.timestamp_us)
+                        .unwrap_or(reading.timestamp_us),
+                    &imu_data.acc,
+                    &imu_data.gyro,
+                )
+                .into(),
+            );
+        }
 
-#[embassy_executor::task]
-async fn broadcast_baro_measurement_task(
-    mut baro_reading_sub: watch::Receiver<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, BaroData>,
-        2,
-    >,
-    can_sender: &'static CanSender<NoopRawMutex>,
-    unix_clock: &'static UnixClock,
-) {
-    baro_reading_sub.get().await;
-    loop {
-        let baro_reading = baro_reading_sub.changed().await;
+        let baro_data = reading.data.1;
         can_sender.send(
             BaroMeasurementMessage::new(
                 unix_clock
-                    .convert_to_unix_us(baro_reading.timestamp_us)
-                    .unwrap_or(baro_reading.timestamp_us),
-                baro_reading.data.pressure,
-                baro_reading.data.temperature,
+                    .convert_to_unix_us(reading.timestamp_us)
+                    .unwrap_or(reading.timestamp_us),
+                baro_data.pressure,
+                baro_data.temperature,
             )
             .into(),
         );

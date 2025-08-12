@@ -1,10 +1,13 @@
 use core::cell::RefCell;
 
-use crate::{avionics_mode::AvionicsMode, lsm6dsm::LSM6DSM, ms5607::MS5607};
+use crate::{avionics_mode::AvionicsMode, drivers::lsm6dsm::LSM6DSM, drivers::ms5607::MS5607};
 use cortex_m::singleton;
-use defmt::info;
+use defmt::{error, info};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
-use embassy_futures::{join::join, select::select};
+use embassy_futures::{
+    join::join,
+    select::{Either, select},
+};
 use embassy_stm32::{
     Peri,
     adc::{self, Adc, AdcChannel as _},
@@ -23,16 +26,25 @@ use embassy_sync::{
         raw::{CriticalSectionRawMutex, NoopRawMutex},
     },
     mutex::Mutex,
-    watch,
+    pubsub::{DynPublisher, PubSubChannel},
+    watch::{self, Watch},
 };
 use embassy_time::{Duration, Instant, Ticker};
-use embedded_hal_async::spi::SpiDevice;
+use embedded_hal_async::spi::{ErrorKind, SpiDevice};
 use firmware_common_new::{
     can_bus::custom_status::vl_custom_status::VLCustomStatus,
     readings::{BaroData, IMUData},
     sensor_reading::SensorReading,
     time::BootTimestamp,
 };
+
+pub type IMUBaroReadingPubSub = PubSubChannel<
+    CriticalSectionRawMutex,
+    SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>,
+    10,
+    3,
+    1,
+>;
 
 #[embassy_executor::task]
 pub async fn imu_baro_task(
@@ -45,12 +57,6 @@ pub async fn imu_baro_task(
     imu_rx_dma: Peri<'static, DMA2_CH0>,
     imu_int1: Peri<'static, PC14>,
     imu_int1_exti: Peri<'static, EXTI14>,
-    imu_reading_sender: watch::Sender<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, IMUData>,
-        2,
-    >,
 
     baro_spi1: Peri<'static, SPI1>,
     baro_sck: Peri<'static, PA5>,
@@ -59,125 +65,131 @@ pub async fn imu_baro_task(
     baro_cs: Peri<'static, PC6>,
     baro_tx_dma: Peri<'static, DMA1_CH4>,
     baro_rx_dma: Peri<'static, DMA1_CH5>,
-    baro_reading_sender: watch::Sender<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, BaroData>,
-        2,
-    >,
+
+    pubsub: &'static IMUBaroReadingPubSub,
 
     vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
     mut avionics_mode: watch::Receiver<'static, CriticalSectionRawMutex, AvionicsMode, 10>,
 ) {
-    let mut spi_config = SpiConfig::default();
-    spi_config.frequency = Hertz(1_000_000);
-    let spi4 = Mutex::<NoopRawMutex, _>::new(Spi::new(
-        imu_spi4, imu_sck, imu_mosi, imu_miso, imu_tx_dma, imu_rx_dma, spi_config,
-    ));
-    let imu_spi_device = SpiDeviceWithConfig::new(
-        &spi4,
-        Output::new(imu_cs, Level::High, Speed::High),
-        spi_config,
-    );
-    let mut imu = LSM6DSM::new(imu_spi_device);
-    imu.reset().await.unwrap();
-    let mut imu_int1 = ExtiInput::new(imu_int1, imu_int1_exti, Pull::None);
-    info!("IMU initialized");
+    vl_status.lock(|s| {
+        let mut s = s.borrow_mut();
+        s.imu_ok = true;
+        s.baro_ok = true;
+    });
 
-    let mut spi_config = SpiConfig::default();
-    spi_config.frequency = Hertz(1_000_000);
-    let spi1 = Mutex::<NoopRawMutex, _>::new(Spi::new(
-        baro_spi1,
-        baro_sck,
-        baro_mosi,
-        baro_miso,
-        baro_tx_dma,
-        baro_rx_dma,
-        spi_config,
-    ));
-    let baro_spi_device = SpiDeviceWithConfig::new(
-        &spi1,
-        Output::new(baro_cs, Level::High, Speed::High),
-        spi_config,
-    );
-    let baro_buffer = singleton!(: [u8; 8] = [0; 8]).unwrap();
-    let mut baro = MS5607::new(baro_spi_device, baro_buffer);
-    baro.reset().await.unwrap();
-    info!("Barometer initialized");
+    let result: Result<!, IMUOrBaroError> = try {
+        let mut spi_config = SpiConfig::default();
+        spi_config.frequency = Hertz(1_000_000);
+        let spi4 = Mutex::<NoopRawMutex, _>::new(Spi::new(
+            imu_spi4, imu_sck, imu_mosi, imu_miso, imu_tx_dma, imu_rx_dma, spi_config,
+        ));
+        let imu_spi_device = SpiDeviceWithConfig::new(
+            &spi4,
+            Output::new(imu_cs, Level::High, Speed::High),
+            spi_config,
+        );
+        let mut imu = LSM6DSM::new(imu_spi_device);
+        imu.reset().await.map_err(IMUOrBaroError::IMU)?;
+        let mut imu_int1 = ExtiInput::new(imu_int1, imu_int1_exti, Pull::None);
+        info!("IMU initialized");
 
-    loop {
-        match avionics_mode.get().await {
-            AvionicsMode::Armed | AvionicsMode::SelfTest => {
-                imu.power_up().await.unwrap();
-                select(
-                    read_imu_baro_loop(
-                        &mut imu_int1,
-                        &mut imu,
-                        &imu_reading_sender,
-                        &mut baro,
-                        &baro_reading_sender,
-                        vl_status,
-                    ),
-                    avionics_mode
-                        .changed_and(|m| *m != AvionicsMode::Armed && *m != AvionicsMode::SelfTest),
-                )
-                .await;
-                imu.power_down().await.unwrap();
-            }
-            AvionicsMode::LowPower => {
-                select(
-                    read_baro_low_power_loop(&mut baro, &baro_reading_sender, vl_status),
-                    avionics_mode.changed(),
-                )
-                .await;
-            }
-            AvionicsMode::Landed => {
-                avionics_mode.changed().await;
+        let mut spi_config = SpiConfig::default();
+        spi_config.frequency = Hertz(1_000_000);
+        let spi1 = Mutex::<NoopRawMutex, _>::new(Spi::new(
+            baro_spi1,
+            baro_sck,
+            baro_mosi,
+            baro_miso,
+            baro_tx_dma,
+            baro_rx_dma,
+            spi_config,
+        ));
+        let baro_spi_device = SpiDeviceWithConfig::new(
+            &spi1,
+            Output::new(baro_cs, Level::High, Speed::High),
+            spi_config,
+        );
+        let baro_buffer = singleton!(: [u8; 8] = [0; 8]).unwrap();
+        let mut baro = MS5607::new(baro_spi_device, baro_buffer);
+        baro.reset().await.map_err(IMUOrBaroError::Baro)?;
+        info!("Barometer initialized");
+
+        let publisher = pubsub.dyn_publisher().unwrap();
+        loop {
+            match avionics_mode.get().await {
+                AvionicsMode::Armed | AvionicsMode::SelfTest => {
+                    imu.power_up().await.map_err(IMUOrBaroError::IMU)?;
+                    match select(
+                        read_imu_baro_loop(&mut imu_int1, &mut imu, &mut baro, &publisher),
+                        avionics_mode.changed_and(|m| {
+                            *m != AvionicsMode::Armed && *m != AvionicsMode::SelfTest
+                        }),
+                    )
+                    .await
+                    {
+                        Either::First(Err(e)) => Err(e)?,
+                        Either::Second(_) => {}
+                    };
+                    imu.power_down().await.map_err(IMUOrBaroError::IMU)?;
+                }
+                AvionicsMode::LowPower => {
+                    match select(
+                        read_baro_low_power_loop(&mut baro, &publisher),
+                        avionics_mode.changed(),
+                    )
+                    .await
+                    {
+                        Either::First(Err(e)) => Err(IMUOrBaroError::Baro(e))?,
+                        Either::Second(_) => todo!(),
+                    };
+                }
+                AvionicsMode::Landed => {
+                    avionics_mode.changed().await;
+                }
             }
         }
-    }
+    };
+
+    vl_status.lock(|s| {
+        let mut s = s.borrow_mut();
+
+        match result {
+            Err(IMUOrBaroError::Baro(baro_error)) => {
+                error!("baro error: {}", baro_error);
+                s.baro_ok = false;
+            }
+            Err(IMUOrBaroError::IMU(imu_error)) => {
+                error!("imu error: {}", imu_error);
+                s.imu_ok = false;
+            }
+            Err(IMUOrBaroError::IMUAndBaro(imu_error, baro_error)) => {
+                error!("baro error: {}", baro_error);
+                s.baro_ok = false;
+                error!("imu error: {}", imu_error);
+                s.imu_ok = false;
+            }
+        }
+    });
+}
+
+enum IMUOrBaroError {
+    IMU(ErrorKind),
+    Baro(ErrorKind),
+    IMUAndBaro(ErrorKind, ErrorKind),
 }
 
 async fn read_baro_low_power_loop(
     baro: &mut MS5607<'static, impl SpiDevice>,
-    baro_reading_sender: &watch::Sender<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, BaroData>,
-        2,
-    >,
-    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
-) {
-    let mut baro_ok = true;
-    vl_status.lock(|s| {
-        let mut s = s.borrow_mut();
-        s.imu_ok = true;
-    });
-
+    publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
+) -> Result<!, ErrorKind> {
     let mut ticker = Ticker::every(Duration::from_hz(5));
 
     loop {
-        match baro.read().await {
-            Ok(reading) => {
-                baro_reading_sender.send(reading);
-                if !baro_ok {
-                    baro_ok = true;
-                    vl_status.lock(|s| {
-                        let mut s = s.borrow_mut();
-                        s.baro_ok = true;
-                    });
-                }
-            }
-            Err(_) => {
-                if baro_ok {
-                    baro_ok = false;
-                    vl_status.lock(|s| {
-                        let mut s = s.borrow_mut();
-                        s.baro_ok = false;
-                    });
-                }
-            }
-        }
+        let reading = baro.read().await?;
+        publisher.publish_immediate(SensorReading::new(
+            reading.timestamp_us,
+            (None, reading.data),
+        ));
         ticker.next().await;
     }
 }
@@ -185,93 +197,32 @@ async fn read_baro_low_power_loop(
 async fn read_imu_baro_loop(
     imu_int1: &mut ExtiInput<'static>,
     imu: &mut LSM6DSM<impl SpiDevice>,
-    imu_reading_sender: &watch::Sender<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, IMUData>,
-        2,
-    >,
     baro: &mut MS5607<'static, impl SpiDevice>,
-    baro_reading_sender: &watch::Sender<
-        'static,
-        CriticalSectionRawMutex,
-        SensorReading<BootTimestamp, BaroData>,
-        2,
-    >,
-    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
-) {
-    let mut imu_ok = true;
-    let mut baro_ok = true;
-    vl_status.lock(|s| {
-        let mut s = s.borrow_mut();
-        s.imu_ok = true;
-        s.baro_ok = true;
-    });
-
+    publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
+) -> Result<!, IMUOrBaroError> {
     loop {
         imu_int1.wait_for_rising_edge().await;
-        let read_imu_fut = async {
-            match imu.read().await {
-                Ok(reading) => {
-                    imu_reading_sender.send(reading);
-                    if !imu_ok {
-                        imu_ok = true;
-                        vl_status.lock(|s| {
-                            let mut s = s.borrow_mut();
-                            s.imu_ok = true;
-                        });
-                    }
-                }
-                Err(_) => {
-                    if imu_ok {
-                        imu_ok = false;
-                        vl_status.lock(|s| {
-                            let mut s = s.borrow_mut();
-                            s.imu_ok = false;
-                        });
-                    }
-                }
+        match join(imu.read(), baro.read()).await {
+            (Ok(imu_reading), Ok(baro_reading)) => publisher.publish_immediate(SensorReading::new(
+                imu_reading.timestamp_us,
+                (Some(imu_reading.data), baro_reading.data),
+            )),
+            (Ok(_), Err(baro_error)) => Err(IMUOrBaroError::Baro(baro_error))?,
+            (Err(imu_error), Ok(_)) => Err(IMUOrBaroError::IMU(imu_error))?,
+            (Err(imu_error), Err(baro_error)) => {
+                Err(IMUOrBaroError::IMUAndBaro(imu_error, baro_error))?
             }
         };
-
-        let read_baro_but = async {
-            match baro.read().await {
-                Ok(reading) => {
-                    baro_reading_sender.send(reading);
-                    if !baro_ok {
-                        baro_ok = true;
-                        vl_status.lock(|s| {
-                            let mut s = s.borrow_mut();
-                            s.baro_ok = true;
-                        });
-                    }
-                }
-                Err(_) => {
-                    if baro_ok {
-                        baro_ok = false;
-                        vl_status.lock(|s| {
-                            let mut s = s.borrow_mut();
-                            s.baro_ok = false;
-                        });
-                    }
-                }
-            }
-        };
-
-        join(read_imu_fut, read_baro_but).await;
     }
 }
+
+pub type BatteryVWatch = Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 2>;
 
 #[embassy_executor::task]
 pub async fn adc_task(
     adc1: Peri<'static, ADC1>,
     battery_v_pin: Peri<'static, PB0>,
-    battery_v_reading_sender: watch::Sender<
-        'static,
-        NoopRawMutex,
-        SensorReading<BootTimestamp, f32>,
-        1,
-    >,
+    battery_v_watch: &'static BatteryVWatch,
 ) {
     let mut adc = Adc::new(adc1);
     adc.set_resolution(adc::Resolution::BITS12V);
@@ -295,9 +246,10 @@ pub async fn adc_task(
 
     let mut ticker = Ticker::every(Duration::from_hz(10));
 
+    let sender = battery_v_watch.sender();
     loop {
         ticker.next().await;
-        battery_v_reading_sender.send(SensorReading::new(
+        sender.send(SensorReading::new(
             Instant::now().as_micros(),
             read_battery_voltage(),
         ));

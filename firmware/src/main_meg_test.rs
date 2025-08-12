@@ -2,6 +2,8 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(never_type)]
+#![feature(try_blocks)]
 
 mod time;
 mod utils;

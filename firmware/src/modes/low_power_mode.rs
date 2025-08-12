@@ -19,7 +19,7 @@ use firmware_common_new::{
     vlp::{client::VLPAvionics, packets::low_power_telemetry::LowPowerTelemetryPacketBuilder},
 };
 
-use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral};
+use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, tasks::sensor_tasks::IMUBaroReadingPubSub};
 
 pub async fn low_power_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
@@ -27,7 +27,7 @@ pub async fn low_power_mode(
     can_central: &'static CanCentral<NoopRawMutex>,
     mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
     mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
-    mut baro_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, BaroData>>,
+    imu_baro_pubsub: &'static IMUBaroReadingPubSub,
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
 ) {

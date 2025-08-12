@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(never_type)]
+#![feature(try_blocks)]
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 

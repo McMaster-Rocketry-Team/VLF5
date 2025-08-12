@@ -39,7 +39,7 @@ air-brakes-controller-core = { path = "../../Rust_Monorepo/air-brakes-controller
     "defmt",
 ] }
 embedded-io-async = "0.6.1"
-embedded-hal-async = "1.0.0"
+embedded-hal-async = { version = "1.0.0", features = ["defmt-03"] }
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git" }
 stm32-device-signature = { version = "0.3.3", features = ["stm32h74x"] }
 embedded-can = "0.4.1"
@@ -53,7 +53,11 @@ embedded-sdmmc = { version = "0.8.1", default-features = false, features = [
 ] }
 biquad = "0.5.0"
 binary_macros = { git = "https://github.com/PegasisForever/binary_macros.git" }
-nalgebra = { version = "0.34.0", default-features = false, features = ["libm-force", "serde-serialize-no-std", "defmt"] }
+nalgebra = { version = "0.34.0", default-features = false, features = [
+    "libm-force",
+    "serde-serialize-no-std",
+    "defmt",
+] }
 
 
 [patch.crates-io]
@@ -67,35 +71,12 @@ test = false
 bench = false
 
 [[bin]]
-name = "beacon"
-path = "src/main_beacon.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "gcm"
 path = "src/main_gcm.rs"
 test = false
 bench = false
 
 # Testing Entry Points
-[[bin]]
-name = "altimeter_test"
-path = "src/main_altimeter_test.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "blinky"
-path = "src/main_blinky.rs"
-test = false
-bench = false
-
-[[bin]]
-name = "imu_test"
-path = "src/main_imu_test.rs"
-test = false
-bench = false
 
 [[bin]]
 name = "mag_test"

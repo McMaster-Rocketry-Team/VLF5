@@ -2,15 +2,15 @@
 #![cfg_attr(not(test), no_std)]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
+#![feature(never_type)]
+#![feature(try_blocks)]
 
 mod clock_config;
-mod e22;
 mod tasks;
 mod time;
 mod utils;
-mod lsm6dsm;
 mod avionics_mode;
-mod ms5607;
+mod drivers;
 
 use crate::{
     clock_config::vlf5_clock_config,
@@ -22,7 +22,7 @@ use {defmt_rtt_pipe as _, panic_probe as _};
 use cortex_m::singleton;
 use cortex_m_rt::entry;
 use defmt::info;
-use e22::E22;
+use drivers::e22::E22;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::{Executor, InterruptExecutor, SendSpawner, Spawner};
 use embassy_stm32::Peri;
