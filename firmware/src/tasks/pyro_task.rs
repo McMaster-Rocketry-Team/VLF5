@@ -1,17 +1,16 @@
 use core::cell::RefCell;
 use embassy_futures::join::join4;
 use embassy_stm32::{
+    Peri,
     exti::ExtiInput,
     gpio::{Input, Level, Output, Pull, Speed},
-    peripherals::{EXTI12, EXTI13, PD13, PD8, PD9, PE12, PE13, PE9},
-    Peri,
+    peripherals::{EXTI12, EXTI13, PD8, PD9, PD13, PE9, PE12, PE13},
 };
-use embassy_sync::{
-    blocking_mutex::{raw::NoopRawMutex, Mutex},
-    signal, watch,
-};
+use embassy_sync::blocking_mutex::{Mutex, raw::NoopRawMutex};
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::vlp::packets::fire_pyro::PyroSelect;
+
+use crate::{ContinuityWatch, FireSignal};
 
 #[derive(Clone, defmt::Format, PartialEq, Eq)]
 pub struct ContinuityUpdate {
@@ -34,8 +33,8 @@ pub async fn pyro_task(
     pyro2_cont: Peri<'static, PE12>,
     pyro2_cont_exti: Peri<'static, EXTI12>,
 
-    continuity_update: watch::DynSender<'static, ContinuityUpdate>,
-    fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
+    continuity_watch: &'static ContinuityWatch,
+    fire_signal: &'static FireSignal,
 ) {
     // https://www.notion.so/mcmasterrocketry/VLF5-1c0d3a029ea580f882dfee3f98b0b897?pvs=4#1ebd3a029ea5807e8651fe9f530ff869
     let mut pyro_n_en = Output::new(pyro_n_en, Level::High, Speed::Low);
@@ -59,13 +58,14 @@ pub async fn pyro_task(
             short_circuit: false,
         }));
 
+    let continuity_sender = continuity_watch.sender();
     let pyro1_cont_fut = async {
         let mut ticker = Ticker::every(Duration::from_millis(250));
         loop {
             state.lock(|state| {
                 let mut state = state.borrow_mut();
                 state.pyro1_continuity = pyro1_cont.is_low();
-                continuity_update.send(state.clone());
+                continuity_sender.send(state.clone());
             });
             ticker.next().await;
         }
@@ -77,7 +77,7 @@ pub async fn pyro_task(
             state.lock(|state| {
                 let mut state = state.borrow_mut();
                 state.pyro2_continuity = pyro2_cont.is_low();
-                continuity_update.send(state.clone());
+                continuity_sender.send(state.clone());
             });
         }
     };
@@ -88,7 +88,7 @@ pub async fn pyro_task(
             state.lock(|state| {
                 let mut state = state.borrow_mut();
                 state.short_circuit = pyro_pg.is_high();
-                continuity_update.send(state.clone());
+                continuity_sender.send(state.clone());
             });
         }
     };
@@ -101,7 +101,7 @@ pub async fn pyro_task(
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
                         state.pyro1_fire = true;
-                        continuity_update.send(state.clone());
+                        continuity_sender.send(state.clone());
                     });
                     pyro1_ctrl.set_high();
                     Timer::after(Duration::from_millis(3000)).await;
@@ -109,14 +109,14 @@ pub async fn pyro_task(
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
                         state.pyro1_fire = false;
-                        continuity_update.send(state.clone());
+                        continuity_sender.send(state.clone());
                     });
                 }
                 PyroSelect::PyroDrogue => {
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
                         state.pyro2_fire = true;
-                        continuity_update.send(state.clone());
+                        continuity_sender.send(state.clone());
                     });
                     pyro2_ctrl.set_high();
                     Timer::after(Duration::from_millis(3000)).await;
@@ -124,7 +124,7 @@ pub async fn pyro_task(
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
                         state.pyro2_fire = false;
-                        continuity_update.send(state.clone());
+                        continuity_sender.send(state.clone());
                     });
                 }
             }

@@ -24,17 +24,15 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID,
-    avionics_mode::{self, AvionicsMode},
-    can_central::CanCentral,
+    avionics_mode::{self, AvionicsMode}, can_central::CanCentral, AvionicsModeWatch, FlightStageMutex, VLStatusMutex, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
 };
 
 pub async fn self_test_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode_watch: &'static AvionicsModeWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
-    vl_status: &'static BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>,
-    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
+    vl_status: &'static VLStatusMutex,
+    flight_stage: &'static FlightStageMutex,
 ) {
     flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::SelfTest;

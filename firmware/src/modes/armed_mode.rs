@@ -1,14 +1,8 @@
 use core::cell::RefCell;
 
 use air_brakes_controller_core::{Measurement, RocketState, RocketStateEstimator};
-use embassy_sync::{
-    blocking_mutex::{
-        Mutex as BlockingMutex,
-        raw::{CriticalSectionRawMutex, NoopRawMutex},
-    },
-    signal::Signal,
-    watch::{self, Watch},
-};
+use embassy_futures::{join::join5, select::select};
+use embassy_sync::blocking_mutex::{Mutex as BlockingMutex, raw::NoopRawMutex};
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
@@ -25,40 +19,37 @@ use firmware_common_new::{
         },
         sender::CanSender,
     },
-    gps::GPSData,
-    readings::{BaroData, IMUData},
     sensor_reading::SensorReading,
-    time::BootTimestamp,
-    vlp::{
-        client::VLPAvionics,
-        packets::{fire_pyro::PyroSelect, telemetry::TelemetryPacketBuilder},
-    },
+    vlp::{client::VLPAvionics, packets::telemetry::TelemetryPacketBuilder},
 };
 
 use crate::{
-    DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    AvionicsModeWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, FireSignal,
+    FlightStageMutex, GPSReadingWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
-    tasks::{pyro_task::ContinuityUpdate, unix_clock::UnixClock},
+    tasks::{
+        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub},
+        unix_clock::UnixClock,
+    },
+    utils::SubscriberWithLastValue,
 };
 
 pub async fn armed_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
-    avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
+    avionics_mode_watch: &'static AvionicsModeWatch,
     can_sender: &'static CanSender<NoopRawMutex>,
     can_central: &'static CanCentral<NoopRawMutex>,
-    mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
-    mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
-    imu_watch: &'static Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, IMUData>, 2>,
-    baro_watch: &'static Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, BaroData>, 3>,
-    mut continuity_update: watch::DynReceiver<'static, ContinuityUpdate>,
+    gps_reading_watch: &'static GPSReadingWatch,
+    battery_v_watch: &'static BatteryVWatch,
+    imu_baro_pubsub: &'static IMUBaroReadingPubSub,
+    continuity_watch: &'static ContinuityWatch,
+    fire_signal: &'static FireSignal,
     mut can_receiver_sub: CanReceiverSub,
-    fire_signal: &'static Signal<NoopRawMutex, PyroSelect>,
-    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
+    flight_stage: &'static FlightStageMutex,
     unix_clock: &'static UnixClock,
 ) {
-    // TODO whats this for?
     flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::Armed;
     });
@@ -69,17 +60,22 @@ pub async fn armed_mode(
     ));
 
     let update_packet_sensor_fut = async {
-        let mut baro_receiver = baro_watch.receiver().unwrap();
-        let mut ticker = Ticker::every(Duration::from_hz(5));
+        let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
+
+        let mut gps_reading = gps_reading_watch.receiver().unwrap();
+        let mut battery_v_reading = battery_v_watch.receiver().unwrap();
+        let mut continuity = continuity_watch.receiver().unwrap();
         gps_reading.get().await;
         battery_v_reading.get().await;
-        baro_receiver.get().await;
-        continuity_update.get().await;
+        continuity.get().await;
+
+        let mut ticker = Ticker::every(Duration::from_hz(5));
+
         loop {
             let gps_data = gps_reading.try_get().unwrap().data;
             let battery_v = battery_v_reading.try_get().unwrap().data;
-            let baro_data = baro_receiver.try_get().unwrap().data;
-            let continuity = continuity_update.try_get().unwrap();
+            let baro_data = imu_baro_sub.get().await.data.1;
+            let continuity = continuity.try_get().unwrap();
             packet_builder.update(|packet| {
                 packet.gps_location = Some(gps_data);
                 packet.vl_battery_v = battery_v;
@@ -410,49 +406,61 @@ pub async fn armed_mode(
     };
 
     let update_state_estimator_fut = async {
-        // todo change to pubsub
-        let mut imu_receiver = imu_watch.receiver().unwrap();
-        let mut baro_receiver = baro_watch.receiver().unwrap();
+        let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
 
         loop {
-            let imu_reading = imu_receiver.changed().await;
-            let baro_reading = baro_receiver.changed().await;
+            let reading = imu_baro_sub.next_message_pure().await;
+            if let SensorReading {
+                data: (Some(imu_data), baro_data),
+                ..
+            } = reading
+            {
+                let (pyro, state) = state_estimator.lock(|s| {
+                    let mut estimator = s.borrow_mut();
 
-            let (pyro, state) = state_estimator.lock(|s| {
-                let mut estimator = s.borrow_mut();
+                    let pyro = estimator.update(&Measurement::new(
+                        &imu_data.acc,
+                        &imu_data.gyro,
+                        baro_data.altitude_asl(),
+                    ));
 
-                let pyro = estimator.update(&Measurement::new(
-                    &imu_reading.data.acc,
-                    &imu_reading.data.gyro,
-                    baro_reading.data.altitude_asl(),
-                ));
+                    let state = estimator.state();
 
-                let state = estimator.state();
+                    (pyro, state)
+                });
 
-                (pyro, state)
-            });
+                if let Some(pyro) = pyro {
+                    fire_signal.signal(pyro);
+                }
 
-            if let Some(pyro) = pyro {
-                fire_signal.signal(pyro);
+                flight_stage.lock(|r| {
+                    *r.borrow_mut() = match state {
+                        RocketState::OnPad => FlightStage::Armed,
+                        RocketState::PoweredAscent { .. } => FlightStage::PoweredAscent,
+                        RocketState::Coasting { .. } => FlightStage::Coasting,
+                        RocketState::DrogueChute { .. } => FlightStage::DrogueDeployed,
+                        RocketState::MainChute { .. } => FlightStage::MainDeployed,
+                        RocketState::Landed | RocketState::FailedToReachMinApogee => {
+                            FlightStage::Landed
+                        }
+                    };
+                });
             }
-
-            flight_stage.lock(|r| {
-                *r.borrow_mut() = match state {
-                    RocketState::OnPad => FlightStage::Armed,
-                    RocketState::PoweredAscent { .. } => FlightStage::PoweredAscent,
-                    RocketState::Coasting { .. } => FlightStage::Coasting,
-                    RocketState::DrogueChute { .. } => FlightStage::DrogueDeployed,
-                    RocketState::MainChute { .. } => FlightStage::MainDeployed,
-                    RocketState::Landed | RocketState::FailedToReachMinApogee => {
-                        FlightStage::Landed
-                    }
-                };
-            });
         }
     };
 
     let wait_armed_mode_end_fut = async {
-        let mut receiver = avionics_mode.receiver().unwrap();
+        let mut receiver = avionics_mode_watch.receiver().unwrap();
         receiver.changed_and(|m| *m != AvionicsMode::Armed).await;
     };
+
+    let fut = join5(
+        update_packet_sensor_fut,
+        update_packet_can_fut,
+        send_telemetry_packet_fut,
+        send_rocket_state_fut,
+        update_state_estimator_fut,
+    );
+
+    select(fut, wait_armed_mode_end_fut).await;
 }

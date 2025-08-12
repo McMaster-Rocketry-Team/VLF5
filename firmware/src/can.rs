@@ -41,9 +41,9 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    bootloader::{BootOption, configure_next_boot},
+    bootloader::{configure_next_boot, BootOption},
     can_central::CanCentral,
-    tasks::unix_clock::UnixClock,
+    tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock}, FlightStageMutex,
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -120,8 +120,8 @@ pub async fn start_can_bus_low_prio_tasks(
     spawner: &Spawner,
     tx: &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     rx: CanRx<'static>,
-    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
-    battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+    flight_stage: &'static FlightStageMutex,
+    battery_v_watch: &'static BatteryVWatch,
 ) -> (
     &'static CanSender<NoopRawMutex>,
     &'static CanReceiver<NoopRawMutex, 4, 2>,
@@ -142,7 +142,7 @@ pub async fn start_can_bus_low_prio_tasks(
     spawner.must_spawn(node_status_task(
         can_sender,
         flight_stage,
-        battery_v_reading,
+        battery_v_watch,
     ));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
     spawner.must_spawn(can_message_receive_task(
@@ -223,11 +223,13 @@ async fn can_bus_rx_task(
 #[embassy_executor::task]
 async fn node_status_task(
     can_sender: &'static CanSender<NoopRawMutex>,
-    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
-    mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+    flight_stage: &'static FlightStageMutex,
+    battery_v_watch: &'static BatteryVWatch,
 ) {
-    let mut ticker = Ticker::every(Duration::from_millis(500));
+    let mut battery_v_reading = battery_v_watch.receiver().unwrap();
     battery_v_reading.get().await;
+
+    let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
         can_sender
             .send(

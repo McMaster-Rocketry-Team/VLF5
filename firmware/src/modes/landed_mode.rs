@@ -1,11 +1,5 @@
-use core::cell::RefCell;
-
 use embassy_futures::{join::join3, select::select};
-use embassy_sync::{
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
-    blocking_mutex::Mutex as BlockingMutex,
-    watch::{self, Watch},
-};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
@@ -14,22 +8,19 @@ use firmware_common_new::{
         },
         node_types::AMP_NODE_TYPE,
     },
-    gps::GPSData,
-    sensor_reading::SensorReading,
-    time::BootTimestamp,
     vlp::{client::VLPAvionics, packets::landed_telemetry::LandedTelemetryPacketBuilder},
 };
 
-use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, AvionicsModeWatch};
+use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, tasks::sensor_tasks::BatteryVWatch, AvionicsModeWatch, FlightStageMutex, GPSReadingWatch};
 
 pub async fn landed_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode_watch: &'static AvionicsModeWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
-    mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
-    mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+    gps_reading_watch: &'static GPSReadingWatch,
+    battery_v_watch: &'static BatteryVWatch,
     mut can_receiver_sub: CanReceiverSub,
-    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
+    flight_stage: &'static FlightStageMutex,
 ) {
     flight_stage.lock(|r|{
         *r.borrow_mut() = FlightStage::Landed;
@@ -37,9 +28,12 @@ pub async fn landed_mode(
     let packet_builder = LandedTelemetryPacketBuilder::<NoopRawMutex>::new();
     
     let update_packet_sensor_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(1));
-        gps_reading.get().await;                               
+        let mut gps_reading = gps_reading_watch.receiver().unwrap();
+        let mut battery_v_reading = battery_v_watch.receiver().unwrap();
+        gps_reading.get().await;
         battery_v_reading.get().await;
+
+        let mut ticker = Ticker::every(Duration::from_hz(1));
 
         loop {
             let gps_data = gps_reading.try_get().unwrap().data;

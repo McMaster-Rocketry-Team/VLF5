@@ -51,7 +51,8 @@ use crate::{
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
     modes::{
-        landed_mode::landed_mode, low_power_mode::low_power_mode, self_test_mode::self_test_mode,
+        armed_mode::armed_mode, landed_mode::landed_mode, low_power_mode::low_power_mode,
+        self_test_mode::self_test_mode,
     },
     tasks::{
         buzzer_task::{BuzzerPubSub, BuzzerTone, buzzer_task},
@@ -102,6 +103,9 @@ pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
 pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
+pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
+pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 1>;
+pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
 
 #[entry]
 fn main() -> ! {
@@ -211,17 +215,16 @@ async fn low_prio_main(
     unix_clock: &'static UnixClock,
 ) {
     let p = unsafe { Peripherals::steal() };
-    // TODO
     let mut ps = Output::new(p.PA3, Level::Low, Speed::Low);
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
-    let flight_stage = singleton!(:BlockingMutex<NoopRawMutex, RefCell<FlightStage>> = BlockingMutex::new(RefCell::new(FlightStage::Armed))).unwrap();
-    let battery_v_watch = singleton!(:BatteryVWatch = BatteryVWatch::new()).unwrap();
-
-    let continuity_update =
-        singleton!(: watch::Watch<NoopRawMutex, ContinuityUpdate, 1> = watch::Watch::new())
+    let flight_stage =
+        singleton!(: FlightStageMutex = BlockingMutex::new(RefCell::new(FlightStage::Armed)))
             .unwrap();
-    let fire_signal = singleton!(: Signal<NoopRawMutex, PyroSelect> = Signal::new()).unwrap();
+    let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
+
+    let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
+    let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
 
     spawner.must_spawn(power_led_task(
         p.PA2,
@@ -240,7 +243,7 @@ async fn low_prio_main(
         p.PD9,
         p.PE12,
         p.EXTI12,
-        continuity_update.dyn_sender(),
+        continuity_watch,
         fire_signal,
     ));
     spawner.must_spawn(gps_task(
@@ -273,7 +276,7 @@ async fn low_prio_main(
         can_tx,
         can_rx,
         flight_stage,
-        battery_v_watch.dyn_receiver().unwrap(),
+        battery_v_watch,
     )
     .await;
 
@@ -303,7 +306,21 @@ async fn low_prio_main(
         match avionics_mode_watch.try_get().unwrap() {
             AvionicsMode::Armed => {
                 ps.set_low();
-                todo!()
+                armed_mode(
+                    vlp_avionics_client,
+                    avionics_mode_watch,
+                    can_sender,
+                    can_central,
+                    gps_reading_watch,
+                    battery_v_watch,
+                    imu_baro_reading_pubsub,
+                    continuity_watch,
+                    fire_signal,
+                    can_receiver.subscriber().unwrap(),
+                    flight_stage,
+                    unix_clock,
+                )
+                .await;
             }
             AvionicsMode::SelfTest => {
                 ps.set_high();
@@ -322,8 +339,8 @@ async fn low_prio_main(
                     vlp_avionics_client,
                     avionics_mode_watch,
                     can_central,
-                    gps_reading_watch.dyn_receiver().unwrap(),
-                    battery_v_watch.dyn_receiver().unwrap(),
+                    gps_reading_watch,
+                    battery_v_watch,
                     imu_baro_reading_pubsub,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
@@ -336,8 +353,8 @@ async fn low_prio_main(
                     vlp_avionics_client,
                     avionics_mode_watch,
                     can_central,
-                    gps_reading_watch.dyn_receiver().unwrap(),
-                    battery_v_watch.dyn_receiver().unwrap(),
+                    gps_reading_watch,
+                    battery_v_watch,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
                 )

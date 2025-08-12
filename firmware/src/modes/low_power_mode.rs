@@ -1,37 +1,33 @@
-use core::cell::RefCell;
-
 use embassy_futures::{join::join3, select::select};
-use embassy_sync::{
-    blocking_mutex::Mutex as BlockingMutex,
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
-    watch::{self, Watch},
-};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
         messages::{CanBusMessageEnum, vl_status::FlightStage},
         node_types::AMP_NODE_TYPE,
     },
-    gps::GPSData,
-    sensor_reading::SensorReading,
-    time::BootTimestamp,
     vlp::{client::VLPAvionics, packets::low_power_telemetry::LowPowerTelemetryPacketBuilder},
 };
 
-use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, tasks::sensor_tasks::IMUBaroReadingPubSub, utils::SubscriberWithLastValue, AvionicsModeWatch};
+use crate::{
+    AvionicsModeWatch, FlightStageMutex, GPSReadingWatch,
+    avionics_mode::AvionicsMode,
+    can::CanReceiverSub,
+    can_central::CanCentral,
+    tasks::sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub},
+    utils::SubscriberWithLastValue,
+};
 
 pub async fn low_power_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode_watch: &'static AvionicsModeWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
-    mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
-    mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+    gps_reading_watch: &'static GPSReadingWatch,
+    battery_v_watch: &'static BatteryVWatch,
     imu_baro_pubsub: &'static IMUBaroReadingPubSub,
     mut can_receiver_sub: CanReceiverSub,
-    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
+    flight_stage: &'static FlightStageMutex,
 ) {
-    let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
-
     flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::LowPower;
     });
@@ -39,10 +35,14 @@ pub async fn low_power_mode(
     let packet_builder = LowPowerTelemetryPacketBuilder::<NoopRawMutex>::new();
 
     let update_packet_sensor_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(1));
+        let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
+        let mut gps_reading = gps_reading_watch.receiver().unwrap();
+        let mut battery_v_reading = battery_v_watch.receiver().unwrap();
         gps_reading.get().await;
         battery_v_reading.get().await;
-        
+
+        let mut ticker = Ticker::every(Duration::from_hz(1));
+
         loop {
             let gps_data = gps_reading.try_get().unwrap().data;
             let battery_v = battery_v_reading.try_get().unwrap().data;
