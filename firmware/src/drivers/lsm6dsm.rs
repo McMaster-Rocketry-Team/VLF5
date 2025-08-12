@@ -7,7 +7,6 @@ use firmware_common_new::time::BootTimestamp;
 use nalgebra::Vector3;
 
 const WHO_AM_I: u8 = 0x0F;
-const STATUS_REG: u8 = 0x1E;
 const CTRL1_XL: u8 = 0x10;
 const CTRL2_G: u8 = 0x11;
 const CTRL3_C: u8 = 0x12;

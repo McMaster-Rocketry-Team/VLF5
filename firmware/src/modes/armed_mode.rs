@@ -448,6 +448,7 @@ pub async fn armed_mode(
                     && velocity.magnitude() <= 0.85 * approximate_speed_of_sound(*altitude_asl)
                 {
                     start_airbrakes_signal.signal(());
+                    airbrakes_started = true;
                 }
 
                 flight_stage.lock(|r| {

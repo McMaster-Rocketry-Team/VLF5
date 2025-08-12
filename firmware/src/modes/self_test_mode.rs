@@ -1,15 +1,9 @@
-use core::cell::RefCell;
 
 use embassy_futures::{join::join, select::select};
-use embassy_sync::{
-    blocking_mutex::Mutex as BlockingMutex,
-    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
-    watch::Watch,
-};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Ticker};
 use firmware_common_new::{
     can_bus::{
-        custom_status::vl_custom_status::VLCustomStatus,
         messages::vl_status::FlightStage,
         node_types::{
             AERO_RUST_NODE_TYPE, AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
@@ -24,7 +18,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    avionics_mode::{self, AvionicsMode}, can_central::CanCentral, AvionicsModeWatch, FlightStageMutex, VLStatusMutex, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
+    avionics_mode::AvionicsMode, can_central::CanCentral, AvionicsModeWatch, FlightStageMutex, VLStatusMutex, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
 };
 
 pub async fn self_test_mode(

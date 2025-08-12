@@ -13,12 +13,9 @@ use embassy_stm32::{
     peripherals::{FDCAN2, PB5, PB6},
 };
 use embassy_sync::{
-    blocking_mutex::{
-        Mutex as BlockingMutex,
-        raw::{CriticalSectionRawMutex, NoopRawMutex},
-    },
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     mutex::Mutex,
-    pubsub, watch,
+    pubsub,
 };
 use embassy_time::{Duration, Instant, Ticker};
 use firmware_common_new::{
@@ -29,21 +26,22 @@ use firmware_common_new::{
         messages::{
             CanBusMessageEnum, PRE_UNIX_TIME_MESSAGE_TYPE, UNIX_TIME_MESSAGE_TYPE,
             node_status::{NodeHealth, NodeMode, NodeStatusMessage},
-            vl_status::{FlightStage, VLStatusMessage},
+            vl_status::VLStatusMessage,
         },
         node_types::VOID_LAKE_NODE_TYPE,
         receiver::{CanReceiver, ReceivedCanBusMessage},
         sender::{CanSender, create_unix_time_frame_data},
     },
     sensor_reading::SensorReading,
-    time::{BootTimestamp, Clock},
+    time::BootTimestamp,
 };
 use stm32_device_signature::device_id;
 
 use crate::{
-    bootloader::{configure_next_boot, BootOption},
+    FlightStageMutex,
+    bootloader::{BootOption, configure_next_boot},
     can_central::CanCentral,
-    tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock}, FlightStageMutex,
+    tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -139,11 +137,7 @@ pub async fn start_can_bus_low_prio_tasks(
 
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
-    spawner.must_spawn(node_status_task(
-        can_sender,
-        flight_stage,
-        battery_v_watch,
-    ));
+    spawner.must_spawn(node_status_task(can_sender, flight_stage, battery_v_watch));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
     spawner.must_spawn(can_message_receive_task(
         can_node_id,
@@ -231,31 +225,29 @@ async fn node_status_task(
 
     let mut ticker = Ticker::every(Duration::from_millis(500));
     loop {
-        can_sender
-            .send(
-                NodeStatusMessage::new(
-                    Instant::now().as_secs() as u32,
-                    NodeHealth::Healthy,
-                    NodeMode::Operational,
-                    VLCustomStatus {
-                        imu_ok: true,
-                        baro_ok: true,
-                        mag_ok: true,
-                        gps_ok: true,
-                        sd_ok: true,
-                        can_bus_ok: true,
-                    },
-                )
-                .into(),
-            );
-        can_sender
-            .send(
-                VLStatusMessage {
-                    flight_stage: flight_stage.borrow().clone().into_inner(),
-                    battery_mv: (battery_v_reading.try_get().unwrap().data * 1000.0) as u16,
-                }
-                .into(),
-            );
+        can_sender.send(
+            NodeStatusMessage::new(
+                Instant::now().as_secs() as u32,
+                NodeHealth::Healthy,
+                NodeMode::Operational,
+                VLCustomStatus {
+                    imu_ok: true,
+                    baro_ok: true,
+                    mag_ok: true,
+                    gps_ok: true,
+                    sd_ok: true,
+                    can_bus_ok: true,
+                },
+            )
+            .into(),
+        );
+        can_sender.send(
+            VLStatusMessage {
+                flight_stage: flight_stage.borrow().clone().into_inner(),
+                battery_mv: (battery_v_reading.try_get().unwrap().data * 1000.0) as u16,
+            }
+            .into(),
+        );
         ticker.next().await;
     }
 }

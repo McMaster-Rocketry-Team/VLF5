@@ -49,14 +49,7 @@ impl<'a, M: RawMutex, T: Clone, const CAP: usize, const SUBS: usize, const PUBS:
             last_value: None,
         })
     }
-
-    pub fn new_from_sub(sub: pubsub::Subscriber<'a, M, T, CAP, SUBS, PUBS>) -> Self {
-        Self {
-            sub,
-            last_value: None,
-        }
-    }
-
+    
     pub async fn get(&mut self) -> T {
         while let Some(value) = self.sub.try_next_message_pure() {
             self.last_value = Some(value)

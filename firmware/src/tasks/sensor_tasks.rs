@@ -1,5 +1,3 @@
-use core::cell::RefCell;
-
 use crate::{
     AvionicsModeWatch, VLStatusMutex,
     avionics_mode::AvionicsMode,
@@ -25,18 +23,14 @@ use embassy_stm32::{
     time::Hertz,
 };
 use embassy_sync::{
-    blocking_mutex::{
-        Mutex as BlockingMutex,
-        raw::{CriticalSectionRawMutex, NoopRawMutex},
-    },
+    blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     mutex::Mutex,
     pubsub::{DynPublisher, PubSubChannel},
-    watch::{self, Watch},
+    watch::Watch,
 };
 use embassy_time::{Duration, Instant, Ticker};
 use embedded_hal_async::spi::{ErrorKind, SpiDevice};
 use firmware_common_new::{
-    can_bus::custom_status::vl_custom_status::VLCustomStatus,
     readings::{BaroData, IMUData},
     sensor_reading::SensorReading,
     time::BootTimestamp,
