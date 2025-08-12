@@ -73,10 +73,19 @@ impl UnixClock {
         })
     }
 
-    fn now_us(&self) -> Option<u64> {
+    pub fn now_us(&self) -> Option<u64> {
         self.unix_offset.lock(|offset| {
             let offset = offset.borrow();
             offset.map(|offset| offset + Instant::now().as_micros())
+        })
+    }
+
+    pub fn now_us_or_boot_time(&self) -> u64 {
+        let now_boot_time = Instant::now().as_micros();
+
+        self.unix_offset.lock(|offset| {
+            let offset = offset.borrow();
+            offset.map(|offset| offset + now_boot_time).unwrap_or(now_boot_time)
         })
     }
 }

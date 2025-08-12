@@ -94,7 +94,7 @@ pub async fn low_power_mode(
 
     let wait_low_power_mode_end_fut = async {
         let mut receiver = avionics_mode.receiver().unwrap();
-        while receiver.get().await == AvionicsMode::LowPower {}
+        receiver.changed_and(|m| *m != AvionicsMode::LowPower).await;
     };
 
     select(fut, wait_low_power_mode_end_fut).await;

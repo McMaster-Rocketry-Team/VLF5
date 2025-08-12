@@ -14,6 +14,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "air-brakes-controller-core"
+version = "0.1.0"
+dependencies = [
+ "biquad",
+ "defmt 1.0.1",
+ "firmware-common-new",
+ "heapless 0.8.0",
+ "libm",
+ "micromath",
+ "nalgebra",
+ "serde",
+]
+
+[[package]]
 name = "aligned"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -739,6 +753,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 name = "firmware"
 version = "0.1.0"
 dependencies = [
+ "air-brakes-controller-core",
  "binary_macros",
  "biquad",
  "cortex-m 0.7.7",

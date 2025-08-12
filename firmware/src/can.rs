@@ -63,20 +63,18 @@ pub fn init_can_bus(
     &'static Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>>,
     CanRx<'static>,
 ) {
-    // bind_interrupts!(struct Irqs {
-    //     FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
-    //     FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
-    // });
+    bind_interrupts!(struct Irqs {
+        FDCAN2_IT0 => can::IT0InterruptHandler<FDCAN2>;
+        FDCAN2_IT1 => can::IT1InterruptHandler<FDCAN2>;
+    });
 
-    // let mut can = CanConfigurator::new(fdcan2, pb5, pb6, Irqs);
-    // can.set_bitrate(1_000_000);
-    // let can = can.into_normal_mode();
-    // let (tx, rx, _) = can.split();
-    // let tx = singleton!(: Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>> = Mutex::new(RefCell::new(tx))).unwrap();
+    let mut can = CanConfigurator::new(fdcan2, pb5, pb6, Irqs);
+    can.set_bitrate(1_000_000);
+    let can = can.into_normal_mode();
+    let (tx, rx, _) = can.split();
+    let tx = singleton!(: Mutex<CriticalSectionRawMutex, RefCell<CanTx<'static>>> = Mutex::new(RefCell::new(tx))).unwrap();
 
-    // (tx, rx)
-
-    todo!()
+    (tx, rx)
 }
 
 #[embassy_executor::task]
@@ -110,7 +108,7 @@ pub async fn can_bus_broadcast_unix_time_task(
         tx.write(
             &Frame::new_extended(
                 unix_frame_id,
-                &create_unix_time_frame_data(unix_clock.now_us()),
+                &create_unix_time_frame_data(unix_clock.now_us().unwrap()),
             )
             .unwrap(),
         )

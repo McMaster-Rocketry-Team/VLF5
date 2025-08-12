@@ -6,6 +6,7 @@ use core::cell::RefCell;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
+use air_brakes_controller_core::FlightProfile;
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -61,6 +62,7 @@ use crate::{
 };
 use receive_vlp_task::receive_vlp_task;
 
+mod armed_mode;
 mod avionics_mode;
 mod bootloader;
 mod can;
@@ -87,6 +89,18 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
 };
 pub const MAIN_BULKHEAD_NODE_ID: u16 = 0;
 pub const DROGUE_BULKHEAD_NODE_ID: u16 = 1;
+pub const OZYS_1_NODE_ID: u16 = 2;
+pub const OZYS_2_NODE_ID: u16 = 3;
+
+// TODO update
+pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
+    ignition_detection_acc_threshold: 4.0 * 9.81,
+    drogue_chute_minimum_time_us: 1_000_000,
+    drogue_chute_minimum_altitude_agl: 3000.0,
+    drogue_chute_delay_us: 0,
+    main_chute_altitude_agl: 400.0,
+    main_chute_delay_us: 0,
+};
 
 #[entry]
 fn main() -> ! {

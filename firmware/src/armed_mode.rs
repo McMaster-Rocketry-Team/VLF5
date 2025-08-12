@@ -1,0 +1,458 @@
+use core::cell::RefCell;
+
+use air_brakes_controller_core::{Measurement, RocketState, RocketStateEstimator};
+use embassy_sync::{
+    blocking_mutex::{
+        Mutex as BlockingMutex,
+        raw::{CriticalSectionRawMutex, NoopRawMutex},
+    },
+    signal::Signal,
+    watch::{self, Watch},
+};
+use embassy_time::{Duration, Ticker};
+use firmware_common_new::{
+    can_bus::{
+        messages::{
+            CanBusMessageEnum,
+            node_status::{NodeHealth, NodeMode},
+            rocket_state::RocketStateMessage,
+            vl_status::FlightStage,
+        },
+        node_types::{
+            AERO_RUST_NODE_TYPE, AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE,
+            OZYS_NODE_TYPE, PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE,
+            PAYLOAD_EPS2_NODE_TYPE, PAYLOAD_ROCKET_WIFI_NODE_TYPE,
+        },
+        sender::CanSender,
+    },
+    gps::GPSData,
+    readings::{BaroData, IMUData},
+    sensor_reading::SensorReading,
+    time::BootTimestamp,
+    vlp::{
+        client::VLPAvionics,
+        packets::{fire_pyro::PyroSelect, telemetry::TelemetryPacketBuilder},
+    },
+};
+
+use crate::{
+    DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    avionics_mode::AvionicsMode,
+    can::CanReceiverSub,
+    can_central::CanCentral,
+    tasks::{pyro_task::ContinuityUpdate, unix_clock::UnixClock},
+};
+
+pub async fn armed_mode(
+    vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
+    avionics_mode: &'static Watch<CriticalSectionRawMutex, AvionicsMode, 10>,
+    can_sender: &'static CanSender<NoopRawMutex>,
+    can_central: &'static CanCentral<NoopRawMutex>,
+    mut gps_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, GPSData>>,
+    mut battery_v_reading: watch::DynReceiver<'static, SensorReading<BootTimestamp, f32>>,
+    imu_watch: &'static Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, IMUData>, 2>,
+    baro_watch: &'static Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, BaroData>, 3>,
+    mut continuity_update: watch::DynReceiver<'static, ContinuityUpdate>,
+    mut can_receiver_sub: CanReceiverSub,
+    fire_signal: &'static Signal<NoopRawMutex, PyroSelect>,
+    flight_stage: &'static BlockingMutex<NoopRawMutex, RefCell<FlightStage>>,
+    unix_clock: &'static UnixClock,
+) {
+    // TODO whats this for?
+    flight_stage.lock(|r| {
+        *r.borrow_mut() = FlightStage::Armed;
+    });
+
+    let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
+    let state_estimator = BlockingMutex::<NoopRawMutex, _>::new(RefCell::new(
+        RocketStateEstimator::new(FLIGHT_PROFILE.clone()),
+    ));
+
+    let update_packet_sensor_fut = async {
+        let mut baro_receiver = baro_watch.receiver().unwrap();
+        let mut ticker = Ticker::every(Duration::from_hz(5));
+        gps_reading.get().await;
+        battery_v_reading.get().await;
+        baro_receiver.get().await;
+        continuity_update.get().await;
+        loop {
+            let gps_data = gps_reading.try_get().unwrap().data;
+            let battery_v = battery_v_reading.try_get().unwrap().data;
+            let baro_data = baro_receiver.try_get().unwrap().data;
+            let continuity = continuity_update.try_get().unwrap();
+            packet_builder.update(|packet| {
+                packet.gps_location = Some(gps_data);
+                packet.vl_battery_v = battery_v;
+                packet.air_temperature = baro_data.temperature;
+
+                // TODO double check
+                packet.pyro_main_continuity = continuity.pyro1_continuity;
+                packet.pyro_drogue_continuity = continuity.pyro2_continuity;
+
+                if let Some(amp) = can_central.get_nodes::<1>(AMP_NODE_TYPE).first() {
+                    packet.amp_online = amp.is_online();
+                    packet.amp_uptime_s = amp.status.uptime_s;
+                } else {
+                    packet.amp_online = false;
+                    packet.amp_uptime_s = 0;
+                }
+
+                if let Some(main_bulkhead) = can_central
+                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == MAIN_BULKHEAD_NODE_ID)
+                {
+                    packet.main_bulkhead_online = main_bulkhead.is_online();
+                    packet.main_bulkhead_uptime_s = main_bulkhead.status.uptime_s;
+                } else {
+                    packet.main_bulkhead_online = false;
+                    packet.main_bulkhead_uptime_s = 0;
+                }
+
+                if let Some(drogue_bulkhead) = can_central
+                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == DROGUE_BULKHEAD_NODE_ID)
+                {
+                    packet.drogue_bulkhead_online = drogue_bulkhead.is_online();
+                    packet.drogue_bulkhead_uptime_s = drogue_bulkhead.status.uptime_s;
+                } else {
+                    packet.drogue_bulkhead_online = false;
+                    packet.drogue_bulkhead_uptime_s = 0;
+                }
+
+                if let Some(icarus) = can_central.get_nodes::<1>(ICARUS_NODE_TYPE).first() {
+                    packet.icarus_online = icarus.is_online();
+                    packet.icarus_uptime_s = icarus.status.uptime_s;
+                } else {
+                    packet.icarus_online = false;
+                    packet.icarus_uptime_s = 0;
+                }
+
+                if let Some(ozys_1) = can_central
+                    .get_nodes::<4>(OZYS_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == OZYS_1_NODE_ID)
+                {
+                    packet.ozys1_online = ozys_1.is_online();
+                    packet.ozys1_uptime_s = ozys_1.status.uptime_s;
+                } else {
+                    packet.ozys1_online = false;
+                    packet.ozys1_uptime_s = 0;
+                }
+
+                if let Some(ozys_2) = can_central
+                    .get_nodes::<4>(OZYS_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == OZYS_2_NODE_ID)
+                {
+                    packet.ozys2_online = ozys_2.is_online();
+                    packet.ozys2_uptime_s = ozys_2.status.uptime_s;
+                } else {
+                    packet.ozys2_online = false;
+                    packet.ozys2_uptime_s = 0;
+                }
+
+                if let Some(aero_rust) = can_central
+                    .get_nodes::<1>(AERO_RUST_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == OZYS_2_NODE_ID)
+                {
+                    packet.aero_rust_uptime_s = aero_rust.status.uptime_s;
+                    packet.aero_rust_health = aero_rust.status.health;
+                    packet.aero_rust_mode = aero_rust.status.mode;
+                    packet.aero_rust_status = aero_rust.status.custom_status_raw;
+                } else {
+                    packet.aero_rust_uptime_s = 0;
+                    packet.aero_rust_health = NodeHealth::Healthy;
+                    packet.aero_rust_mode = NodeMode::Offline;
+                    packet.aero_rust_status = 0;
+                }
+
+                if let Some(payload_activation_pcb) = can_central
+                    .get_nodes::<1>(PAYLOAD_ACTIVATION_NODE_TYPE)
+                    .first()
+                {
+                    packet.payload_activation_pcb_online = payload_activation_pcb.is_online();
+                    packet.payload_activation_pcb_uptime_s = payload_activation_pcb.status.uptime_s;
+                } else {
+                    packet.payload_activation_pcb_online = false;
+                    packet.payload_activation_pcb_uptime_s = 0;
+                }
+
+                if let Some(rocket_wifi) = can_central
+                    .get_nodes::<1>(PAYLOAD_ROCKET_WIFI_NODE_TYPE)
+                    .first()
+                {
+                    packet.rocket_wifi_online = rocket_wifi.is_online();
+                    packet.rocket_wifi_uptime_s = rocket_wifi.status.uptime_s;
+                } else {
+                    packet.rocket_wifi_online = false;
+                    packet.rocket_wifi_uptime_s = 0;
+                }
+
+                if let Some(eps_1) = can_central.get_nodes::<1>(PAYLOAD_EPS1_NODE_TYPE).first() {
+                    packet.eps1_online = eps_1.is_online();
+                    packet.eps1_uptime_s = eps_1.status.uptime_s;
+                } else {
+                    packet.eps1_online = false;
+                    packet.eps1_uptime_s = 0;
+                }
+
+                if let Some(eps_2) = can_central.get_nodes::<1>(PAYLOAD_EPS2_NODE_TYPE).first() {
+                    packet.eps2_online = eps_2.is_online();
+                    packet.eps2_uptime_s = eps_2.status.uptime_s;
+                } else {
+                    packet.eps2_online = false;
+                    packet.eps2_uptime_s = 0;
+                }
+
+                state_estimator.lock(|s| {
+                    let estimator = s.borrow();
+
+                    match estimator.state() {
+                        RocketState::OnPad => {
+                            packet.altitude_agl = 0.0;
+                            packet.air_speed = 0.0;
+                            packet.tilt_deg = 0.0;
+                            packet.flight_stage = FlightStage::Armed;
+                        }
+                        RocketState::PoweredAscent {
+                            tilt_deg,
+                            velocity,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
+                        } => {
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.air_speed = velocity.magnitude();
+                            packet.tilt_deg = tilt_deg;
+                            packet.flight_stage = FlightStage::PoweredAscent;
+                        }
+                        RocketState::Coasting {
+                            tilt_deg,
+                            velocity,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
+                        } => {
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.air_speed = velocity.magnitude();
+                            packet.tilt_deg = tilt_deg;
+                            packet.flight_stage = FlightStage::Coasting;
+                        }
+                        RocketState::DrogueChute {
+                            vertical_velocity,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
+                            ..
+                        } => {
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.air_speed = vertical_velocity.abs();
+                            packet.tilt_deg = 0.0;
+                            packet.flight_stage = FlightStage::Coasting;
+                        }
+                        RocketState::MainChute {
+                            vertical_velocity,
+                            altitude_asl,
+                            launch_pad_altitude_asl,
+                            ..
+                        } => {
+                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.air_speed = vertical_velocity.abs();
+                            packet.tilt_deg = 0.0;
+                            packet.flight_stage = FlightStage::Coasting;
+                        }
+                        RocketState::Landed => {
+                            packet.altitude_agl = 0.0;
+                            packet.air_speed = 0.0;
+                            packet.tilt_deg = 0.0;
+                            packet.flight_stage = FlightStage::Landed;
+                        }
+                        RocketState::FailedToReachMinApogee => {
+                            packet.altitude_agl = 0.0;
+                            packet.air_speed = 0.0;
+                            packet.tilt_deg = 0.0;
+                            packet.flight_stage = FlightStage::Landed;
+                        }
+                    }
+                });
+            });
+
+            ticker.next().await;
+        }
+    };
+
+    let update_packet_can_fut = async {
+        loop {
+            let message = can_receiver_sub.next_message_pure().await.data;
+            let node_id = message.id.node_id;
+            let node_type = message.id.node_type;
+            packet_builder.update(|packet| match message.message {
+                CanBusMessageEnum::AmpStatus(message) => {
+                    packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
+                    packet.amp_out1_overwrote = packet.amp_out1_overwrote;
+                    packet.amp_out1 = packet.amp_out1;
+                    packet.amp_out2_overwrote = packet.amp_out2_overwrote;
+                    packet.amp_out2 = packet.amp_out2;
+                    packet.amp_out3_overwrote = packet.amp_out3_overwrote;
+                    packet.amp_out3 = packet.amp_out3;
+                    packet.amp_out4_overwrote = packet.amp_out4_overwrote;
+                    packet.amp_out4 = packet.amp_out4;
+                }
+                CanBusMessageEnum::BrightnessMeasurement(message) => {
+                    if node_id == MAIN_BULKHEAD_NODE_ID {
+                        packet.main_bulkhead_brightness = message.brightness_lux();
+                    } else if node_id == DROGUE_BULKHEAD_NODE_ID {
+                        packet.drogue_bulkhead_brightness = message.brightness_lux();
+                    }
+                }
+                CanBusMessageEnum::IcarusStatus(message) => {
+                    packet.air_brakes_commanded_extension_percentage =
+                        message.commanded_extension_percentage();
+                    packet.air_brakes_actual_extension_percentage =
+                        message.actual_extension_percentage();
+                    packet.air_brakes_servo_temp = message.servo_temperature();
+                    packet.ap_residue = message.ap_residue_m as f32;
+                }
+                CanBusMessageEnum::PayloadEPSStatus(message) => {
+                    if node_type == PAYLOAD_EPS1_NODE_TYPE {
+                        packet.eps1_battery1_v = message.battery1_mv as f32 / 1000.0;
+                        packet.eps1_battery1_temperature = message.battery1_temperature();
+                        packet.eps1_battery2_v = message.battery2_mv as f32 / 1000.0;
+                        packet.eps1_battery2_temperature = message.battery2_temperature();
+                        packet.eps1_output_3v3_current =
+                            message.output_3v3.current_ma as f32 / 1000.0;
+                        packet.eps1_output_3v3_overwrote = message.output_3v3.overwrote;
+                        packet.eps1_output_3v3_status = message.output_3v3.status;
+                        packet.eps1_output_5v_current =
+                            message.output_5v.current_ma as f32 / 1000.0;
+                        packet.eps1_output_5v_overwrote = message.output_5v.overwrote;
+                        packet.eps1_output_5v_status = message.output_5v.status;
+                        packet.eps1_output_9v_current =
+                            message.output_9v.current_ma as f32 / 1000.0;
+                        packet.eps1_output_9v_overwrote = message.output_9v.overwrote;
+                        packet.eps1_output_9v_status = message.output_9v.status;
+                    } else if node_type == PAYLOAD_EPS2_NODE_TYPE {
+                        packet.eps2_battery1_v = message.battery1_mv as f32 / 1000.0;
+                        packet.eps2_battery1_temperature = message.battery1_temperature();
+                        packet.eps2_battery2_v = message.battery2_mv as f32 / 1000.0;
+                        packet.eps2_battery2_temperature = message.battery2_temperature();
+                        packet.eps2_output_3v3_current =
+                            message.output_3v3.current_ma as f32 / 1000.0;
+                        packet.eps2_output_3v3_overwrote = message.output_3v3.overwrote;
+                        packet.eps2_output_3v3_status = message.output_3v3.status;
+                        packet.eps2_output_5v_current =
+                            message.output_5v.current_ma as f32 / 1000.0;
+                        packet.eps2_output_5v_overwrote = message.output_5v.overwrote;
+                        packet.eps2_output_5v_status = message.output_5v.status;
+                        packet.eps2_output_9v_current =
+                            message.output_9v.current_ma as f32 / 1000.0;
+                        packet.eps2_output_9v_overwrote = message.output_9v.overwrote;
+                        packet.eps2_output_9v_status = message.output_9v.status;
+                    }
+                }
+                _ => {}
+            });
+        }
+    };
+
+    let send_telemetry_packet_fut = async {
+        let mut ticker = Ticker::every(Duration::from_hz(2));
+
+        loop {
+            ticker.next().await;
+
+            vlp_avionics_client.send(packet_builder.create_packet().into());
+        }
+    };
+
+    let send_rocket_state_fut = async {
+        let mut ticker = Ticker::every(Duration::from_hz(10));
+
+        loop {
+            let state = state_estimator.lock(|s| s.borrow().state());
+
+            let message = match state {
+                RocketState::PoweredAscent {
+                    tilt_deg,
+                    velocity,
+                    altitude_asl,
+                    launch_pad_altitude_asl,
+                } => Some(RocketStateMessage::new(
+                    unix_clock.now_us_or_boot_time(),
+                    tilt_deg,
+                    &velocity.into(),
+                    altitude_asl,
+                    launch_pad_altitude_asl,
+                    false,
+                )),
+                RocketState::Coasting {
+                    tilt_deg,
+                    velocity,
+                    altitude_asl,
+                    launch_pad_altitude_asl,
+                } => Some(RocketStateMessage::new(
+                    unix_clock.now_us_or_boot_time(),
+                    tilt_deg,
+                    &velocity.into(),
+                    altitude_asl,
+                    launch_pad_altitude_asl,
+                    true,
+                )),
+                _ => None,
+            };
+
+            if let Some(message) = message {
+                can_sender.send(message.into());
+            }
+
+            ticker.next().await;
+        }
+    };
+
+    let update_state_estimator_fut = async {
+        // todo change to pubsub
+        let mut imu_receiver = imu_watch.receiver().unwrap();
+        let mut baro_receiver = baro_watch.receiver().unwrap();
+
+        loop {
+            let imu_reading = imu_receiver.changed().await;
+            let baro_reading = baro_receiver.changed().await;
+
+            let (pyro, state) = state_estimator.lock(|s| {
+                let mut estimator = s.borrow_mut();
+
+                let pyro = estimator.update(&Measurement::new(
+                    &imu_reading.data.acc,
+                    &imu_reading.data.gyro,
+                    baro_reading.data.altitude_asl(),
+                ));
+
+                let state = estimator.state();
+
+                (pyro, state)
+            });
+
+            if let Some(pyro) = pyro {
+                fire_signal.signal(pyro);
+            }
+
+            flight_stage.lock(|r| {
+                *r.borrow_mut() = match state {
+                    RocketState::OnPad => FlightStage::Armed,
+                    RocketState::PoweredAscent { .. } => FlightStage::PoweredAscent,
+                    RocketState::Coasting { .. } => FlightStage::Coasting,
+                    RocketState::DrogueChute { .. } => FlightStage::DrogueDeployed,
+                    RocketState::MainChute { .. } => FlightStage::MainDeployed,
+                    RocketState::Landed | RocketState::FailedToReachMinApogee => {
+                        FlightStage::Landed
+                    }
+                };
+            });
+        }
+    };
+
+    let wait_armed_mode_end_fut = async {
+        let mut receiver = avionics_mode.receiver().unwrap();
+        receiver.changed_and(|m| *m != AvionicsMode::Armed).await;
+    };
+}
