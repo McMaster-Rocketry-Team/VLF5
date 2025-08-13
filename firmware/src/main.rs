@@ -50,16 +50,11 @@ use crate::{
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
     modes::{
-        armed_mode::armed_mode, landed_mode::landed_mode, low_power_mode::low_power_mode,
-        self_test_mode::self_test_mode,
+        armed_mode::armed_mode, demo_mode::demo_mode, landed_mode::landed_mode,
+        low_power_mode::low_power_mode, self_test_mode::self_test_mode,
     },
     tasks::{
-        buzzer_task::{BuzzerPubSub, BuzzerTone, buzzer_task},
-        gps_task::gps_task,
-        pyro_task::{ContinuityUpdate, pyro_task},
-        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, adc_task, imu_baro_task},
-        unix_clock::{UnixClock, unix_clock_task},
-        vlp_avionics_daemon_task::vlp_avionics_daemon_task,
+        amp_control_task::{amp_control_task, AmpControlWatch}, buzzer_task::{buzzer_task, BuzzerPubSub, BuzzerTone}, gps_task::gps_task, pyro_task::{pyro_task, ContinuityUpdate}, sensor_tasks::{adc_task, imu_baro_task, BatteryVWatch, IMUBaroReadingPubSub}, unix_clock::{unix_clock_task, UnixClock}, vlp_avionics_daemon_task::vlp_avionics_daemon_task
     },
 };
 use receive_vlp_task::receive_vlp_task;
@@ -100,7 +95,7 @@ pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
 };
 pub const TARGET_APOGEE_AGL: f32 = 4000.0;
 pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
-    burnout_mass: 17.0,
+    burnout_mass: 17.607,
     cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
     reference_area: 0.008982476,
 };
@@ -118,7 +113,7 @@ fn main() -> ! {
 
     let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
     let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
-    avionics_mode.sender().send(AvionicsMode::Armed);
+    avionics_mode.sender().send(AvionicsMode::Demo);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
     let gps_reading_watch = singleton!(: GPSReadingWatch = GPSReadingWatch::new()).unwrap();
@@ -230,6 +225,7 @@ async fn low_prio_main(
 
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
+    let amp_control_watch = singleton!(: AmpControlWatch = AmpControlWatch::new()).unwrap();
 
     spawner.must_spawn(power_led_task(
         p.PA2,
@@ -293,6 +289,7 @@ async fn low_prio_main(
         can_sender,
         unix_clock,
     ));
+    spawner.must_spawn(amp_control_task(can_sender, amp_control_watch));
 
     spawner.must_spawn(watchdog_task(p.IWDG1));
 
@@ -317,6 +314,7 @@ async fn low_prio_main(
                     fire_signal,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
+                    amp_control_watch,
                     unix_clock,
                 )
                 .await;
@@ -328,6 +326,7 @@ async fn low_prio_main(
                     avionics_mode_watch,
                     can_central,
                     vl_status,
+                    amp_control_watch,
                     flight_stage,
                 )
                 .await
@@ -342,6 +341,7 @@ async fn low_prio_main(
                     battery_v_watch,
                     imu_baro_reading_pubsub,
                     can_receiver.subscriber().unwrap(),
+                    amp_control_watch,
                     flight_stage,
                 )
                 .await
@@ -355,6 +355,23 @@ async fn low_prio_main(
                     gps_reading_watch,
                     battery_v_watch,
                     can_receiver.subscriber().unwrap(),
+                    amp_control_watch,
+                    flight_stage,
+                )
+                .await
+            }
+            AvionicsMode::Demo => {
+                ps.set_high();
+                demo_mode(
+                    vlp_avionics_client,
+                    avionics_mode_watch,
+                    can_sender,
+                    can_central,
+                    gps_reading_watch,
+                    battery_v_watch,
+                    imu_baro_reading_pubsub,
+                    can_receiver.subscriber().unwrap(),
+                    amp_control_watch,
                     flight_stage,
                 )
                 .await

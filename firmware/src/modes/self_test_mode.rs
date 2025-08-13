@@ -1,4 +1,5 @@
 
+use defmt::info;
 use embassy_futures::{join::join, select::select};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Ticker};
@@ -18,7 +19,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    avionics_mode::AvionicsMode, can_central::CanCentral, AvionicsModeWatch, FlightStageMutex, VLStatusMutex, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
+    avionics_mode::AvionicsMode, can_central::CanCentral, tasks::amp_control_task::AmpControlWatch, AvionicsModeWatch, FlightStageMutex, VLStatusMutex, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
 };
 
 pub async fn self_test_mode(
@@ -26,8 +27,11 @@ pub async fn self_test_mode(
     avionics_mode_watch: &'static AvionicsModeWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
     vl_status: &'static VLStatusMutex,
+    amp_control_watch: &'static AmpControlWatch,
     flight_stage: &'static FlightStageMutex,
 ) {
+    info!("enter self test mode");
+    // TODO
     flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::SelfTest;
     });

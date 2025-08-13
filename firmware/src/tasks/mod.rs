@@ -4,3 +4,4 @@ pub mod vlp_avionics_daemon_task;
 pub mod gps_task;
 pub mod sensor_tasks;
 pub mod unix_clock;
+pub mod amp_control_task;

@@ -778,6 +778,7 @@ dependencies = [
  "firmware-common-new",
  "heapless 0.8.0",
  "lora-phy",
+ "micromath",
  "nalgebra",
  "panic-probe",
  "stm32-device-signature",

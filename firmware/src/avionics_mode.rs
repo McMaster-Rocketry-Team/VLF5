@@ -4,6 +4,7 @@ pub enum AvionicsMode {
     SelfTest,
     LowPower,
     Landed,
+    Demo,
 }
 
 impl From<firmware_common_new::vlp::packets::change_mode::Mode> for AvionicsMode {
@@ -13,6 +14,7 @@ impl From<firmware_common_new::vlp::packets::change_mode::Mode> for AvionicsMode
             firmware_common_new::vlp::packets::change_mode::Mode::SelfTest => AvionicsMode::SelfTest,
             firmware_common_new::vlp::packets::change_mode::Mode::Armed => AvionicsMode::Armed,
             firmware_common_new::vlp::packets::change_mode::Mode::Landed => AvionicsMode::Landed,
+            firmware_common_new::vlp::packets::change_mode::Mode::Demo => AvionicsMode::Demo,
         }
     }
 }

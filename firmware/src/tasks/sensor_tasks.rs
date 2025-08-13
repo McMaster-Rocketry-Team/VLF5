@@ -132,7 +132,7 @@ pub async fn imu_baro_task(
                     };
                     imu.power_down().await.map_err(IMUOrBaroError::IMU)?;
                 }
-                AvionicsMode::LowPower => {
+                AvionicsMode::LowPower | AvionicsMode::Demo => {
                     match select(
                         read_baro_low_power_loop(&mut baro, &publisher),
                         avionics_mode.changed(),

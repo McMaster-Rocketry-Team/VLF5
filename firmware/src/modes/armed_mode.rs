@@ -3,6 +3,7 @@ use core::cell::RefCell;
 use air_brakes_controller_core::{
     AirBrakesMPC, Measurement, RocketState, RocketStateEstimator, approximate_speed_of_sound,
 };
+use defmt::info;
 use embassy_futures::{
     join::{join, join5},
     select::select,
@@ -11,12 +12,13 @@ use embassy_sync::{
     blocking_mutex::{Mutex as BlockingMutex, raw::NoopRawMutex},
     signal::Signal,
 };
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
         messages::{
             CanBusMessageEnum,
             airbrakes_control::AirBrakesControlMessage,
+            amp_control::AmpControlMessage,
             node_status::{NodeHealth, NodeMode},
             rocket_state::RocketStateMessage,
             vl_status::FlightStage,
@@ -41,6 +43,7 @@ use crate::{
     can::CanReceiverSub,
     can_central::CanCentral,
     tasks::{
+        amp_control_task::AmpControlWatch,
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub},
         unix_clock::UnixClock,
     },
@@ -59,10 +62,18 @@ pub async fn armed_mode(
     fire_signal: &'static FireSignal,
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static FlightStageMutex,
+    amp_control_watch: &'static AmpControlWatch,
     unix_clock: &'static UnixClock,
 ) {
+    info!("enter armed mode");
     flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::Armed;
+    });
+    amp_control_watch.sender().send(AmpControlMessage {
+        out1_enable: true,
+        out2_enable: true,
+        out3_enable: true,
+        out4_enable: false,
     });
 
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
@@ -451,6 +462,11 @@ pub async fn armed_mode(
                     airbrakes_started = true;
                 }
 
+                if let RocketState::Landed | RocketState::FailedToReachMinApogee = state {
+                    Timer::after_secs(30).await;
+                    avionics_mode_watch.sender().send(AvionicsMode::Landed);
+                }
+
                 flight_stage.lock(|r| {
                     *r.borrow_mut() = match state {
                         RocketState::OnPad => FlightStage::Armed,
@@ -506,6 +522,7 @@ pub async fn armed_mode(
 
             ticker.next().await;
         }
+        can_sender.send(AirBrakesControlMessage::new(0.0).into());
     };
 
     let wait_armed_mode_end_fut = async {
