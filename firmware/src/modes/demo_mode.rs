@@ -1,3 +1,5 @@
+use core::f32::consts::PI;
+
 use crate::{
     AvionicsModeWatch, FlightStageMutex, GPSReadingWatch,
     avionics_mode::AvionicsMode,
@@ -110,7 +112,7 @@ pub async fn demo_mode(
 
         loop {
             let now_s = Instant::now().as_millis() as f32 / 1000.0;
-            let airbrake_extension_percentage = (frequency * now_s).sin() * 0.5 + 0.5;
+            let airbrake_extension_percentage = (frequency * PI * 2.0 * now_s).sin() * 0.5 + 0.5;
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
 
             ticker.next().await;

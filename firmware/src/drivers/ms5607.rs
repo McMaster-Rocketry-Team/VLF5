@@ -1,7 +1,6 @@
 use crate::sleep;
 use embassy_time::{Duration, Instant, Timer};
-use embedded_hal_async::spi::Error;
-use embedded_hal_async::spi::{ErrorKind, SpiDevice};
+use embedded_hal_async::spi::SpiDevice;
 use firmware_common_new::readings::BaroData;
 use firmware_common_new::sensor_reading::SensorReading;
 use firmware_common_new::time::BootTimestamp;
@@ -42,13 +41,12 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
         }
     }
 
-    pub async fn reset(&mut self) -> Result<(), ErrorKind> {
+    pub async fn reset(&mut self) -> Result<(), B::Error> {
         let (read_buffer, write_buffer) = create_buffer!(self, [0x1E]);
         // reset
         self.spi
             .transfer(read_buffer, write_buffer)
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
 
         sleep!(20);
 
@@ -58,8 +56,7 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
             let (read_buffer, write_buffer) = create_buffer!(self, [0xA0 | (addr << 1), 0, 0]);
             self.spi
                 .transfer(read_buffer, write_buffer)
-                .await
-                .map_err(|e| e.kind())?;
+                .await?;
 
             coefficients[(addr - 1) as usize] =
                 ((read_buffer[1] as u16) << 8) | (read_buffer[2] as u16);
@@ -76,22 +73,20 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
         Ok(())
     }
 
-    pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, BaroData>, ErrorKind> {
+    pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, BaroData>, B::Error> {
         // request measurement pressure with OSR=1024
         let timestamp = Instant::now().as_micros() + 1000; // timestamp of the pressure measurement
         let (read_buffer, write_buffer) = create_buffer!(self, [0x44]);
         self.spi
             .transfer(read_buffer, write_buffer)
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
         Timer::after(Duration::from_micros(2280)).await;
 
         // read pressure measurement
         let (read_buffer, write_buffer) = create_buffer!(self, [0x00, 0, 0, 0]);
         self.spi
             .transfer(read_buffer, write_buffer)
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
         let d1 = ((read_buffer[1] as u32) << 16)
             | ((read_buffer[2] as u32) << 8)
             | (read_buffer[3] as u32);
@@ -100,16 +95,14 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
         let (read_buffer, write_buffer) = create_buffer!(self, [0x50]);
         self.spi
             .transfer(read_buffer, write_buffer)
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
         Timer::after(Duration::from_micros(600)).await;
 
         // read temerature measurement
         let (read_buffer, write_buffer) = create_buffer!(self, [0x00, 0, 0, 0]);
         self.spi
             .transfer(read_buffer, write_buffer)
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
         let d2 = ((read_buffer[1] as u32) << 16)
             | ((read_buffer[2] as u32) << 8)
             | (read_buffer[3] as u32);

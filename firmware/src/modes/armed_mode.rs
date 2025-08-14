@@ -19,12 +19,11 @@ use firmware_common_new::{
             CanBusMessageEnum,
             airbrakes_control::AirBrakesControlMessage,
             amp_control::AmpControlMessage,
-            node_status::{NodeHealth, NodeMode},
             rocket_state::RocketStateMessage,
             vl_status::FlightStage,
         },
         node_types::{
-            AERO_RUST_NODE_TYPE, AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE,
+            AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE,
             OZYS_NODE_TYPE, PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE,
             PAYLOAD_EPS2_NODE_TYPE, PAYLOAD_ROCKET_WIFI_NODE_TYPE,
         },
@@ -169,22 +168,6 @@ pub async fn armed_mode(
                 } else {
                     packet.ozys2_online = false;
                     packet.ozys2_uptime_s = 0;
-                }
-
-                if let Some(aero_rust) = can_central
-                    .get_nodes::<1>(AERO_RUST_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == OZYS_2_NODE_ID)
-                {
-                    packet.aero_rust_uptime_s = aero_rust.status.uptime_s;
-                    packet.aero_rust_health = aero_rust.status.health;
-                    packet.aero_rust_mode = aero_rust.status.mode;
-                    packet.aero_rust_status = aero_rust.status.custom_status_raw;
-                } else {
-                    packet.aero_rust_uptime_s = 0;
-                    packet.aero_rust_health = NodeHealth::Healthy;
-                    packet.aero_rust_mode = NodeMode::Offline;
-                    packet.aero_rust_status = 0;
                 }
 
                 if let Some(payload_activation_pcb) = can_central

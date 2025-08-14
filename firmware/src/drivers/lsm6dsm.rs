@@ -1,6 +1,5 @@
 use embassy_time::{Instant, Timer};
-use embedded_hal_async::spi::Error;
-use embedded_hal_async::spi::{ErrorKind, SpiDevice};
+use embedded_hal_async::spi::SpiDevice;
 use firmware_common_new::readings::IMUData;
 use firmware_common_new::sensor_reading::SensorReading;
 use firmware_common_new::time::BootTimestamp;
@@ -25,38 +24,31 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Self { spi: spi_device }
     }
 
-    async fn verify_identity(&mut self) -> Result<u8, ErrorKind> {
-        let id = self.read_register(WHO_AM_I).await?;
-        Ok(id)
-    }
-
-    async fn read_register(&mut self, address: u8) -> Result<u8, ErrorKind> {
+    async fn read_register(&mut self, address: u8) -> Result<u8, B::Error> {
         let mut buffer = [0u8; 2];
 
         self.spi
             .transfer(&mut buffer, &[address | 0b10000000, 0x00])
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
 
         Ok(buffer[1])
     }
 
-    async fn write_register(&mut self, address: u8, value: u8) -> Result<(), ErrorKind> {
+    async fn write_register(&mut self, address: u8, value: u8) -> Result<(), B::Error> {
         self.spi
             .transfer(&mut [0u8; 2], &[address & !0b10000000, value])
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
         Ok(())
     }
 
-    pub async fn power_down(&mut self) -> Result<(), ErrorKind> {
+    pub async fn power_down(&mut self) -> Result<(), B::Error> {
         self.write_register(CTRL1_XL, 0).await?;
         self.write_register(CTRL2_G, 0).await?;
 
         Ok(())
     }
 
-    pub async fn power_up(&mut self) -> Result<(), ErrorKind> {
+    pub async fn power_up(&mut self) -> Result<(), B::Error> {
         // set acc ODR to 416Hz, bandwidth 104Hz, full scale to +-16g
         self.write_register(CTRL1_XL, 0b0110_01_1_0).await?;
         // set gyro ODR to 416Hz, full scale to +-2000dps
@@ -76,30 +68,29 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Ok(())
     }
 
-    pub async fn reset(&mut self) -> Result<(), ErrorKind> {
+    pub async fn reset(&mut self) -> Result<bool, B::Error> {
         Timer::after_millis(20).await; // wait for initialize
 
         // reset
         self.write_register(CTRL3_C, 0b10000101).await?;
         Timer::after_millis(20).await; // wait for initialize
 
-        let id = self.verify_identity().await?;
+        let id = self.read_register(WHO_AM_I).await?;
         if id != 0x6A {
-            return Err(ErrorKind::Other);
+            return Ok(false);
         }
 
-        Ok(())
+        Ok(true)
     }
 
-    pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, IMUData>, ErrorKind> {
+    pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, IMUData>, B::Error> {
         let mut buffer = [0u8; 13];
         self.spi
             .transfer(
                 &mut buffer,
                 &[OUTX_L_G | 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             )
-            .await
-            .map_err(|e| e.kind())?;
+            .await?;
 
         let buffer = &buffer[1..];
         let gyro_x = i16::from_le_bytes([buffer[0], buffer[1]]);

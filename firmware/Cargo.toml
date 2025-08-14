@@ -79,12 +79,6 @@ bench = false
 # Testing Entry Points
 
 [[bin]]
-name = "mag_test"
-path = "src/main_mag_test.rs"
-test = false
-bench = false
-
-[[bin]]
 name = "sd_test"
 path = "src/main_sd_test.rs"
 test = false

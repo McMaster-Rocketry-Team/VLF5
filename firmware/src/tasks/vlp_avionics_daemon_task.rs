@@ -66,5 +66,5 @@ pub async fn vlp_avionics_daemon_task(
     info!("LoRa initialized");
     let mut lora = LoraPhy::new(&mut lora, lora_config);
     let mut daemon = vlp_avionics_client.daemon(&mut lora, vlp_key);
-    daemon.run().await;
+    // daemon.run().await;
 }

@@ -34,7 +34,7 @@ use firmware_common_new::{
         custom_status::vl_custom_status::VLCustomStatus,
         messages::{
             baro_measurement::BaroMeasurementMessage, imu_measurement::IMUMeasurementMessage,
-            vl_status::FlightStage,
+            mag_measurement::MagMeasurementMessage, vl_status::FlightStage,
         },
         sender::CanSender,
     },
@@ -54,7 +54,16 @@ use crate::{
         low_power_mode::low_power_mode, self_test_mode::self_test_mode,
     },
     tasks::{
-        amp_control_task::{amp_control_task, AmpControlWatch}, buzzer_task::{buzzer_task, BuzzerPubSub, BuzzerTone}, gps_task::gps_task, pyro_task::{pyro_task, ContinuityUpdate}, sensor_tasks::{adc_task, imu_baro_task, BatteryVWatch, IMUBaroReadingPubSub}, unix_clock::{unix_clock_task, UnixClock}, vlp_avionics_daemon_task::vlp_avionics_daemon_task
+        amp_control_task::{AmpControlWatch, amp_control_task},
+        buzzer_task::{BuzzerPubSub, BuzzerTone, buzzer_task},
+        gps_task::gps_task,
+        pyro_task::{ContinuityUpdate, pyro_task},
+        sensor_tasks::{
+            BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub, adc_task, imu_baro_task,
+            mag_task,
+        },
+        unix_clock::{UnixClock, unix_clock_task},
+        vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
 };
 use receive_vlp_task::receive_vlp_task;
@@ -116,6 +125,8 @@ fn main() -> ! {
     avionics_mode.sender().send(AvionicsMode::Demo);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
+    let mag_reading_pubsub = singleton!(: MagReadingPubSub = MagReadingPubSub::new()).unwrap();
+
     let gps_reading_watch = singleton!(: GPSReadingWatch = GPSReadingWatch::new()).unwrap();
     let vl_status =
         singleton!(: VLStatusMutex = BlockingMutex::new(RefCell::new(VLCustomStatus::new())))
@@ -138,6 +149,7 @@ fn main() -> ! {
         buzzer_pubsub,
         avionics_mode,
         imu_baro_reading_pubsub,
+        mag_reading_pubsub,
         gps_reading_watch,
         vl_status,
         unix_clock,
@@ -152,6 +164,7 @@ fn main() -> ! {
             buzzer_pubsub,
             avionics_mode,
             imu_baro_reading_pubsub,
+            mag_reading_pubsub,
             gps_reading_watch,
             vl_status,
             unix_clock,
@@ -166,6 +179,7 @@ async fn high_prio_main(
     buzzer_pubsub: &'static BuzzerPubSub,
     avionics_mode_watch: &'static AvionicsModeWatch,
     imu_baro_reading_pubsub: &'static IMUBaroReadingPubSub,
+    mag_reading_pubsub: &'static MagReadingPubSub,
     gps_reading_watch: &'static GPSReadingWatch,
     vl_status: &'static VLStatusMutex,
     unix_clock: &'static UnixClock,
@@ -193,6 +207,16 @@ async fn high_prio_main(
         vl_status,
         avionics_mode_watch,
     ));
+    spawner.must_spawn(mag_task(
+        p.I2C2,
+        p.PB10,
+        p.PB11,
+        p.DMA1_CH7,
+        p.DMA1_CH6,
+        mag_reading_pubsub,
+        vl_status,
+        avionics_mode_watch,
+    ));
     spawner.must_spawn(unix_clock_task(
         p.PA15,
         p.EXTI15,
@@ -210,6 +234,7 @@ async fn low_prio_main(
     buzzer_pubsub: &'static BuzzerPubSub,
     avionics_mode_watch: &'static AvionicsModeWatch,
     imu_baro_reading_pubsub: &'static IMUBaroReadingPubSub,
+    mag_reading_pubsub: &'static MagReadingPubSub,
     gps_reading_watch: &'static GPSReadingWatch,
     vl_status: &'static VLStatusMutex,
     unix_clock: &'static UnixClock,
@@ -286,6 +311,11 @@ async fn low_prio_main(
 
     spawner.must_spawn(broadcast_imu_baro_measurement_task(
         imu_baro_reading_pubsub,
+        can_sender,
+        unix_clock,
+    ));
+    spawner.must_spawn(broadcast_mag_measurement_task(
+        mag_reading_pubsub,
         can_sender,
         unix_clock,
     ));
@@ -456,6 +486,28 @@ async fn broadcast_imu_baro_measurement_task(
                     .unwrap_or(reading.timestamp_us),
                 baro_data.pressure,
                 baro_data.temperature,
+            )
+            .into(),
+        );
+    }
+}
+
+#[embassy_executor::task]
+async fn broadcast_mag_measurement_task(
+    mag_pubsub: &'static MagReadingPubSub,
+    can_sender: &'static CanSender<NoopRawMutex>,
+    unix_clock: &'static UnixClock,
+) {
+    let mut sub = mag_pubsub.subscriber().unwrap();
+    loop {
+        let reading = sub.next_message_pure().await;
+
+        can_sender.send(
+            MagMeasurementMessage::new(
+                unix_clock
+                    .convert_to_unix_us(reading.timestamp_us)
+                    .unwrap_or(reading.timestamp_us),
+                &reading.data.mag.into(),
             )
             .into(),
         );

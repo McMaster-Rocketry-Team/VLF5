@@ -1,7 +1,7 @@
 use crate::{
     AvionicsModeWatch, VLStatusMutex,
     avionics_mode::AvionicsMode,
-    drivers::{lsm6dsm::LSM6DSM, ms5607::MS5607},
+    drivers::{lis2mdl::LIS2MDL, lsm6dsm::LSM6DSM, ms5607::MS5607},
 };
 use cortex_m::singleton;
 use defmt::{error, info};
@@ -13,11 +13,13 @@ use embassy_futures::{
 use embassy_stm32::{
     Peri,
     adc::{self, Adc, AdcChannel as _},
+    bind_interrupts,
     exti::ExtiInput,
     gpio::{Level, Output, Pull, Speed},
+    i2c::{self, Config as I2cConfig, Error as I2cError, I2c},
     peripherals::{
-        ADC1, DMA1_CH4, DMA1_CH5, DMA2_CH0, DMA2_CH1, EXTI14, PA5, PA6, PB0, PC6, PC13, PC14, PD7,
-        PE2, PE5, PE6, SPI1, SPI4,
+        ADC1, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA1_CH7, DMA2_CH0, DMA2_CH1, EXTI14, I2C2, PA5, PA6,
+        PB0, PB10, PB11, PC6, PC13, PC14, PD7, PE2, PE5, PE6, SPI1, SPI4,
     },
     spi::{Config as SpiConfig, Spi},
     time::Hertz,
@@ -29,9 +31,10 @@ use embassy_sync::{
     watch::Watch,
 };
 use embassy_time::{Duration, Instant, Ticker};
-use embedded_hal_async::spi::{ErrorKind, SpiDevice};
+use embedded_hal_async::i2c::I2c as HalI2c;
+use embedded_hal_async::spi::SpiDevice;
 use firmware_common_new::{
-    readings::{BaroData, IMUData},
+    readings::{BaroData, IMUData, MagData},
     sensor_reading::SensorReading,
     time::BootTimestamp,
 };
@@ -77,14 +80,21 @@ pub async fn imu_baro_task(
         s.baro_ok = true;
     });
 
-    let result: Result<!, IMUOrBaroError> = try {
+    let result = try {
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = Hertz(1_000_000);
-        let spi4 = Mutex::<NoopRawMutex, _>::new(Spi::new(
-            imu_spi4, imu_sck, imu_mosi, imu_miso, imu_tx_dma, imu_rx_dma, spi_config,
-        ));
+
+        let spi4 = singleton!(: Mutex<NoopRawMutex, Spi<'static, embassy_stm32::mode::Async>> = Mutex::new(Spi::new(
+            imu_spi4,
+            imu_sck,
+            imu_mosi,
+            imu_miso,
+            imu_tx_dma,
+            imu_rx_dma,
+            spi_config,
+        ))).unwrap();
         let imu_spi_device = SpiDeviceWithConfig::new(
-            &spi4,
+            spi4,
             Output::new(imu_cs, Level::High, Speed::High),
             spi_config,
         );
@@ -95,7 +105,7 @@ pub async fn imu_baro_task(
 
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = Hertz(1_000_000);
-        let spi1 = Mutex::<NoopRawMutex, _>::new(Spi::new(
+        let spi1 = singleton!(: Mutex<NoopRawMutex, Spi<'static, embassy_stm32::mode::Async>> = Mutex::new(Spi::new(
             baro_spi1,
             baro_sck,
             baro_mosi,
@@ -103,9 +113,9 @@ pub async fn imu_baro_task(
             baro_tx_dma,
             baro_rx_dma,
             spi_config,
-        ));
+        ))).unwrap();
         let baro_spi_device = SpiDeviceWithConfig::new(
-            &spi1,
+            spi1,
             Output::new(baro_cs, Level::High, Speed::High),
             spi_config,
         );
@@ -172,16 +182,16 @@ pub async fn imu_baro_task(
     });
 }
 
-enum IMUOrBaroError {
-    IMU(ErrorKind),
-    Baro(ErrorKind),
-    IMUAndBaro(ErrorKind, ErrorKind),
+enum IMUOrBaroError<I: SpiDevice, B: SpiDevice> {
+    IMU(I::Error),
+    Baro(B::Error),
+    IMUAndBaro(I::Error, B::Error),
 }
 
-async fn read_baro_low_power_loop(
-    baro: &mut MS5607<'static, impl SpiDevice>,
+async fn read_baro_low_power_loop<B: SpiDevice>(
+    baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
-) -> Result<!, ErrorKind> {
+) -> Result<!, B::Error> {
     let mut ticker = Ticker::every(Duration::from_hz(5));
 
     loop {
@@ -194,12 +204,12 @@ async fn read_baro_low_power_loop(
     }
 }
 
-async fn read_imu_baro_loop(
+async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
     imu_int1: &mut ExtiInput<'static>,
-    imu: &mut LSM6DSM<impl SpiDevice>,
-    baro: &mut MS5607<'static, impl SpiDevice>,
+    imu: &mut LSM6DSM<I>,
+    baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
-) -> Result<!, IMUOrBaroError> {
+) -> Result<!, IMUOrBaroError<I, B>> {
     loop {
         imu_int1.wait_for_rising_edge().await;
         match join(imu.read(), baro.read()).await {
@@ -213,6 +223,92 @@ async fn read_imu_baro_loop(
                 Err(IMUOrBaroError::IMUAndBaro(imu_error, baro_error))?
             }
         };
+    }
+}
+
+pub type MagReadingPubSub =
+    PubSubChannel<CriticalSectionRawMutex, SensorReading<BootTimestamp, MagData>, 10, 1, 1>;
+
+#[embassy_executor::task]
+pub async fn mag_task(
+    i2c: Peri<'static, I2C2>,
+    scl: Peri<'static, PB10>,
+    sda: Peri<'static, PB11>,
+    tx_dma: Peri<'static, DMA1_CH7>,
+    rx_dma: Peri<'static, DMA1_CH6>,
+
+    pubsub: &'static MagReadingPubSub,
+
+    vl_status: &'static VLStatusMutex,
+    avionics_mode_watch: &'static AvionicsModeWatch,
+) {
+    vl_status.lock(|s| {
+        let mut s = s.borrow_mut();
+        s.mag_ok = true;
+    });
+
+    let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
+
+    let result: Result<!, I2cError> = try {
+        bind_interrupts!(struct Irqs {
+            I2C2_EV => i2c::EventInterruptHandler<I2C2>;
+            I2C2_ER => i2c::ErrorInterruptHandler<I2C2>;
+        });
+
+        let mut config = I2cConfig::default();
+        config.sda_pullup = true;
+        config.scl_pullup = true;
+        config.frequency = Hertz(400_000);
+        let i2c: I2c<'_, embassy_stm32::mode::Async, i2c::Master> =
+            I2c::new(i2c, scl, sda, Irqs, tx_dma, rx_dma, config);
+        let mut mag = LIS2MDL::new(i2c);
+        mag.reset().await?;
+        info!("Magnetometer initialized");
+
+        let publisher = pubsub.dyn_publisher().unwrap();
+        loop {
+            match avionics_mode.get().await {
+                AvionicsMode::Armed | AvionicsMode::SelfTest => {
+                    mag.power_up().await?;
+                    match select(
+                        read_mag_loop(&mut mag, &publisher),
+                        avionics_mode.changed_and(|m| {
+                            *m != AvionicsMode::Armed && *m != AvionicsMode::SelfTest
+                        }),
+                    )
+                    .await
+                    {
+                        Either::First(Err(e)) => Err(e)?,
+                        Either::Second(_) => {}
+                    };
+                    mag.power_down().await?;
+                }
+                AvionicsMode::LowPower | AvionicsMode::Demo | AvionicsMode::Landed => {
+                    avionics_mode.changed().await;
+                }
+            }
+        }
+    };
+
+    vl_status.lock(|s| {
+        let mut s = s.borrow_mut();
+
+        let error = result.unwrap_err();
+        error!("mag error: {}", error);
+        s.mag_ok = false;
+    });
+}
+
+async fn read_mag_loop<B: HalI2c>(
+    mag: &mut LIS2MDL<B>,
+    publisher: &DynPublisher<'static, SensorReading<BootTimestamp, MagData>>,
+) -> Result<!, B::Error> {
+    let mut ticker = Ticker::every(Duration::from_hz(100));
+
+    loop {
+        let reading = mag.read().await?;
+        publisher.publish_immediate(reading);
+        ticker.next().await;
     }
 }
 
