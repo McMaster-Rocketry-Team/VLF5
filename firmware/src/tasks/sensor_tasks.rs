@@ -150,7 +150,7 @@ pub async fn imu_baro_task(
                     .await
                     {
                         Either::First(Err(e)) => Err(IMUOrBaroError::Baro(e))?,
-                        Either::Second(_) => todo!(),
+                        Either::Second(_) => {},
                     };
                 }
                 AvionicsMode::Landed => {

@@ -1,25 +1,31 @@
-
 use defmt::info;
-use embassy_futures::{join::join, select::select};
+use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
-        messages::vl_status::FlightStage,
+        messages::{
+            amp_control::AmpControlMessage, amp_status::{AmpStatusMessage, PowerOutputStatus}, vl_status::FlightStage, CanBusMessageEnum
+        },
         node_types::{
-            AERO_RUST_NODE_TYPE, AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
-            PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE, PAYLOAD_EPS2_NODE_TYPE,
-            PAYLOAD_ROCKET_WIFI_NODE_TYPE,
+            AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE,
+            OZYS_NODE_TYPE, PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE,
+            PAYLOAD_EPS2_NODE_TYPE, PAYLOAD_ROCKET_WIFI_NODE_TYPE,
         },
     },
     vlp::{
         client::VLPAvionics,
-        packets::self_test_result::{NodeStatus, SelfTestResultPacketBuilder},
+        packets::{self_test_result::{NodeStatus, SelfTestResultPacketBuilder}, VLPDownlinkPacket},
     },
 };
 
 use crate::{
-    avionics_mode::AvionicsMode, can_central::CanCentral, tasks::amp_control_task::AmpControlWatch, AvionicsModeWatch, FlightStageMutex, VLStatusMutex, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID
+    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, FlightStageMutex, MAIN_BULKHEAD_NODE_ID,
+    OZYS_1_NODE_ID, OZYS_2_NODE_ID, VLStatusMutex,
+    can::CanReceiverSub,
+    can_central::CanCentral,
+    tasks::amp_control_task::AmpControlWatch,
+    utils::run_with_timeout,
 };
 
 pub async fn self_test_mode(
@@ -29,92 +35,255 @@ pub async fn self_test_mode(
     vl_status: &'static VLStatusMutex,
     amp_control_watch: &'static AmpControlWatch,
     flight_stage: &'static FlightStageMutex,
+    mut can_receiver_sub: CanReceiverSub,
 ) {
     info!("enter self test mode");
-    // TODO
     flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::SelfTest;
     });
-    let packet_builder = SelfTestResultPacketBuilder::<NoopRawMutex>::new();
 
-    let update_node_status_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(1));
-        loop {
-            let all_nodes = can_central.get_all_nodes();
-            packet_builder.update(|packet| {
+    let self_test_fut = async {
+        let packet_builder = SelfTestResultPacketBuilder::<NoopRawMutex>::new();
+
+        amp_control_watch.sender().send(AmpControlMessage {
+            out1_enable: false,
+            out2_enable: false,
+            out3_enable: false,
+            out4_enable: false,
+        });
+        Timer::after_millis(1000).await;
+        can_central.clear();
+        Timer::after_millis(1000).await;
+
+        // test vl
+        packet_builder.update(|packet| {
+            vl_status.lock(|s| {
+                let status = s.borrow();
+                packet.imu_ok = status.imu_ok;
+                packet.baro_ok = status.baro_ok;
+                packet.mag_ok = status.mag_ok;
+                packet.gps_ok = status.gps_ok;
+                packet.sd_ok = status.sd_ok;
+                packet.can_bus_ok = status.can_bus_ok;
+            });
+        });
+
+        // test amp
+        packet_builder.update(|packet| {
+            if let Some(amp) = can_central.get_nodes::<1>(AMP_NODE_TYPE).first() {
+                packet.amp = NodeStatus::from_message(&amp.status);
+            } else {
                 packet.amp = NodeStatus::offline();
-                packet.icarus = NodeStatus::offline();
-                packet.ozys1 = NodeStatus::offline();
-                packet.ozys2 = NodeStatus::offline();
-                packet.aero_rust = NodeStatus::offline();
-                packet.payload_activation_pcb = NodeStatus::offline();
-                packet.rocket_wifi = NodeStatus::offline();
-                packet.payload_eps1 = NodeStatus::offline();
-                packet.payload_eps2 = NodeStatus::offline();
-                packet.main_bulkhead_pcb = NodeStatus::offline();
-                packet.drogue_bulkhead_pcb = NodeStatus::offline();
+            }
+        });
 
-                let mut first_ozys = true;
-                for node in all_nodes {
-                    if node.typ == AMP_NODE_TYPE {
-                        packet.amp = node.into();
-                    } else if node.typ == ICARUS_NODE_TYPE {
-                        packet.icarus = node.into();
-                    } else if node.typ == OZYS_NODE_TYPE {
-                        if first_ozys {
-                            packet.ozys1 = node.into();
-                            first_ozys = false;
-                        } else {
-                            packet.ozys2 = node.into();
-                        }
-                    } else if node.typ == AERO_RUST_NODE_TYPE {
-                        packet.aero_rust = node.into();
-                    } else if node.typ == PAYLOAD_ACTIVATION_NODE_TYPE {
-                        packet.payload_activation_pcb = node.into();
-                    } else if node.typ == PAYLOAD_ROCKET_WIFI_NODE_TYPE {
-                        packet.rocket_wifi = node.into();
-                    } else if node.typ == PAYLOAD_EPS1_NODE_TYPE {
-                        packet.payload_eps1 = node.into();
-                    } else if node.typ == PAYLOAD_EPS2_NODE_TYPE {
-                        packet.payload_eps2 = node.into();
-                    } else if node.id == MAIN_BULKHEAD_NODE_ID {
-                        packet.main_bulkhead_pcb = node.into();
-                    } else if node.id == DROGUE_BULKHEAD_NODE_ID {
-                        packet.drogue_bulkhead_pcb = node.into();
-                    }
+        // test bulkhead pcbs
+        {
+            packet_builder.update(|packet| {
+                if let Some(main_bulkhead) = can_central
+                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == MAIN_BULKHEAD_NODE_ID)
+                {
+                    packet.main_bulkhead_pcb = NodeStatus::from_message(&main_bulkhead.status);
+                } else {
+                    packet.main_bulkhead_pcb = NodeStatus::offline();
                 }
 
-                vl_status.lock(|r| {
-                    let vl_self_test_status = r.borrow();
-                    packet.imu_ok = vl_self_test_status.imu_ok;
-                    packet.baro_ok = vl_self_test_status.baro_ok;
-                    packet.mag_ok = vl_self_test_status.mag_ok;
-                    packet.gps_ok = vl_self_test_status.gps_ok;
-                    packet.sd_ok = vl_self_test_status.sd_ok;
-                    packet.can_bus_ok = vl_self_test_status.can_bus_ok;
-                })
+                if let Some(drogue_bulkhead) = can_central
+                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == DROGUE_BULKHEAD_NODE_ID)
+                {
+                    packet.drogue_bulkhead_pcb = NodeStatus::from_message(&drogue_bulkhead.status);
+                } else {
+                    packet.drogue_bulkhead_pcb = NodeStatus::offline();
+                }
+            });
+        }
+
+        // test amp out 1
+        {
+            amp_control_watch.sender().send(AmpControlMessage {
+                out1_enable: true,
+                out2_enable: false,
+                out3_enable: false,
+                out4_enable: false,
+            });
+            Timer::after_millis(10000).await; // longer time for ICARUS to home
+            let out1_power_good = if let Some(amp_status_message) =
+                get_amp_status_message(&mut can_receiver_sub).await
+            {
+                amp_status_message.out1.status == PowerOutputStatus::PowerGood
+            } else {
+                false
+            };
+            packet_builder.update(|packet| {
+                packet.amp_out1_power_good = out1_power_good;
             });
 
-            ticker.next().await;
+            packet_builder.update(|packet| {
+                if let Some(icarus) = can_central.get_nodes::<1>(ICARUS_NODE_TYPE).first() {
+                    packet.icarus = NodeStatus::from_message(&icarus.status);
+                } else {
+                    packet.icarus = NodeStatus::offline();
+                }
+            });
         }
-    };
 
-    let send_packet_fut = async {
+        // test amp out 2
+        {
+            amp_control_watch.sender().send(AmpControlMessage {
+                out1_enable: false,
+                out2_enable: true,
+                out3_enable: false,
+                out4_enable: false,
+            });
+            Timer::after_millis(10000).await; // longer time for payload activation pcb to connect to payload
+            let out2_power_good = if let Some(amp_status_message) =
+                get_amp_status_message(&mut can_receiver_sub).await
+            {
+                amp_status_message.out2.status == PowerOutputStatus::PowerGood
+            } else {
+                false
+            };
+            packet_builder.update(|packet| {
+                packet.amp_out2_power_good = out2_power_good;
+            });
+
+            packet_builder.update(|packet| {
+                if let Some(ozys_1) = can_central
+                    .get_nodes::<4>(OZYS_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == OZYS_1_NODE_ID)
+                {
+                    packet.ozys1 = NodeStatus::from_message(&ozys_1.status);
+                } else {
+                    packet.ozys1 = NodeStatus::offline();
+                }
+
+                if let Some(payload_activation_pcb) = can_central
+                    .get_nodes::<1>(PAYLOAD_ACTIVATION_NODE_TYPE)
+                    .first()
+                {
+                    packet.payload_activation_pcb =
+                        NodeStatus::from_message(&payload_activation_pcb.status);
+                } else {
+                    packet.payload_activation_pcb = NodeStatus::offline();
+                }
+
+                if let Some(rocket_wifi) = can_central
+                    .get_nodes::<1>(PAYLOAD_ROCKET_WIFI_NODE_TYPE)
+                    .first()
+                {
+                    packet.rocket_wifi = NodeStatus::from_message(&rocket_wifi.status);
+                } else {
+                    packet.rocket_wifi = NodeStatus::offline();
+                }
+
+                if let Some(eps_1) = can_central.get_nodes::<1>(PAYLOAD_EPS1_NODE_TYPE).first() {
+                    packet.payload_eps1 = NodeStatus::from_message(&eps_1.status);
+                } else {
+                    packet.payload_eps1 = NodeStatus::offline();
+                }
+
+                if let Some(eps_2) = can_central.get_nodes::<1>(PAYLOAD_EPS2_NODE_TYPE).first() {
+                    packet.payload_eps2 = NodeStatus::from_message(&eps_2.status);
+                } else {
+                    packet.payload_eps2 = NodeStatus::offline();
+                }
+            });
+        }
+
+        // test amp out 3
+        {
+            amp_control_watch.sender().send(AmpControlMessage {
+                out1_enable: false,
+                out2_enable: false,
+                out3_enable: true,
+                out4_enable: false,
+            });
+            Timer::after_millis(2000).await;
+            let out3_power_good = if let Some(amp_status_message) =
+                get_amp_status_message(&mut can_receiver_sub).await
+            {
+                amp_status_message.out3.status == PowerOutputStatus::PowerGood
+            } else {
+                false
+            };
+            packet_builder.update(|packet| {
+                packet.amp_out3_power_good = out3_power_good;
+            });
+
+            packet_builder.update(|packet| {
+                if let Some(ozys_2) = can_central
+                    .get_nodes::<4>(OZYS_NODE_TYPE)
+                    .iter()
+                    .find(|node| node.id == OZYS_2_NODE_ID)
+                {
+                    packet.ozys2 = NodeStatus::from_message(&ozys_2.status);
+                } else {
+                    packet.ozys2 = NodeStatus::offline();
+                }
+            });
+        }
+
+        // test amp out 4
+        {
+            amp_control_watch.sender().send(AmpControlMessage {
+                out1_enable: false,
+                out2_enable: false,
+                out3_enable: false,
+                out4_enable: true,
+            });
+            Timer::after_millis(2000).await;
+            let out4_power_good = if let Some(amp_status_message) =
+                get_amp_status_message(&mut can_receiver_sub).await
+            {
+                amp_status_message.out4.status == PowerOutputStatus::PowerGood
+            } else {
+                false
+            };
+            packet_builder.update(|packet| {
+                packet.amp_out4_power_good = out4_power_good;
+            });
+        }
+
+        amp_control_watch.sender().send(AmpControlMessage {
+            out1_enable: false,
+            out2_enable: false,
+            out3_enable: false,
+            out4_enable: false,
+        });
+
+        let packet: VLPDownlinkPacket = packet_builder.create_packet().into();
+        info!("self test done: {}", packet);
         let mut ticker = Ticker::every(Duration::from_hz(2));
 
         loop {
             ticker.next().await;
-
-            vlp_avionics_client.send(packet_builder.create_packet().into());
+            vlp_avionics_client.send(packet.clone());
         }
     };
 
-    let fut = join(update_node_status_fut, send_packet_fut);
-
     let wait_self_test_mode_end_fut = async {
         let mut receiver = avionics_mode_watch.receiver().unwrap();
-        while receiver.get().await == AvionicsMode::SelfTest {}
+        receiver.changed().await;
     };
 
-    select(fut, wait_self_test_mode_end_fut).await;
+    select(self_test_fut, wait_self_test_mode_end_fut).await;
+}
+
+async fn get_amp_status_message(can_receiver_sub: &mut CanReceiverSub) -> Option<AmpStatusMessage> {
+    can_receiver_sub.clear();
+    let wait_message_fut = async {
+        loop {
+            let message = can_receiver_sub.next_message_pure().await;
+            if let CanBusMessageEnum::AmpStatus(message) = message.data.message {
+                break message;
+            }
+        }
+    };
+
+    run_with_timeout(2000, wait_message_fut).await.ok()
 }

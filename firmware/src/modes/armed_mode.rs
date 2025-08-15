@@ -102,9 +102,8 @@ pub async fn armed_mode(
                 packet.vl_battery_v = battery_v;
                 packet.air_temperature = baro_data.temperature;
 
-                // TODO double check
-                packet.pyro_main_continuity = continuity.pyro1_continuity;
-                packet.pyro_drogue_continuity = continuity.pyro2_continuity;
+                packet.pyro_main_continuity = continuity.pyro_main_continuity;
+                packet.pyro_drogue_continuity = continuity.pyro_drogue_continuity;
 
                 if let Some(amp) = can_central.get_nodes::<1>(AMP_NODE_TYPE).first() {
                     packet.amp_online = amp.is_online();
@@ -305,9 +304,6 @@ pub async fn armed_mode(
                     }
                 }
                 CanBusMessageEnum::IcarusStatus(message) => {
-                    // TODO
-                    // packet.air_brakes_commanded_extension_percentage =
-                    //     message.commanded_extension_percentage();
                     packet.air_brakes_actual_extension_percentage =
                         message.actual_extension_percentage();
                     packet.air_brakes_servo_temp = message.servo_temperature();
@@ -468,6 +464,9 @@ pub async fn armed_mode(
 
     let control_airbrakes_fut = async {
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
+        packet_builder.update(|packet| {
+            packet.air_brakes_commanded_extension_percentage = 0.0;
+        });
 
         start_airbrakes_signal.wait().await;
         let launch_pad_altitude_asl = state_estimator.lock(|s| {
@@ -499,13 +498,20 @@ pub async fn armed_mode(
             {
                 let airbrake_extension_percentage = airbrakes_mpc.update(altitude_asl, velocity);
                 can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
+                packet_builder.update(|packet| {
+                    packet.air_brakes_commanded_extension_percentage = airbrake_extension_percentage;
+                });
             } else {
                 break;
             }
 
             ticker.next().await;
         }
+
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
+        packet_builder.update(|packet| {
+            packet.air_brakes_commanded_extension_percentage = 0.0;
+        });
     };
 
     let wait_armed_mode_end_fut = async {

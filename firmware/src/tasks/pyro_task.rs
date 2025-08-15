@@ -14,10 +14,10 @@ use crate::{ContinuityWatch, FireSignal};
 
 #[derive(Clone, defmt::Format, PartialEq, Eq)]
 pub struct ContinuityUpdate {
-    pub pyro1_continuity: bool,
-    pub pyro1_fire: bool,
-    pub pyro2_continuity: bool,
-    pub pyro2_fire: bool,
+    pub pyro_main_continuity: bool,
+    pub pyro_main_fire: bool,
+    pub pyro_drogue_continuity: bool,
+    pub pyro_drogue_fire: bool,
     pub short_circuit: bool,
 }
 
@@ -51,10 +51,10 @@ pub async fn pyro_task(
 
     let state =
         Mutex::<NoopRawMutex, RefCell<ContinuityUpdate>>::new(RefCell::new(ContinuityUpdate {
-            pyro1_continuity: pyro1_cont.is_low(),
-            pyro1_fire: false,
-            pyro2_continuity: pyro2_cont.is_low(),
-            pyro2_fire: false,
+            pyro_main_continuity: pyro1_cont.is_low(),
+            pyro_main_fire: false,
+            pyro_drogue_continuity: pyro2_cont.is_low(),
+            pyro_drogue_fire: false,
             short_circuit: false,
         }));
 
@@ -64,7 +64,7 @@ pub async fn pyro_task(
         loop {
             state.lock(|state| {
                 let mut state = state.borrow_mut();
-                state.pyro1_continuity = pyro1_cont.is_low();
+                state.pyro_main_continuity = pyro1_cont.is_low();
                 continuity_sender.send(state.clone());
             });
             ticker.next().await;
@@ -76,7 +76,7 @@ pub async fn pyro_task(
             pyro2_cont.wait_for_any_edge().await;
             state.lock(|state| {
                 let mut state = state.borrow_mut();
-                state.pyro2_continuity = pyro2_cont.is_low();
+                state.pyro_drogue_continuity = pyro2_cont.is_low();
                 continuity_sender.send(state.clone());
             });
         }
@@ -100,7 +100,7 @@ pub async fn pyro_task(
                 PyroSelect::PyroMain => {
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
-                        state.pyro1_fire = true;
+                        state.pyro_main_fire = true;
                         continuity_sender.send(state.clone());
                     });
                     pyro1_ctrl.set_high();
@@ -108,14 +108,14 @@ pub async fn pyro_task(
                     pyro1_ctrl.set_low();
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
-                        state.pyro1_fire = false;
+                        state.pyro_main_fire = false;
                         continuity_sender.send(state.clone());
                     });
                 }
                 PyroSelect::PyroDrogue => {
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
-                        state.pyro2_fire = true;
+                        state.pyro_drogue_fire = true;
                         continuity_sender.send(state.clone());
                     });
                     pyro2_ctrl.set_high();
@@ -123,7 +123,7 @@ pub async fn pyro_task(
                     pyro2_ctrl.set_low();
                     state.lock(|state| {
                         let mut state = state.borrow_mut();
-                        state.pyro2_fire = false;
+                        state.pyro_drogue_fire = false;
                         continuity_sender.send(state.clone());
                     });
                 }

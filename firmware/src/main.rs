@@ -28,7 +28,7 @@ use embassy_sync::{
     signal::Signal,
     watch::{self, Watch},
 };
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
         custom_status::vl_custom_status::VLCustomStatus,
@@ -277,6 +277,7 @@ async fn low_prio_main(
         p.PA10,
         p.PB14,
         gps_reading_watch.sender(),
+        vl_status,
     ));
     spawner.must_spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
@@ -297,8 +298,15 @@ async fn low_prio_main(
         p.DMA1_CH3,
         p.DMA1_CH2,
     ));
-    let (can_sender, can_receiver, can_central) =
-        start_can_bus_low_prio_tasks(&spawner, can_tx, can_rx, flight_stage, battery_v_watch).await;
+    let (can_sender, can_receiver, can_central) = start_can_bus_low_prio_tasks(
+        &spawner,
+        can_tx,
+        can_rx,
+        flight_stage,
+        battery_v_watch,
+        vl_status,
+    )
+    .await;
 
     spawner.must_spawn(receive_vlp_task(
         vlp_avionics_client,
@@ -358,6 +366,7 @@ async fn low_prio_main(
                     vl_status,
                     amp_control_watch,
                     flight_stage,
+                    can_receiver.subscriber().unwrap(),
                 )
                 .await
             }
@@ -454,7 +463,6 @@ async fn power_led_task(
     }
 }
 
-// todo rate limit
 #[embassy_executor::task]
 async fn broadcast_imu_baro_measurement_task(
     imu_baro_pubsub: &'static IMUBaroReadingPubSub,
@@ -462,8 +470,14 @@ async fn broadcast_imu_baro_measurement_task(
     unix_clock: &'static UnixClock,
 ) {
     let mut sub = imu_baro_pubsub.subscriber().unwrap();
+    let mut last_send_time_us = Instant::now().as_micros();
     loop {
         let reading = sub.next_message_pure().await;
+        let now_us = Instant::now().as_micros();
+        if now_us - last_send_time_us < 9000 {
+            continue;
+        }
+        last_send_time_us = now_us;
 
         if let Some(imu_data) = reading.data.0 {
             can_sender.send(

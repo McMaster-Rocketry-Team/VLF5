@@ -114,4 +114,12 @@ impl<R: RawMutex> CanCentral<R> {
             vec
         })
     }
+
+    pub fn clear(&self) {
+        self.nodes.lock(|r| {
+            let mut nodes = r.borrow_mut();
+
+            nodes.clear();
+        })
+    }
 }

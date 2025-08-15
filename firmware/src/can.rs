@@ -38,10 +38,7 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    FlightStageMutex,
-    bootloader::{BootOption, configure_next_boot},
-    can_central::CanCentral,
-    tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
+    bootloader::{configure_next_boot, BootOption}, can_central::CanCentral, tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock}, FlightStageMutex, VLStatusMutex
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -49,7 +46,7 @@ pub type CanReceiverSub = pubsub::Subscriber<
     NoopRawMutex,
     SensorReading<BootTimestamp, ReceivedCanBusMessage>,
     4,
-    2,
+    3,
     1,
 >;
 
@@ -120,9 +117,10 @@ pub async fn start_can_bus_low_prio_tasks(
     rx: CanRx<'static>,
     flight_stage: &'static FlightStageMutex,
     battery_v_watch: &'static BatteryVWatch,
+    vl_status: &'static VLStatusMutex,
 ) -> (
     &'static CanSender<NoopRawMutex>,
-    &'static CanReceiver<NoopRawMutex, 4, 2>,
+    &'static CanReceiver<NoopRawMutex, 4, 3>,
     &'static CanCentral<NoopRawMutex>,
 ) {
     let can_node_id = can_node_id_from_serial_number(device_id());
@@ -132,11 +130,11 @@ pub async fn start_can_bus_low_prio_tasks(
         singleton!(: CanSender<NoopRawMutex> = CanSender::new(VOID_LAKE_NODE_TYPE, can_node_id, Some(&defmt_rtt_pipe::PIPE)))
             .unwrap();
     let can_receiver =
-        singleton!(: CanReceiver<NoopRawMutex, 4, 2> = CanReceiver::new(can_node_id)).unwrap();
+        singleton!(: CanReceiver<NoopRawMutex, 4, 3> = CanReceiver::new(can_node_id)).unwrap();
     let can_central = singleton!(: CanCentral<NoopRawMutex> = CanCentral::new()).unwrap();
 
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
-    spawner.must_spawn(can_bus_rx_task(can_receiver, rx));
+    spawner.must_spawn(can_bus_rx_task(can_receiver, rx, vl_status));
     spawner.must_spawn(node_status_task(can_sender, flight_stage, battery_v_watch));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
     spawner.must_spawn(can_message_receive_task(
@@ -177,10 +175,11 @@ async fn can_bus_tx_task(
 
 #[embassy_executor::task]
 async fn can_bus_rx_task(
-    can_receiver: &'static CanReceiver<NoopRawMutex, 4, 2>,
+    can_receiver: &'static CanReceiver<NoopRawMutex, 4, 3>,
     rx: CanRx<'static>,
+    vl_status: &'static VLStatusMutex,
 ) {
-    struct RxWrapper(CanRx<'static>);
+    struct RxWrapper(CanRx<'static>, &'static VLStatusMutex);
     struct EnvelopeWrapper(Envelope);
 
     impl CanBusFrame for EnvelopeWrapper {
@@ -205,12 +204,18 @@ async fn can_bus_rx_task(
         type Frame = EnvelopeWrapper;
 
         async fn receive(&mut self) -> Result<Self::Frame, Self::Error> {
-            let frame = self.0.read().await.map(EnvelopeWrapper)?;
-            Ok(frame)
+            let result = self.0.read().await.map(EnvelopeWrapper);
+
+            self.1.lock(|s| {
+                let mut s = s.borrow_mut();
+                s.can_bus_ok = result.is_ok();
+            });
+
+            result
         }
     }
 
-    let mut rx_wrapper = RxWrapper(rx);
+    let mut rx_wrapper = RxWrapper(rx, vl_status);
     can_receiver.run_daemon::<_, 8>(&mut rx_wrapper).await;
 }
 

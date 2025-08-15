@@ -109,7 +109,7 @@ pub async fn landed_mode(
 
     let wait_landed_mode_end_fut = async {
         let mut receiver = avionics_mode_watch.receiver().unwrap();
-        while receiver.get().await == AvionicsMode::Landed {}
+        receiver.changed_and(|m| *m != AvionicsMode::Landed).await;
     };
 
     select(fut, wait_landed_mode_end_fut).await;
