@@ -14,6 +14,12 @@ pub enum BuzzerTone {
         /// Silent duration
         u32,
     ),
+    Mid(
+        /// Duration
+        u32,
+        /// Silent duration
+        u32,
+    ),
     High(
         /// Duration
         u32,
@@ -35,6 +41,7 @@ pub async fn buzzer_task(
     loop {
         let (frequency, duration, silent_duration) = match sub.next_message_pure().await {
             BuzzerTone::Low(duration, silent_duration) => (2600, duration, silent_duration),
+            BuzzerTone::Mid(duration, silent_duration) => (2800, duration, silent_duration),
             BuzzerTone::High(duration, silent_duration) => (3000, duration, silent_duration),
         };
 

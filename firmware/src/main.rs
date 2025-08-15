@@ -122,7 +122,7 @@ fn main() -> ! {
 
     let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
     let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
-    avionics_mode.sender().send(AvionicsMode::Demo);
+    avionics_mode.sender().send(AvionicsMode::SelfTest);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
     let mag_reading_pubsub = singleton!(: MagReadingPubSub = MagReadingPubSub::new()).unwrap();
@@ -332,9 +332,8 @@ async fn low_prio_main(
     spawner.must_spawn(watchdog_task(p.IWDG1));
 
     buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
-    buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 250));
-    buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
-    buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 250));
+    buzzer_pubsub.publish_immediate(BuzzerTone::Mid(250, 100));
+    buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 100));
 
     loop {
         match avionics_mode_watch.try_get().unwrap() {
@@ -366,7 +365,9 @@ async fn low_prio_main(
                     vl_status,
                     amp_control_watch,
                     flight_stage,
+                    continuity_watch,
                     can_receiver.subscriber().unwrap(),
+                    buzzer_pubsub,
                 )
                 .await
             }
