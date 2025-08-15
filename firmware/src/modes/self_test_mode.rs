@@ -28,6 +28,7 @@ use firmware_common_new::{
 use crate::{
     AvionicsModeWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FlightStageMutex,
     MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID, VLStatusMutex,
+    avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
     tasks::{
@@ -342,7 +343,7 @@ pub async fn self_test_mode(
 
         let packet: VLPDownlinkPacket = packet_builder.create_packet().into();
         info!("self test done: {}", packet);
-        let mut ticker = Ticker::every(Duration::from_hz(2));
+        let mut ticker = Ticker::every(Duration::from_secs(2));
 
         loop {
             ticker.next().await;
@@ -352,7 +353,7 @@ pub async fn self_test_mode(
 
     let wait_self_test_mode_end_fut = async {
         let mut receiver = avionics_mode_watch.receiver().unwrap();
-        receiver.changed().await;
+        receiver.changed_and(|m| *m != AvionicsMode::SelfTest).await;
     };
 
     select(self_test_fut, wait_self_test_mode_end_fut).await;

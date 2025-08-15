@@ -351,7 +351,7 @@ pub async fn armed_mode(
     };
 
     let send_telemetry_packet_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(2));
+        let mut ticker = Ticker::every(Duration::from_secs(2));
 
         loop {
             ticker.next().await;

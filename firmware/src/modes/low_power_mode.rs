@@ -82,7 +82,7 @@ pub async fn low_power_mode(
     };
 
     let send_packet_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(5));
+        let mut ticker = Ticker::every(Duration::from_secs(5));
 
         loop {
             ticker.next().await;

@@ -82,7 +82,7 @@ mod utils;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
-    frequency: 915_100_000,
+    frequency: 920_000_000,
     sf: 12,
     bw: 250000,
     cr: 8,
@@ -122,7 +122,7 @@ fn main() -> ! {
 
     let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
     let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
-    avionics_mode.sender().send(AvionicsMode::SelfTest);
+    avionics_mode.sender().send(AvionicsMode::LowPower);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
     let mag_reading_pubsub = singleton!(: MagReadingPubSub = MagReadingPubSub::new()).unwrap();
