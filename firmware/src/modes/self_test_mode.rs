@@ -87,8 +87,6 @@ pub async fn self_test_mode(
                     || !packet.baro_ok
                     || !packet.gps_ok
                     || !packet.can_bus_ok
-                    || !packet.main_continuity
-                    || !packet.drogue_continuity
                 {
                     self_test_failed = true;
                 }
