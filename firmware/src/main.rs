@@ -95,14 +95,14 @@ pub const OZYS_2_NODE_ID: u16 = 3;
 
 // TODO update
 pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
-    ignition_detection_acc_threshold: 4.0 * 9.81,
+    ignition_detection_acc_threshold: 15.0,
     drogue_chute_minimum_time_us: 1_000_000,
-    drogue_chute_minimum_altitude_agl: 3000.0,
+    drogue_chute_minimum_altitude_agl: 50.0,
     drogue_chute_delay_us: 0,
-    main_chute_altitude_agl: 400.0,
+    main_chute_altitude_agl: 30.0,
     main_chute_delay_us: 0,
 };
-pub const TARGET_APOGEE_AGL: f32 = 4000.0;
+pub const TARGET_APOGEE_AGL: f32 = 10.0;
 pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
     burnout_mass: 17.607,
     cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
@@ -122,7 +122,7 @@ fn main() -> ! {
 
     let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
     let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
-    avionics_mode.sender().send(AvionicsMode::SelfTest);
+    avionics_mode.sender().send(AvionicsMode::Armed);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
     let mag_reading_pubsub = singleton!(: MagReadingPubSub = MagReadingPubSub::new()).unwrap();
@@ -329,7 +329,8 @@ async fn low_prio_main(
     ));
     spawner.must_spawn(amp_control_task(can_sender, amp_control_watch));
 
-    spawner.must_spawn(watchdog_task(p.IWDG1));
+    // TODO
+    // spawner.must_spawn(watchdog_task(p.IWDG1));
 
     buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
     buzzer_pubsub.publish_immediate(BuzzerTone::Mid(250, 100));

@@ -426,6 +426,7 @@ pub async fn armed_mode(
                 });
 
                 if let Some(pyro) = pyro {
+                    info!("fire pyro {}, state: {}", pyro, state);
                     fire_signal.signal(pyro);
                 }
 
@@ -442,6 +443,7 @@ pub async fn armed_mode(
                 }
 
                 if let RocketState::Landed | RocketState::FailedToReachMinApogee = state {
+                    info!("landing detected {}", state);
                     Timer::after_secs(30).await;
                     avionics_mode_watch.sender().send(AvionicsMode::Landed);
                 }
@@ -469,6 +471,7 @@ pub async fn armed_mode(
         });
 
         start_airbrakes_signal.wait().await;
+        info!("air brakes start");
         let launch_pad_altitude_asl = state_estimator.lock(|s| {
             let estimator = s.borrow();
             if let RocketState::Coasting {
@@ -508,6 +511,7 @@ pub async fn armed_mode(
             ticker.next().await;
         }
 
+        info!("air brakes stop");
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;
