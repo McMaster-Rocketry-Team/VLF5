@@ -88,8 +88,8 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
     cr: 8,
     power: 22,
 };
-pub const MAIN_BULKHEAD_NODE_ID: u16 = 0;
-pub const DROGUE_BULKHEAD_NODE_ID: u16 = 1;
+pub const MAIN_BULKHEAD_NODE_ID: u16 = 0x4fc;
+pub const DROGUE_BULKHEAD_NODE_ID: u16 = 0x328;
 pub const OZYS_1_NODE_ID: u16 = 2;
 pub const OZYS_2_NODE_ID: u16 = 3;
 
@@ -97,9 +97,9 @@ pub const OZYS_2_NODE_ID: u16 = 3;
 pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
     ignition_detection_acc_threshold: 4.0 * 9.81,
     drogue_chute_minimum_time_us: 1_000_000,
-    drogue_chute_minimum_altitude_agl: 3000.0,
+    drogue_chute_minimum_altitude_agl: 2000.0,
     drogue_chute_delay_us: 0,
-    main_chute_altitude_agl: 400.0,
+    main_chute_altitude_agl: 457.2,
     main_chute_delay_us: 0,
 };
 pub const TARGET_APOGEE_AGL: f32 = 4000.0;
