@@ -92,7 +92,7 @@ pub async fn landed_mode(
     };
 
     let send_packet_fut = async {
-        let mut ticker = Ticker::every(Duration::from_secs(2));
+        let mut ticker = Ticker::every(Duration::from_secs(5));
 
         loop {
             ticker.next().await;

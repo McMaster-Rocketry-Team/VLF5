@@ -16,16 +16,14 @@ use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
         messages::{
-            CanBusMessageEnum,
-            airbrakes_control::AirBrakesControlMessage,
-            amp_control::AmpControlMessage,
-            rocket_state::RocketStateMessage,
+            CanBusMessageEnum, airbrakes_control::AirBrakesControlMessage,
+            amp_control::AmpControlMessage, rocket_state::RocketStateMessage,
             vl_status::FlightStage,
         },
         node_types::{
-            AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE,
-            OZYS_NODE_TYPE, PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE,
-            PAYLOAD_EPS2_NODE_TYPE, PAYLOAD_ROCKET_WIFI_NODE_TYPE,
+            AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
+            PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE, PAYLOAD_EPS2_NODE_TYPE,
+            PAYLOAD_ROCKET_WIFI_NODE_TYPE,
         },
         sender::CanSender,
     },
@@ -416,7 +414,7 @@ pub async fn armed_mode(
 
                     let pyro = estimator.update(&Measurement::new(
                         &imu_data.acc,
-                        &imu_data.gyro,
+                        &imu_data.gyro.map(|d| d.to_radians()),
                         baro_data.altitude_asl(),
                     ));
 
@@ -499,7 +497,8 @@ pub async fn armed_mode(
                 let airbrake_extension_percentage = airbrakes_mpc.update(altitude_asl, velocity);
                 can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
                 packet_builder.update(|packet| {
-                    packet.air_brakes_commanded_extension_percentage = airbrake_extension_percentage;
+                    packet.air_brakes_commanded_extension_percentage =
+                        airbrake_extension_percentage;
                 });
             } else {
                 break;

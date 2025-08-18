@@ -93,7 +93,6 @@ pub const DROGUE_BULKHEAD_NODE_ID: u16 = 0x328;
 pub const OZYS_1_NODE_ID: u16 = 2;
 pub const OZYS_2_NODE_ID: u16 = 3;
 
-// TODO update
 pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
     ignition_detection_acc_threshold: 4.0 * 9.81,
     drogue_chute_minimum_time_us: 1_000_000,
