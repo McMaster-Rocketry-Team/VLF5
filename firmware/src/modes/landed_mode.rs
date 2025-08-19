@@ -1,18 +1,22 @@
 use defmt::info;
-use embassy_futures::{join::join3, select::select};
+use embassy_futures::{join::join4, select::select};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_time::{Duration, Ticker};
+use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
-        messages::{
-            amp_control::AmpControlMessage, vl_status::FlightStage, CanBusMessageEnum
-        },
+        messages::{CanBusMessageEnum, amp_control::AmpControlMessage, vl_status::FlightStage},
         node_types::AMP_NODE_TYPE,
     },
     vlp::{client::VLPAvionics, packets::landed_telemetry::LandedTelemetryPacketBuilder},
 };
 
-use crate::{avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, tasks::{amp_control_task::AmpControlWatch, sensor_tasks::BatteryVWatch}, AvionicsModeWatch, FlightStageMutex, GPSReadingWatch};
+use crate::{
+    AvionicsModeWatch, FlightStageMutex, GPSReadingWatch,
+    avionics_mode::AvionicsMode,
+    can::CanReceiverSub,
+    can_central::CanCentral,
+    tasks::{amp_control_task::AmpControlWatch, sensor_tasks::BatteryVWatch},
+};
 
 pub async fn landed_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
@@ -25,18 +29,28 @@ pub async fn landed_mode(
     flight_stage: &'static FlightStageMutex,
 ) {
     info!("enter landed mode");
-    flight_stage.lock(|r|{
+    flight_stage.lock(|r| {
         *r.borrow_mut() = FlightStage::Landed;
     });
     amp_control_watch.sender().send(AmpControlMessage {
-        out1_enable: false,
+        out1_enable: true, // leave camera on for 15 minutes for it to save its data
         out2_enable: false,
         out3_enable: false,
         out4_enable: false,
     });
 
+    let stop_camera_fut = async {
+        Timer::after_secs(60 * 15).await;
+        amp_control_watch.sender().send(AmpControlMessage {
+            out1_enable: false,
+            out2_enable: false,
+            out3_enable: false,
+            out4_enable: false,
+        });
+    };
+
     let packet_builder = LandedTelemetryPacketBuilder::<NoopRawMutex>::new();
-    
+
     let update_packet_sensor_fut = async {
         let mut gps_reading = gps_reading_watch.receiver().unwrap();
         let mut battery_v_reading = battery_v_watch.receiver().unwrap();
@@ -101,7 +115,8 @@ pub async fn landed_mode(
         }
     };
 
-    let fut = join3(
+    let fut = join4(
+        stop_camera_fut,
         update_packet_sensor_fut,
         update_packet_can_fut,
         send_packet_fut,
