@@ -59,6 +59,9 @@ nalgebra = { version = "0.34.0", default-features = false, features = [
     "defmt",
 ] }
 micromath = "2.1.0"
+embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", features = [
+    "defmt",
+] }
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
@@ -70,11 +73,11 @@ path = "src/main.rs"
 test = false
 bench = false
 
-# [[bin]]
-# name = "gcm"
-# path = "src/main_gcm.rs"
-# test = false
-# bench = false
+[[bin]]
+name = "gcm"
+path = "src/main_gcm.rs"
+test = false
+bench = false
 
 # Testing Entry Points
 

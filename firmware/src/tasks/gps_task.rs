@@ -96,7 +96,7 @@ impl Read for UartWrapper {
         result
     }
 
-    async fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<(), ReadExactError<Self::Error>> {
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), ReadExactError<Self::Error>> {
         let result = self.uart.read_exact(buf).await;
 
         if result.is_ok() {
