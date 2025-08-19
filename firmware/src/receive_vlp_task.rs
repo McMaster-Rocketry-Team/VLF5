@@ -43,6 +43,7 @@ pub async fn receive_vlp_task(
         let (packet, _) = vlp_avionics_client.receive().await;
         match packet {
             VLPUplinkPacket::ChangeMode(packet) => {
+                info!("changing mode into {}", packet);
                 avionics_mode.send(packet.mode.into());
             }
             VLPUplinkPacket::Reset(packet) => {

@@ -68,9 +68,9 @@ pub async fn armed_mode(
     });
     amp_control_watch.sender().send(AmpControlMessage {
         out1_enable: true,
-        out2_enable: true,
+        out2_enable: false,
         out3_enable: true,
-        out4_enable: false,
+        out4_enable: true,
     });
 
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();

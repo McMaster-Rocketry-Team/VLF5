@@ -83,11 +83,7 @@ pub async fn self_test_mode(
                 packet.main_continuity = continuity.pyro_main_continuity;
                 packet.drogue_continuity = continuity.pyro_drogue_continuity;
 
-                if !packet.imu_ok
-                    || !packet.baro_ok
-                    || !packet.gps_ok
-                    || !packet.can_bus_ok
-                {
+                if !packet.imu_ok || !packet.baro_ok || !packet.gps_ok || !packet.can_bus_ok {
                     self_test_failed = true;
                 }
                 if !packet.mag_ok || !packet.sd_ok {
@@ -173,25 +169,25 @@ pub async fn self_test_mode(
             });
         }
 
-        // test amp out 2
+        // test amp out 4 (was amp out 2)
         {
             amp_control_watch.sender().send(AmpControlMessage {
                 out1_enable: false,
-                out2_enable: true,
+                out2_enable: false,
                 out3_enable: false,
-                out4_enable: false,
+                out4_enable: true,
             });
             Timer::after_millis(10000).await; // longer time for payload activation pcb to connect to payload
-            let out2_power_good = if let Some(amp_status_message) =
+            let out4_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
-                amp_status_message.out2.status == PowerOutputStatus::PowerGood
+                amp_status_message.out4.status == PowerOutputStatus::PowerGood
             } else {
                 self_test_partial_failure = true;
                 false
             };
             packet_builder.update(|packet| {
-                packet.amp_out2_power_good = out2_power_good;
+                packet.amp_out4_power_good = out4_power_good;
             });
 
             packet_builder.update(|packet| {
@@ -290,25 +286,25 @@ pub async fn self_test_mode(
             });
         }
 
-        // test amp out 4
+        // test amp out 2 (was out 4)
         {
             amp_control_watch.sender().send(AmpControlMessage {
                 out1_enable: false,
-                out2_enable: false,
+                out2_enable: true,
                 out3_enable: false,
-                out4_enable: true,
+                out4_enable: false,
             });
             Timer::after_millis(2000).await;
-            let out4_power_good = if let Some(amp_status_message) =
+            let out2_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
-                amp_status_message.out4.status == PowerOutputStatus::PowerGood
+                amp_status_message.out2.status == PowerOutputStatus::PowerGood
             } else {
                 self_test_partial_failure = true;
                 false
             };
             packet_builder.update(|packet| {
-                packet.amp_out4_power_good = out4_power_good;
+                packet.amp_out2_power_good = out2_power_good;
             });
         }
 
