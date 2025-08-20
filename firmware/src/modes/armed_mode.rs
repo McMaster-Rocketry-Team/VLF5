@@ -285,14 +285,14 @@ pub async fn armed_mode(
             packet_builder.update(|packet| match message.message {
                 CanBusMessageEnum::AmpStatus(message) => {
                     packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
-                    packet.amp_out1_overwrote = packet.amp_out1_overwrote;
-                    packet.amp_out1 = packet.amp_out1;
-                    packet.amp_out2_overwrote = packet.amp_out2_overwrote;
-                    packet.amp_out2 = packet.amp_out2;
-                    packet.amp_out3_overwrote = packet.amp_out3_overwrote;
-                    packet.amp_out3 = packet.amp_out3;
-                    packet.amp_out4_overwrote = packet.amp_out4_overwrote;
-                    packet.amp_out4 = packet.amp_out4;
+                    packet.amp_out1_overwrote = message.out1.overwrote;
+                    packet.amp_out1 = message.out1.status;
+                    packet.amp_out2_overwrote = message.out2.overwrote;
+                    packet.amp_out2 = message.out2.status;
+                    packet.amp_out3_overwrote = message.out3.overwrote;
+                    packet.amp_out3 = message.out3.status;
+                    packet.amp_out4_overwrote = message.out4.overwrote;
+                    packet.amp_out4 = message.out4.status;
                 }
                 CanBusMessageEnum::BrightnessMeasurement(message) => {
                     if node_id == MAIN_BULKHEAD_NODE_ID {
@@ -476,7 +476,7 @@ pub async fn armed_mode(
             {
                 launch_pad_altitude_asl
             } else {
-                unreachable!()
+                0.0
             }
         });
         let mut airbrakes_mpc = AirBrakesMPC::new(

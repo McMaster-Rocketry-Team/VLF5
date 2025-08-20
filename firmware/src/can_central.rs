@@ -19,7 +19,7 @@ pub struct CanNode {
 
 impl CanNode {
     pub fn is_online(&self) -> bool {
-        Instant::now().as_micros() - self.last_received_time_us < 2_000_000
+        Instant::now().as_micros() - self.last_received_time_us < 5_000_000
     }
 
     pub fn rebooted_in_last_5s(&self) -> bool {
@@ -84,7 +84,7 @@ impl<R: RawMutex> CanCentral<R> {
                             last_received_time_us: received_time_us,
                         },
                     )
-                    .unwrap();
+                    .ok();
             }
         });
     }

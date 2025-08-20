@@ -38,7 +38,10 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    bootloader::{configure_next_boot, BootOption}, can_central::CanCentral, tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock}, FlightStageMutex, VLStatusMutex
+    FlightStageMutex, VLStatusMutex,
+    bootloader::{BootOption, configure_next_boot},
+    can_central::CanCentral,
+    tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -135,7 +138,7 @@ pub async fn start_can_bus_low_prio_tasks(
 
     spawner.must_spawn(can_bus_tx_task(can_sender, tx));
     spawner.must_spawn(can_bus_rx_task(can_receiver, rx, vl_status));
-    spawner.must_spawn(node_status_task(can_sender, flight_stage, battery_v_watch));
+    spawner.must_spawn(node_status_task(can_sender, flight_stage, battery_v_watch, vl_status));
     let can_receiver_sub = can_receiver.subscriber().unwrap();
     spawner.must_spawn(can_message_receive_task(
         can_node_id,
@@ -224,6 +227,7 @@ async fn node_status_task(
     can_sender: &'static CanSender<NoopRawMutex>,
     flight_stage: &'static FlightStageMutex,
     battery_v_watch: &'static BatteryVWatch,
+    vl_status: &'static VLStatusMutex,
 ) {
     let mut battery_v_reading = battery_v_watch.receiver().unwrap();
     battery_v_reading.get().await;
@@ -235,14 +239,7 @@ async fn node_status_task(
                 Instant::now().as_secs() as u32,
                 NodeHealth::Healthy,
                 NodeMode::Operational,
-                VLCustomStatus {
-                    imu_ok: true,
-                    baro_ok: true,
-                    mag_ok: true,
-                    gps_ok: true,
-                    sd_ok: true,
-                    can_bus_ok: true,
-                },
+                vl_status.lock(|s| s.borrow().clone()),
             )
             .into(),
         );
