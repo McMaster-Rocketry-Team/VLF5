@@ -21,10 +21,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID,
-    avionics_mode::AvionicsMode,
-    can_central::CanCentral,
-    tasks::buzzer_task::{BuzzerPubSub, BuzzerTone},
+    avionics_mode::AvionicsMode, can_central::CanCentral, tasks::buzzer_task::{BuzzerPubSub, BuzzerTone}, AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID, TARGET_APOGEE_AGL
 };
 
 #[embassy_executor::task]
@@ -176,6 +173,15 @@ pub async fn receive_vlp_task(
                     fire_signal.signal(packet.pyro);
                 }
             }
+        VLPUplinkPacket::SetTargetApogee(packet) => {
+
+            let guard = TARGET_APOGEE_AGL.lock().await;
+            let mut value = guard.borrow_mut();
+            *value = packet.get_altitude();
+
+        }
+
+        
         }
     }
 }

@@ -479,9 +479,12 @@ pub async fn armed_mode(
                 0.0
             }
         });
+
+        let guard = TARGET_APOGEE_AGL.lock().await;
+
         let mut airbrakes_mpc = AirBrakesMPC::new(
             ROCKET_PARAMETERS.clone(),
-            launch_pad_altitude_asl + TARGET_APOGEE_AGL,
+            launch_pad_altitude_asl + *guard.borrow(),
         );
 
         let mut ticker = Ticker::every(Duration::from_hz(10));
