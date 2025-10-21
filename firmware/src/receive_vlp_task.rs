@@ -1,5 +1,5 @@
 use defmt::info;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex};
 use embassy_time::Timer;
 use firmware_common_new::{
     can_bus::{
@@ -16,19 +16,23 @@ use firmware_common_new::{
     },
     vlp::{
         client::VLPAvionics,
-        packets::{VLPUplinkPacket, fire_pyro::PyroSelect, reset::DeviceToReset},
+        packets::{VLPUplinkPacket, reset::DeviceToReset},
     },
 };
 
 use crate::{
-    avionics_mode::AvionicsMode, can_central::CanCentral, tasks::buzzer_task::{BuzzerPubSub, BuzzerTone}, AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, MAIN_BULKHEAD_NODE_ID, TARGET_APOGEE_AGL
+    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, FireSignal, MAIN_BULKHEAD_NODE_ID, SetTargetSignal,
+    avionics_mode::AvionicsMode,
+    can_central::CanCentral,
+    tasks::buzzer_task::{BuzzerPubSub, BuzzerTone},
 };
 
 #[embassy_executor::task]
 pub async fn receive_vlp_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode_watch: &'static AvionicsModeWatch,
-    fire_signal: &'static signal::Signal<NoopRawMutex, PyroSelect>,
+    fire_signal: &'static FireSignal,
+    target_agl_signal: &'static SetTargetSignal,
     buzzer_pubsub: &'static BuzzerPubSub,
     can_sender: &'static CanSender<NoopRawMutex>,
     can_central: &'static CanCentral<NoopRawMutex>,
@@ -173,15 +177,9 @@ pub async fn receive_vlp_task(
                     fire_signal.signal(packet.pyro);
                 }
             }
-        VLPUplinkPacket::SetTargetApogee(packet) => {
-
-            let guard = TARGET_APOGEE_AGL.lock().await;
-            let mut value = guard.borrow_mut();
-            *value = packet.get_altitude();
-
-        }
-
-        
+            VLPUplinkPacket::SetTargetApogee(packet) => {
+                target_agl_signal.signal(packet.get_altitude());
+            }
         }
     }
 }

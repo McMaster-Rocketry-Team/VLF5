@@ -21,7 +21,10 @@ use embassy_stm32::{
     peripherals::{PA2, PA7},
 };
 use embassy_sync::{
-    blocking_mutex::{raw::{CriticalSectionRawMutex, NoopRawMutex}, Mutex as BlockingMutex},
+    blocking_mutex::{
+        Mutex as BlockingMutex,
+        raw::{CriticalSectionRawMutex, NoopRawMutex},
+    },
     mutex::Mutex,
     pubsub::PubSubBehavior as _,
     signal::Signal,
@@ -100,7 +103,7 @@ pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
     main_chute_altitude_agl: 457.2,
     main_chute_delay_us: 0,
 };
-pub static TARGET_APOGEE_AGL:  Mutex<CriticalSectionRawMutex, RefCell<f32>> = Mutex::new(RefCell::new(4000.0));
+
 pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
     burnout_mass: 17.607,
     cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
@@ -113,6 +116,7 @@ pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustom
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 1>;
 pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
+pub type SetTargetSignal = Signal<NoopRawMutex, f32>;
 
 #[entry]
 fn main() -> ! {
@@ -249,6 +253,7 @@ async fn low_prio_main(
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
     let amp_control_watch = singleton!(: AmpControlWatch = AmpControlWatch::new()).unwrap();
+    let target_agl_signal = singleton!(:SetTargetSignal= SetTargetSignal::new()).unwrap();
 
     spawner.must_spawn(power_led_task(
         p.PA2,
@@ -310,6 +315,7 @@ async fn low_prio_main(
         vlp_avionics_client,
         avionics_mode_watch,
         fire_signal,
+        target_agl_signal,
         buzzer_pubsub,
         can_sender,
         can_central,
@@ -347,6 +353,7 @@ async fn low_prio_main(
                     imu_baro_reading_pubsub,
                     continuity_watch,
                     fire_signal,
+                    target_agl_signal,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
                     amp_control_watch,
