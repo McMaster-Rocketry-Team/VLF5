@@ -21,7 +21,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, FireSignal, MAIN_BULKHEAD_NODE_ID, SetTargetSignal,
+    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, FireSignal, MAIN_BULKHEAD_NODE_ID, SetTargetWatch,
     avionics_mode::AvionicsMode,
     can_central::CanCentral,
     tasks::buzzer_task::{BuzzerPubSub, BuzzerTone},
@@ -32,7 +32,7 @@ pub async fn receive_vlp_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode_watch: &'static AvionicsModeWatch,
     fire_signal: &'static FireSignal,
-    target_agl_signal: &'static SetTargetSignal,
+    target_agl_watch: &'static SetTargetWatch,
     buzzer_pubsub: &'static BuzzerPubSub,
     can_sender: &'static CanSender<NoopRawMutex>,
     can_central: &'static CanCentral<NoopRawMutex>,
@@ -178,7 +178,7 @@ pub async fn receive_vlp_task(
                 }
             }
             VLPUplinkPacket::SetTargetApogee(packet) => {
-                target_agl_signal.signal(packet.get_altitude());
+                target_agl_watch.sender().send(packet.get_altitude());
             }
         }
     }

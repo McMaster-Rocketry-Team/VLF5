@@ -37,7 +37,7 @@ use crate::{
         amp_control_task::AmpControlWatch,
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub},
         unix_clock::UnixClock,
-    }, utils::SubscriberWithLastValue, AvionicsModeWatch, ContinuityWatch, FireSignal, FlightStageMutex, GPSReadingWatch, SetTargetSignal, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID, ROCKET_PARAMETERS
+    }, utils::SubscriberWithLastValue, AvionicsModeWatch, ContinuityWatch, FireSignal, FlightStageMutex, GPSReadingWatch, SetTargetWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID, ROCKET_PARAMETERS
 };
 
 pub async fn armed_mode(
@@ -50,7 +50,7 @@ pub async fn armed_mode(
     imu_baro_pubsub: &'static IMUBaroReadingPubSub,
     continuity_watch: &'static ContinuityWatch,
     fire_signal: &'static FireSignal,
-    target_agl_signal : &'static SetTargetSignal,
+    target_agl_watch : &'static SetTargetWatch,
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static FlightStageMutex,
     amp_control_watch: &'static AmpControlWatch,
@@ -477,7 +477,7 @@ pub async fn armed_mode(
 
         let mut airbrakes_mpc = AirBrakesMPC::new(
             ROCKET_PARAMETERS.clone(),
-            launch_pad_altitude_asl + target_agl_signal.try_take().unwrap_or(4000.0), // note : you may want to change this default value on launch day just incase
+            launch_pad_altitude_asl + target_agl_watch.try_get().unwrap_or(4000.0) // note : you may want to change this default value on launch day just incase
         );
 
         let mut ticker = Ticker::every(Duration::from_hz(10));
