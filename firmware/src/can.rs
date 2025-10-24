@@ -21,7 +21,6 @@ use embassy_time::{Duration, Instant, Ticker};
 use firmware_common_new::{
     can_bus::{
         CanBusFrame, CanBusRX, CanBusTX,
-        custom_status::vl_custom_status::VLCustomStatus,
         id::{CanBusExtendedId, can_node_id_from_serial_number},
         messages::{
             CanBusMessageEnum, PRE_UNIX_TIME_MESSAGE_TYPE, UNIX_TIME_MESSAGE_TYPE,
