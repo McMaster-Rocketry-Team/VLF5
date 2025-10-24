@@ -116,7 +116,7 @@ pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustom
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 1>;
 pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
-pub type SetTargetWatch = Watch<NoopRawMutex, f32,1>;
+pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
 
 #[entry]
 fn main() -> ! {

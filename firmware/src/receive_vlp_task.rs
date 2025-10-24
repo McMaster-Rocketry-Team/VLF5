@@ -1,5 +1,5 @@
 use defmt::info;
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Timer;
 use firmware_common_new::{
     can_bus::{
