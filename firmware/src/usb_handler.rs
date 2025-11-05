@@ -68,7 +68,7 @@ pub async fn setup_usb_handler(
     let mut interface = function.interface();
     let mut alt = interface.alt_setting(0xFF, 0, 0, None);
 
-    let ep_in: embassy_usb_synopsys_otg::Endpoint<'_, embassy_usb_synopsys_otg::In> =
+    let ep_in: <Driver<'_, USB_OTG_FS> as embassy_usb::driver::Driver<'_>>::EndpointIn =
         alt.endpoint_bulk_in(Some(EndpointAddress::from(1)), 10); // I cannot tell you for the life of me what type this variable is meant to have
 
     handler.interface_num = interface.interface_number();
@@ -135,7 +135,7 @@ impl Handler for ControlHandler {
 // The rust compiler keeps complaining about EndpointIn<'static> and its messages arent very helpful.
 
 #[embassy_executor::task]
-async fn send_data_task(mut ep: embassy_usb_synopsys_otg::Endpoint<'static, embassy_usb_synopsys_otg::In>, send_signal: SendDataSignal) {
+async fn send_data_task(mut ep: <Driver<'static, USB_OTG_FS> as embassy_usb::driver::Driver<'static>>::EndpointIn, send_signal: SendDataSignal) {
     let payload: &[u8] = b"some sample data"; // fixed for now.
     loop {
         send_signal.wait().await;

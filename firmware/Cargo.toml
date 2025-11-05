@@ -62,9 +62,6 @@ micromath = "2.1.0"
 embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", features = [
     "defmt",
 ] }
-embassy-usb-synopsys-otg = { git = "https://github.com/embassy-rs/embassy.git", features = [
-    "defmt",
-] }
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
