@@ -822,6 +822,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embassy-usb-synopsys-otg",
  "embedded-can",
  "embedded-hal-async",
  "embedded-io-async",

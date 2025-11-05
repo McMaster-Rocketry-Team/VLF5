@@ -9,9 +9,9 @@ use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder, Handler};
 
 // use {defmt_rtt as _, panic_probe as _};
-use panic_probe as _; 
+use panic_probe as _;
 
-use crate::SendDataSignal; 
+use crate::SendDataSignal;
 
 const DEVICE_INTERFACE_GUIDS: &[&str] = &["{DAC2087C-63FA-458D-A55D-827C0762DEC7}"]; // windows needs this
 bind_interrupts!(struct Irqs {
@@ -68,7 +68,8 @@ pub async fn setup_usb_handler(
     let mut interface = function.interface();
     let mut alt = interface.alt_setting(0xFF, 0, 0, None);
 
-    let ep_in = alt.endpoint_bulk_in(Some(EndpointAddress::from(1)), 10); // I cannot tell you for the life of me what type this variable is meant to have
+    let ep_in: embassy_usb_synopsys_otg::Endpoint<'_, embassy_usb_synopsys_otg::In> =
+        alt.endpoint_bulk_in(Some(EndpointAddress::from(1)), 10); // I cannot tell you for the life of me what type this variable is meant to have
 
     handler.interface_num = interface.interface_number();
 
@@ -133,14 +134,15 @@ impl Handler for ControlHandler {
 // and another that tells it what files to write over the endpoint (this one could be a watch)
 // The rust compiler keeps complaining about EndpointIn<'static> and its messages arent very helpful.
 
-// #[embassy_executor::task]
-// async fn send_data_task(mut ep: EndpointIn<'static>, send_signal: SendDataSignal) {
-//     let payload: &[u8] = b"some sample data"; // fixed for now.
-//     loop {
-//         send_signal.wait().await;
+#[embassy_executor::task]
+async fn send_data_task(mut ep: embassy_usb_synopsys_otg::Endpoint<'static, embassy_usb_synopsys_otg::In>, send_signal: SendDataSignal) {
+    let payload: &[u8] = b"some sample data"; // fixed for now.
+    loop {
+        send_signal.wait().await;
+        ep.write(payload).await.unwrap();
 
-//         // Send data on bulk endpoint
+        // Send data on bulk endpoint
 
-//         embassy_time::Timer::after_millis(1).await;
-//     }
-// }
+        embassy_time::Timer::after_millis(1).await;
+    }
+}
