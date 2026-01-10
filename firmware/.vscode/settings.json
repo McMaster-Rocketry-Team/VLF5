@@ -3,12 +3,12 @@
         {
             "text": "$(debug) Debug Avionics",
             "alignment": "left",
-            "command": "multiCommand.debugAvionics",
+            "command": "launches.debugAvionics",
         },
         {
             "text": "$(debug) Debug GCM",
             "alignment": "left",
-            "command": "multiCommand.debugGCM",
+            "command": "launches.debugGCM",
         },
         {
             "text": "$(play) Release Avionics",
@@ -20,22 +20,6 @@
             "alignment": "left",
             "command": "launches.releaseGCM",
         }
-    ],
-    "multiCommand.commands": [
-        {
-            "command": "multiCommand.debugAvionics",
-            "sequence": [
-                "workbench.view.debug",
-                "launches.debugAvionics"
-            ]
-        },
-        {
-            "command": "multiCommand.debugGCM",
-            "sequence": [
-                "workbench.view.debug",
-                "launches.debugGCM"
-            ]
-        },
     ],
     "launches": {
         "debugAvionics": "Debug Avionics",
