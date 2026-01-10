@@ -1,4 +1,6 @@
 {
+    "git.autofetch": true,
+    "editor.tabSize": 4,
     "statusbar_command.commands": [
         {
             "text": "$(debug) Debug Avionics",
@@ -36,4 +38,5 @@
     ],
     "errorLens.messageEnabled": true,
     "errorLens.enabled": true,
+    "window.title": "VLF5 ${separator} ${activeEditorShort}",
 }
