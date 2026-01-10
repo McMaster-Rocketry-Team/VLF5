@@ -31,4 +31,9 @@
         "TODO",
         "todo!"
     ],
+    "errorLens.enabledDiagnosticLevels": [
+        "error"
+    ],
+    "errorLens.messageEnabled": true,
+    "errorLens.enabled": true,
 }
