@@ -333,7 +333,11 @@ async fn low_prio_main(
     ));
     spawner.must_spawn(amp_control_task(can_sender, amp_control_watch));
 
-    spawner.must_spawn(watchdog_task(p.IWDG1));
+    if cfg!(not(debug_assertions)) {
+        spawner.must_spawn(watchdog_task(p.IWDG1));
+    } else {
+        defmt::warn!("Watchdog is disabled in debug build");
+    }
 
     buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
     buzzer_pubsub.publish_immediate(BuzzerTone::Mid(250, 100));

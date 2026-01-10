@@ -1,0 +1,50 @@
+{
+    "statusbar_command.commands": [
+        {
+            "text": "$(debug) Debug Avionics",
+            "alignment": "left",
+            "command": "multiCommand.debugAvionics",
+        },
+        {
+            "text": "$(debug) Debug GCM",
+            "alignment": "left",
+            "command": "multiCommand.debugGCM",
+        },
+        {
+            "text": "$(play) Release Avionics",
+            "alignment": "left",
+            "command": "launches.releaseAvionics",
+        },
+        {
+            "text": "$(play) Release GCM",
+            "alignment": "left",
+            "command": "launches.releaseGCM",
+        }
+    ],
+    "multiCommand.commands": [
+        {
+            "command": "multiCommand.debugAvionics",
+            "sequence": [
+                "workbench.view.debug",
+                "launches.debugAvionics"
+            ]
+        },
+        {
+            "command": "multiCommand.debugGCM",
+            "sequence": [
+                "workbench.view.debug",
+                "launches.debugGCM"
+            ]
+        },
+    ],
+    "launches": {
+        "debugAvionics": "Debug Avionics",
+        "debugGCM": "Debug GCM",
+        "releaseAvionics": "Release Avionics",
+        "releaseGCM": "Release GCM"
+    },
+    "todohighlight.keywords": [
+        "TODO",
+        "todo!"
+    ],
+}
