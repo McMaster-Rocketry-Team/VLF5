@@ -1,17 +1,41 @@
+use core::str::FromStr;
+
+use cortex_m::singleton;
 use defmt::*;
+use embassy_executor::Spawner;
 use embassy_stm32::peripherals::{PA11, PA12, USB_OTG_FS};
 use embassy_stm32::usb::Driver;
 use embassy_stm32::{Peri, bind_interrupts, peripherals, usb};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+use embassy_sync::signal::Signal;
 use embassy_usb::control::{InResponse, OutResponse, Recipient, Request, RequestType};
-use embassy_usb::driver::{Endpoint, EndpointAddress, EndpointIn};
+use embassy_usb::driver::{EndpointAddress, EndpointIn};
 use embassy_usb::msos::{self, windows_version};
 use embassy_usb::types::InterfaceNumber;
-use embassy_usb::{Builder, Handler};
+use embassy_usb::{Builder, Handler, UsbDevice};
 
+use firmware_common_new::usb_encoder::{self, encode_float, encode_string};
+
+use firmware_common_new::vlp::usb::CliRequest;
 // use {defmt_rtt as _, panic_probe as _};
 use panic_probe as _;
 
-use crate::SendDataSignal;
+use heapless::{String};
+
+
+pub struct DataParams {
+    should_send: bool,
+    len: usize,
+
+    // TODO add members that describe which data to send. (this depends on file layout)
+
+}
+
+pub type SendDataSignal = Signal<NoopRawMutex, DataParams>;
+pub type HandlerMutex = Mutex<CriticalSectionRawMutex, ControlHandler>;
+
+// It needs some buffers for building the descriptors.
 
 const DEVICE_INTERFACE_GUIDS: &[&str] = &["{DAC2087C-63FA-458D-A55D-827C0762DEC7}"]; // windows needs this
 bind_interrupts!(struct Irqs {
@@ -23,37 +47,40 @@ pub async fn setup_usb_handler(
     usb_otg_fs: Peri<'static, USB_OTG_FS>,
     pa12: Peri<'static, PA12>,
     pa11: Peri<'static, PA11>,
+    spawner: Spawner,
 ) {
     // Create the driver, from the HAL.
-    let mut ep_out_buffer = [0u8; 256];
+    let ep_out_buffer = singleton!(: [u8;256] = [0u8; 256]).unwrap();
+    let config_descriptor = singleton!(: [u8;256] = [0u8; 256]).unwrap();
+    let bos_descriptor = singleton!(: [u8;256] = [0u8; 256]).unwrap();
+    let msos_descriptor = singleton!(: [u8;256] = [0u8; 256]).unwrap();
+    let control_buf = singleton!(: [u8;64] = [0u8; 64]).unwrap();
+
     let mut config = embassy_stm32::usb::Config::default();
 
     config.vbus_detection = false;
 
-    let driver = Driver::new_fs(usb_otg_fs, Irqs, pa12, pa11, &mut ep_out_buffer, config);
+    let driver = Driver::new_fs(usb_otg_fs, Irqs, pa12, pa11, ep_out_buffer, config);
 
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
-    config.manufacturer = Some("Embassy");
-    config.product = Some("USB-raw example");
-    config.serial_number = Some("12345678");
+    config.manufacturer = Some("MacRocketry");
+    config.product = Some("VLF5");
+    config.serial_number = Some("4206980085");
 
-    // It needs some buffers for building the descriptors.
-    let mut config_descriptor = [0; 256];
-    let mut bos_descriptor = [0; 256];
-    let mut msos_descriptor = [0; 256];
-    let mut control_buf = [0; 64];
+    let send_signal: &'static SendDataSignal =
+        singleton!(:SendDataSignal = SendDataSignal::new()).unwrap();
 
-    let mut handler = ControlHandler {
-        interface_num: InterfaceNumber(0),
-    };
+    let handler =
+        singleton!(: HandlerMutex = HandlerMutex::new(ControlHandler::new(send_signal))).unwrap();
 
+    let control_handler = handler.get_mut();
     let mut builder = Builder::new(
         driver,
         config,
-        &mut config_descriptor,
-        &mut bos_descriptor,
-        &mut msos_descriptor,
-        &mut control_buf,
+        config_descriptor,
+        bos_descriptor,
+        msos_descriptor,
+        control_buf,
     );
 
     // Windows stuff
@@ -68,39 +95,81 @@ pub async fn setup_usb_handler(
     let mut interface = function.interface();
     let mut alt = interface.alt_setting(0xFF, 0, 0, None);
 
-    let ep_in: <Driver<'_, USB_OTG_FS> as embassy_usb::driver::Driver<'_>>::EndpointIn =
-        alt.endpoint_bulk_in(Some(EndpointAddress::from(1)), 10); // I cannot tell you for the life of me what type this variable is meant to have
+    let mut ep_in = alt.endpoint_bulk_in(Some(EndpointAddress::from(1)), 1024);
 
-    handler.interface_num = interface.interface_number();
+    control_handler.interface_num = interface.interface_number();
 
     drop(function); // why??
 
-    builder.handler(&mut handler);
+    builder.handler(control_handler);
 
     // Build the builder.
-    let mut usb = builder.build();
-    // Run the USB device.
+    let usb = builder.build();
 
     info!("USB handler initialised.");
+    // Run the USB device.
+    spawner.must_spawn(run_usb(usb));
 
+    let mut buf = [0u8; 1024];
+
+    // heres where I will have to put the file reading code
+
+    let demo: String<1024> = String::from_str("HelloCLI").unwrap();
+
+    match encode_string(&mut buf, 0, demo, "HelloCLI".len()) {
+        Ok(_) => {
+            info!("succesfully encoded string")
+        }
+        Err(_) => {
+            info!("error encoding string")
+        }
+    }
+    loop {
+
+        let signal  = send_signal.wait().await;
+        if !signal.should_send {
+            embassy_time::Timer::after_millis(1).await;
+            continue;
+        }
+
+        // TODO use channels for file buffering
+        let write_buf = &buf[0..signal.len-1];
+        ep_in.write(write_buf).await.unwrap();
+        buf = [0u8; 1024];
+        send_signal.reset();
+
+
+        // Send data on bulk endpoint
+    }
+}
+
+#[embassy_executor::task]
+
+async fn run_usb(mut usb: UsbDevice<'static, Driver<'static, USB_OTG_FS>>) {
     usb.run().await;
 }
 
-struct ControlHandler {
+pub struct ControlHandler {
     interface_num: InterfaceNumber,
+    send_signal: &'static SendDataSignal,
 }
+
+impl ControlHandler {
+    fn new(send_data_signal: &'static SendDataSignal) -> Self {
+        Self {
+            interface_num: InterfaceNumber(0),
+            send_signal: send_data_signal,
+        }
+    }
+}
+
+// Default is intentionally not implemented for ControlHandler because it requires a 'static SendDataSignal.
+// If a default is needed, construct the ControlHandler with a valid &'static SendDataSignal at call sites.
 
 // (we are the device)
 impl Handler for ControlHandler {
     fn control_out<'a>(&'a mut self, req: Request, buf: &'a [u8]) -> Option<OutResponse> {
         info!("Got control_out, request={}, buf={:a}", req, buf);
-
-        None
-    }
-
-    /// Respond to DeviceToHost control messages, where the host requests some data from us.
-    fn control_in<'a>(&'a mut self, req: Request, buf: &'a mut [u8]) -> Option<InResponse<'a>> {
-        info!("Got control_in, request={}", req);
 
         // Only handle Vendor request types to an Interface.
         if req.request_type != RequestType::Vendor || req.recipient != Recipient::Interface {
@@ -112,37 +181,37 @@ impl Handler for ControlHandler {
             return None;
         }
 
-        // TODO define a protocol for this
+        let cli_req = req.value.try_into().unwrap();
 
-        if req.request == 101 && req.value == 201
-        // list
-        {
-            buf[..8].copy_from_slice(b"data.csv");
-            Some(InResponse::Accepted(&buf[..7]))
-        } else if req.value == 202
-        // clear
-        {
-            buf[..16].copy_from_slice(b"clearing data...");
-            Some(InResponse::Accepted(&buf[..7]))
-        } else {
-            Some(InResponse::Rejected)
+        match cli_req {
+            CliRequest::List => {
+                info!("List files requested");
+                Some(OutResponse::Accepted)
+            }
+            CliRequest::Clear => {
+                info!("Clear files requested");
+                Some(OutResponse::Accepted)
+            }
+            CliRequest::Download => {
+                info!("Download files requested");
+
+                self.send_signal.signal(DataParams {
+                    should_send: true,
+                    len: "stime".len(),
+                });
+
+                Some(OutResponse::Accepted)
+            }
+            _ => {
+                info!("Invalid request received through USB!");
+                Some(OutResponse::Rejected)
+            }
         }
     }
-}
 
-// The plan is to add this task in low_prio_main and have it wait on two signals, one which contains whether it should write or not
-// and another that tells it what files to write over the endpoint (this one could be a watch)
-// The rust compiler keeps complaining about EndpointIn<'static> and its messages arent very helpful.
-
-#[embassy_executor::task]
-async fn send_data_task(mut ep: <Driver<'static, USB_OTG_FS> as embassy_usb::driver::Driver<'static>>::EndpointIn, send_signal: SendDataSignal) {
-    let payload: &[u8] = b"some sample data"; // fixed for now.
-    loop {
-        send_signal.wait().await;
-        ep.write(payload).await.unwrap();
-
-        // Send data on bulk endpoint
-
-        embassy_time::Timer::after_millis(1).await;
+    /// Respond to DeviceToHost control messages, where the host requests some data from us.
+    fn control_in<'a>(&'a mut self, req: Request, _buf: &'a mut [u8]) -> Option<InResponse<'a>> {
+        info!("Got control_in, request={}", req);
+        None
     }
 }

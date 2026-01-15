@@ -5,3 +5,4 @@ pub mod gps_task;
 pub mod sensor_tasks;
 pub mod unix_clock;
 pub mod amp_control_task;
+pub mod sd_card_task;

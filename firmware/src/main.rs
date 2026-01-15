@@ -118,7 +118,6 @@ pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 1>;
 pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
-pub type SendDataSignal = Signal<NoopRawMutex, bool>;
 
 
 #[entry]
@@ -260,7 +259,7 @@ async fn low_prio_main(
 
 
 
-    spawner.must_spawn(usb_handler::setup_usb_handler(p.USB_OTG_FS,p.PA12,p.PA11));
+    spawner.must_spawn(usb_handler::setup_usb_handler(p.USB_OTG_FS,p.PA12,p.PA11,spawner));
 
     spawner.must_spawn(power_led_task(
         p.PA2,
