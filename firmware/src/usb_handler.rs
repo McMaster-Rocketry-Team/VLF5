@@ -21,15 +21,12 @@ use firmware_common_new::vlp::usb::CliRequest;
 // use {defmt_rtt as _, panic_probe as _};
 use panic_probe as _;
 
-use heapless::{String};
-
+use heapless::String;
 
 pub struct DataParams {
     should_send: bool,
     len: usize,
-
     // TODO add members that describe which data to send. (this depends on file layout)
-
 }
 
 pub type SendDataSignal = Signal<NoopRawMutex, DataParams>;
@@ -125,19 +122,17 @@ pub async fn setup_usb_handler(
         }
     }
     loop {
-
-        let signal  = send_signal.wait().await;
+        let signal = send_signal.wait().await;
         if !signal.should_send {
             embassy_time::Timer::after_millis(1).await;
             continue;
         }
 
         // TODO use channels for file buffering
-        let write_buf = &buf[0..signal.len-1];
+        let write_buf = &buf[0..signal.len - 1];
         ep_in.write(write_buf).await.unwrap();
         buf = [0u8; 1024];
         send_signal.reset();
-
 
         // Send data on bulk endpoint
     }
@@ -214,4 +209,35 @@ impl Handler for ControlHandler {
         info!("Got control_in, request={}", req);
         None
     }
+}
+
+#[allow(dead_code)]
+fn rkyv_example() {
+    use rkyv::{
+        api::low::{from_bytes_unchecked, to_bytes_in_with_alloc},
+        rancor::{Failure, Infallible},
+        ser::{allocator::SubAllocator, writer::Buffer},
+    };
+
+    #[derive(rkyv::Archive, rkyv::Deserialize, rkyv::Serialize)]
+    struct Data {
+        a: f32,
+    }
+
+    const DATA_SERIALIZED_LENGTH: usize = size_of::<<Data as rkyv::Archive>::Archived>();
+
+    let original_data = Data { a: 1.0 };
+
+    // serialization start
+    let mut buffer = [0u8; DATA_SERIALIZED_LENGTH];
+    to_bytes_in_with_alloc::<_, _, Failure>(
+        &original_data,
+        Buffer::from(&mut buffer), // when buffer has a different size, get a slice of the buffer first
+        SubAllocator::empty(),
+    )
+    .unwrap();
+    // `buffer` contains the serialized data now
+
+    // deserialization start
+    let deserialized_data = unsafe { from_bytes_unchecked::<Data, Infallible>(&buffer).unwrap() };
 }

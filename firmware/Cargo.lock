@@ -832,6 +832,7 @@ dependencies = [
  "micromath",
  "nalgebra",
  "panic-probe",
+ "rkyv",
  "stm32-device-signature",
 ]
 
