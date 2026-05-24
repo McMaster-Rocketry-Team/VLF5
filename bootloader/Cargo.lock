@@ -768,6 +768,7 @@ dependencies = [
  "salty",
  "serde",
  "sha2",
+ "static_assertions",
 ]
 
 [[package]]
