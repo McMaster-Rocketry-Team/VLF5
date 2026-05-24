@@ -21,7 +21,8 @@ use embassy_stm32::{
     crc::{Config as CrcConfig, Crc, InputReverseConfig, PolySize},
     sdmmc::{self, Sdmmc},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel, watch};
+use embassy_time::{Duration, Instant, Ticker};
 use firmware_common_new::{gps::GPSData, sensor_reading::SensorReading, time::BootTimestamp};
 #[embassy_executor::task]
 pub async fn sd_card_task(
@@ -71,9 +72,85 @@ pub async fn sd_card_task(
     let mut battery_receiver = battery_watch.receiver().unwrap();
     let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
 
+    let mut buf: [u8; 512] = [0x0; 512];
 
-    
+    let mut current_index = 0;
+
+    // Note for size requirements, flight is ~1 min
+
+    // data comes at 400 hz already
+
+    // tag byte outside struct
+
+    // add timestamp too
+
+    // amp_online
+    // amp_rebooted_inlast 5 secs
+
+    // Telemetry Packet
+
+    // merge into bigger structs
+
+
+    // up to ozys
+
+    // look into stuff like actual_air breakes percentage which arent actually ticker 10hz
+
+    // still do 10hz for ticker
+
+    // look into ozys fs (two block system at beginning)
+
+    // write new data to second block then erase first
+    // when reading read both blocks and take the newest
+    // write checksums to both blocks
+
+    // write checksums for every block
+
+    // DONT OVERWRITE DATA
 
 
 
+
+    let mut hight_rate_ticker = Ticker::every(Duration::from_hz(400));
+    loop {
+        match avionics_mode.get().await {
+            crate::avionics_mode::AvionicsMode::Armed => {
+                hight_rate_ticker.next().await;
+                let current_timestamp = Instant::now().as_millis(); // will be used as an ID
+
+                let imu_data_raw = imu_baro_sub.try_next_message();
+                let mag_data_raw = mag_sub.try_next_message();
+                let gps_data_raw = gps_receiver.try_changed();
+                let battery_data_raw = battery_receiver.try_changed();
+
+                // by this point, considering we waited 1/400 seconds, all readings should have updated, perhaps even multiple times idk.
+
+
+                // skip non-read ones
+
+                if imu_data_raw.is_some() {
+                    match imu_data_raw.unwrap() {
+                        embassy_sync::pubsub::WaitResult::Lagged(num) => {
+
+                            // in this case just take the most recent reading
+                        }
+                        embassy_sync::pubsub::WaitResult::Message(sensor_data) => {
+
+
+
+                        }
+                    }
+                }
+
+                if mag_data_raw.is_some(){
+
+                }
+            }
+
+            _ => {
+                // Note, could also keep logging gps after landing?
+            }
+        }
+    }
 }
+
