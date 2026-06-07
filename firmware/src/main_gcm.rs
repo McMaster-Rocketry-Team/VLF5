@@ -53,7 +53,11 @@ async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(vlf5_clock_config());
     info!("Hello VLF5 GCM!");
 
-    spawner.must_spawn(watchdog_task(p.IWDG1));
+    if cfg!(not(debug_assertions)) {
+        spawner.must_spawn(watchdog_task(p.IWDG1));
+    } else {
+        defmt::warn!("Watchdog is disabled in debug build");
+    }
 
     let class = start_usb_tasks(&spawner, p.USB_OTG_FS, p.PA12, p.PA11).await;
 

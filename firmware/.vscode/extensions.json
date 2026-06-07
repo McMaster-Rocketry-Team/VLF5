@@ -1,0 +1,13 @@
+{
+    "recommendations": [
+        "serayuzgur.crates",
+        "probe-rs.probe-rs-debugger",
+        "usernamehw.errorlens",
+        "tamasfe.even-better-toml",
+        "eamodio.gitlens",
+        "rust-lang.rust-analyzer",
+        "anweber.statusbar-commands",
+        "ArturoDent.launch-config",
+        "wayou.vscode-todo-highlight"
+    ]
+}

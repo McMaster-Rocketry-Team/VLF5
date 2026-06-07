@@ -1,0 +1,58 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "preLaunchTask": "rust: cargo build",
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "Debug Avionics",
+            "cwd": "${workspaceFolder}",
+            "connectUnderReset": true,
+            "chip": "STM32H743VIHx",
+            "flashingConfig": {
+                "flashingEnabled": true
+            },
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "programBinary": "./target/thumbv7em-none-eabihf/debug/main",
+                    "rttEnabled": true
+                }
+            ]
+        },
+        {
+            "preLaunchTask": "rust: cargo build",
+            "type": "probe-rs-debug",
+            "request": "launch",
+            "name": "Debug GCM",
+            "cwd": "${workspaceFolder}",
+            "connectUnderReset": true,
+            "chip": "STM32H743VIHx",
+            "flashingConfig": {
+                "flashingEnabled": true
+            },
+            "coreConfigs": [
+                {
+                    "coreIndex": 0,
+                    "programBinary": "./target/thumbv7em-none-eabihf/debug/gcm",
+                    "rttEnabled": true
+                }
+            ]
+        },
+        {
+            "type": "node-terminal",
+            "name": "Release Avionics",
+            "command": "cargo run --release --bin main && exit",
+            "request": "launch"
+        },
+        {
+            "type": "node-terminal",
+            "name": "Release GCM",
+            "command": "cargo run --release --bin gcm && exit",
+            "request": "launch"
+        }
+    ]
+}

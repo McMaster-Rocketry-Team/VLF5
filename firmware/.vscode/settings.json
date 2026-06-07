@@ -1,0 +1,42 @@
+{
+    "git.autofetch": true,
+    "editor.tabSize": 4,
+    "statusbar_command.commands": [
+        {
+            "text": "$(debug) Debug Avionics",
+            "alignment": "left",
+            "command": "launches.debugAvionics",
+        },
+        {
+            "text": "$(debug) Debug GCM",
+            "alignment": "left",
+            "command": "launches.debugGCM",
+        },
+        {
+            "text": "$(play) Release Avionics",
+            "alignment": "left",
+            "command": "launches.releaseAvionics",
+        },
+        {
+            "text": "$(play) Release GCM",
+            "alignment": "left",
+            "command": "launches.releaseGCM",
+        }
+    ],
+    "launches": {
+        "debugAvionics": "Debug Avionics",
+        "debugGCM": "Debug GCM",
+        "releaseAvionics": "Release Avionics",
+        "releaseGCM": "Release GCM"
+    },
+    "todohighlight.keywords": [
+        "TODO",
+        "todo!"
+    ],
+    "errorLens.enabledDiagnosticLevels": [
+        "error"
+    ],
+    "errorLens.messageEnabled": true,
+    "errorLens.enabled": true,
+    "window.title": "VLF5 ${separator} ${activeEditorShort}",
+}
