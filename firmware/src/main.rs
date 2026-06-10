@@ -112,10 +112,10 @@ pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
 };
 
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
-pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3>;
+pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
-pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 1>;
+pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
 
@@ -339,6 +339,32 @@ async fn low_prio_main(
     ));
     spawner.must_spawn(amp_control_task(can_sender, amp_control_watch));
 
+    let flight_data_channel = singleton!(
+        : tasks::data_logger::FlightDataChannel = tasks::data_logger::FlightDataChannel::new()
+    )
+    .unwrap();
+    spawner.must_spawn(tasks::data_logger::data_logger(
+        imu_baro_reading_pubsub,
+        mag_reading_pubsub,
+        gps_reading_watch,
+        battery_v_watch,
+        continuity_watch,
+        flight_stage,
+        avionics_mode_watch,
+        flight_data_channel,
+    ));
+    spawner.must_spawn(tasks::sd_card_writer::sd_card_writer(
+        p.SDMMC1,
+        p.PC12,
+        p.PD2,
+        p.PC8,
+        p.PC9,
+        p.PC10,
+        p.PC11,
+        flight_data_channel,
+        vl_status,
+    ));
+
     if cfg!(not(debug_assertions)) {
         spawner.must_spawn(watchdog_task(p.IWDG1));
     } else {
@@ -454,7 +480,7 @@ async fn power_led_task(
         'static,
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, GPSData>,
-        3,
+        4,
     >,
 ) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);

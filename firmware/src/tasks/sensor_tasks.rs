@@ -43,7 +43,7 @@ pub type IMUBaroReadingPubSub = PubSubChannel<
     CriticalSectionRawMutex,
     SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>,
     10,
-    3,
+    4,
     1,
 >;
 
@@ -227,7 +227,7 @@ async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
 }
 
 pub type MagReadingPubSub =
-    PubSubChannel<CriticalSectionRawMutex, SensorReading<BootTimestamp, MagData>, 10, 1, 1>;
+    PubSubChannel<CriticalSectionRawMutex, SensorReading<BootTimestamp, MagData>, 10, 2, 1>;
 
 #[embassy_executor::task]
 pub async fn mag_task(
@@ -312,7 +312,7 @@ async fn read_mag_loop<B: HalI2c>(
     }
 }
 
-pub type BatteryVWatch = Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 2>;
+pub type BatteryVWatch = Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 3>;
 
 #[embassy_executor::task]
 pub async fn adc_task(

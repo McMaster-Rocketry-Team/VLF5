@@ -1,7 +1,33 @@
 use core::future::Future;
 use embassy_futures::select::{Either, select};
-use embassy_sync::{blocking_mutex::raw::RawMutex, pubsub};
+use embassy_sync::{
+    blocking_mutex::raw::RawMutex,
+    pubsub::{self, Subscriber},
+};
 use embassy_time::{Duration, Timer};
+
+/// Non-blocking drain of a pubsub subscriber: pulls every message currently
+/// queued for this subscriber and returns the most recent one, or `None` if
+/// nothing new is queued.
+///
+/// Use this when you only care about the latest value and want to keep a fast
+/// (e.g. IMU-clocked) loop from blocking on a slower source. Draining only
+/// advances *this* subscriber's cursor — other subscribers are unaffected.
+/// `Lagged` markers are skipped (the `_pure` variant), so an overflowed ring
+/// just yields the newest available message instead of an error.
+pub fn drain_latest<M, T, const CAP: usize, const SUBS: usize, const PUBS: usize>(
+    sub: &mut Subscriber<'_, M, T, CAP, SUBS, PUBS>,
+) -> Option<T>
+where
+    M: RawMutex,
+    T: Clone,
+{
+    let mut newest = None;
+    while let Some(msg) = sub.try_next_message_pure() {
+        newest = Some(msg);
+    }
+    newest
+}
 
 #[macro_export]
 macro_rules! sleep {
