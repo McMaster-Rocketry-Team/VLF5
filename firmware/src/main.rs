@@ -81,6 +81,7 @@ mod receive_vlp_task;
 mod tasks;
 mod time;
 mod utils;
+mod usb_handler;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
@@ -111,12 +112,13 @@ pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
 };
 
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
-pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 3>;
+pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
-pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 1>;
+pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
+
 
 #[entry]
 fn main() -> ! {
@@ -255,6 +257,26 @@ async fn low_prio_main(
     let amp_control_watch = singleton!(: AmpControlWatch = AmpControlWatch::new()).unwrap();
     let target_agl_signal = singleton!(:SetTargetWatch= SetTargetWatch::new()).unwrap();
 
+    // Shared between the USB handler (which receives host commands) and the SD
+    // writer (which serves them): commands flow one way, response chunks the other.
+    let storage_cmd = singleton!(
+        : tasks::sd_card_writer::StorageCmdSignal = tasks::sd_card_writer::StorageCmdSignal::new()
+    )
+    .unwrap();
+    let storage_resp = singleton!(
+        : tasks::sd_card_writer::StorageRespChannel = tasks::sd_card_writer::StorageRespChannel::new()
+    )
+    .unwrap();
+
+    spawner.must_spawn(usb_handler::setup_usb_handler(
+        p.USB_OTG_FS,
+        p.PA12,
+        p.PA11,
+        storage_cmd,
+        storage_resp,
+        spawner,
+    ));
+
     spawner.must_spawn(power_led_task(
         p.PA2,
         p.PA7,
@@ -332,6 +354,34 @@ async fn low_prio_main(
         unix_clock,
     ));
     spawner.must_spawn(amp_control_task(can_sender, amp_control_watch));
+
+    let flight_data_channel = singleton!(
+        : tasks::data_logger::FlightDataChannel = tasks::data_logger::FlightDataChannel::new()
+    )
+    .unwrap();
+    spawner.must_spawn(tasks::data_logger::data_logger(
+        imu_baro_reading_pubsub,
+        mag_reading_pubsub,
+        gps_reading_watch,
+        battery_v_watch,
+        continuity_watch,
+        flight_stage,
+        avionics_mode_watch,
+        flight_data_channel,
+    ));
+    spawner.must_spawn(tasks::sd_card_writer::sd_card_writer(
+        p.SDMMC1,
+        p.PC12,
+        p.PD2,
+        p.PC8,
+        p.PC9,
+        p.PC10,
+        p.PC11,
+        flight_data_channel,
+        storage_cmd,
+        storage_resp,
+        vl_status,
+    ));
 
     if cfg!(not(debug_assertions)) {
         spawner.must_spawn(watchdog_task(p.IWDG1));
@@ -448,7 +498,7 @@ async fn power_led_task(
         'static,
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, GPSData>,
-        3,
+        4,
     >,
 ) {
     let mut blue_led = Output::new(blue_led, Level::High, Speed::Low);
