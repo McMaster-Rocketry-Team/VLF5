@@ -257,9 +257,25 @@ async fn low_prio_main(
     let amp_control_watch = singleton!(: AmpControlWatch = AmpControlWatch::new()).unwrap();
     let target_agl_signal = singleton!(:SetTargetWatch= SetTargetWatch::new()).unwrap();
 
+    // Shared between the USB handler (which receives host commands) and the SD
+    // writer (which serves them): commands flow one way, response chunks the other.
+    let storage_cmd = singleton!(
+        : tasks::sd_card_writer::StorageCmdSignal = tasks::sd_card_writer::StorageCmdSignal::new()
+    )
+    .unwrap();
+    let storage_resp = singleton!(
+        : tasks::sd_card_writer::StorageRespChannel = tasks::sd_card_writer::StorageRespChannel::new()
+    )
+    .unwrap();
 
-
-    spawner.must_spawn(usb_handler::setup_usb_handler(p.USB_OTG_FS,p.PA12,p.PA11,spawner));
+    spawner.must_spawn(usb_handler::setup_usb_handler(
+        p.USB_OTG_FS,
+        p.PA12,
+        p.PA11,
+        storage_cmd,
+        storage_resp,
+        spawner,
+    ));
 
     spawner.must_spawn(power_led_task(
         p.PA2,
@@ -362,6 +378,8 @@ async fn low_prio_main(
         p.PC10,
         p.PC11,
         flight_data_channel,
+        storage_cmd,
+        storage_resp,
         vl_status,
     ));
 
