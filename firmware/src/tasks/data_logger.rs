@@ -1,5 +1,5 @@
 use crate::{
-    AvionicsModeWatch, ContinuityWatch, FlightStageMutex, GPSReadingWatch,
+    AvionicsModeWatch, ContinuityWatch, FlightStageMutex, GPSReadingWatch, VLStatusMutex,
     tasks::sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
     utils::drain_latest,
 };
@@ -11,7 +11,7 @@ use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::flight_data_record::FlightDataRecord;
 
 /// Queue between the IMU-clocked logger and the SD writer. Sized for ~1 s of
-/// backlog at 416 Hz so a brief SD stall never drops flight data.
+/// backlog at 416 Hz and worst-case ~40 ms SDIO stalls (see `sd_bench`).
 pub const FLIGHT_DATA_CHANNEL_DEPTH: usize = 512;
 pub type FlightDataChannel = Channel<NoopRawMutex, FlightDataRecord, FLIGHT_DATA_CHANNEL_DEPTH>;
 
@@ -33,6 +33,7 @@ pub async fn data_logger(
     continuity_watch: &'static ContinuityWatch,
     flight_stage: &'static FlightStageMutex,
     avionics_mode_watch: &'static AvionicsModeWatch,
+    vl_status: &'static VLStatusMutex,
     channel: &'static FlightDataChannel,
 ) {
     let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
@@ -156,14 +157,17 @@ pub async fn data_logger(
         };
         record_count = record_count.wrapping_add(1);
 
-        // Block rather than drop: for a long-duration flight, losing samples is
-        // worse than briefly backpressuring the IMU loop when SD is stalled.
-        if channel.is_full() && !backlog_warned {
-            warn!("data_logger: SD writer backlogged, blocking until queue drains");
-            backlog_warned = true;
+        let sd_ok = vl_status.lock(|s| s.borrow().sd_ok);
+        if !sd_ok {
+            continue;
         }
-        channel.send(record).await;
-        if backlog_warned {
+
+        if channel.try_send(record).is_err() {
+            if !backlog_warned {
+                warn!("data_logger: SD path busy, dropping flight record");
+                backlog_warned = true;
+            }
+        } else if backlog_warned {
             backlog_warned = false;
         }
     }

@@ -15,53 +15,56 @@ pub fn vlf5_clock_config() -> Config {
     rcc.csi = false;
 
     rcc.hsi48 = None;
-    rcc.sys = Sysclk::PLL1_P;
+    rcc.sys = Sysclk::Pll1P;
 
     rcc.pll1 = Some(Pll {
-        source: PllSource::HSE,
-        prediv: PllPreDiv::DIV1,
-        mul: PllMul::MUL60,
-        divp: Some(PllDiv::DIV2),
-        divq: Some(PllDiv::DIV20),
+        source: PllSource::Hse,
+        prediv: PllPreDiv::Div1,
+        mul: PllMul::Mul60,
+        fracn: None,
+        divp: Some(PllDiv::Div2),
+        divq: Some(PllDiv::Div20),
         divr: None,
     });
     rcc.pll2 = Some(Pll {
-        source: PllSource::HSE,
-        prediv: PllPreDiv::DIV1,
-        mul: PllMul::MUL10,
-        divp: Some(PllDiv::DIV4),
-        divq: Some(PllDiv::DIV4),
-        divr: Some(PllDiv::DIV4),
+        source: PllSource::Hse,
+        prediv: PllPreDiv::Div1,
+        mul: PllMul::Mul10,
+        fracn: None,
+        divp: Some(PllDiv::Div4),
+        divq: Some(PllDiv::Div4),
+        divr: Some(PllDiv::Div4),
     });
     rcc.pll3 = Some(Pll {
-        source: PllSource::HSE,
-        prediv: PllPreDiv::DIV1,
-        mul: PllMul::MUL10,
+        source: PllSource::Hse,
+        prediv: PllPreDiv::Div1,
+        mul: PllMul::Mul10,
+        fracn: None,
         divp: None,
         divq: None,
-        divr: Some(PllDiv::DIV8),
+        divr: Some(PllDiv::Div8),
     });
 
-    rcc.d1c_pre = AHBPrescaler::DIV1;
-    rcc.ahb_pre = AHBPrescaler::DIV2;
-    rcc.apb1_pre = APBPrescaler::DIV2;
-    rcc.apb2_pre = APBPrescaler::DIV2;
-    rcc.apb3_pre = APBPrescaler::DIV2;
-    rcc.apb4_pre = APBPrescaler::DIV2;
+    rcc.d1c_pre = AHBPrescaler::Div1;
+    rcc.ahb_pre = AHBPrescaler::Div2;
+    rcc.apb1_pre = APBPrescaler::Div2;
+    rcc.apb2_pre = APBPrescaler::Div2;
+    rcc.apb3_pre = APBPrescaler::Div2;
+    rcc.apb4_pre = APBPrescaler::Div2;
 
     rcc.timer_prescaler = TimerPrescaler::DefaultX2;
     rcc.voltage_scale = VoltageScale::Scale0;
 
     rcc.ls = LsConfig::default_lsi();
-    rcc.mux.spi123sel = Saisel::PLL2_P;
-    rcc.mux.usart16910sel = Usart16910sel::PLL2_Q;
-    rcc.mux.rngsel = Rngsel::PLL1_Q;
-    rcc.mux.i2c1235sel = I2c1235sel::PLL3_R;
-    rcc.mux.spi45sel = Spi45sel::PLL2_Q;
-    rcc.mux.adcsel = Adcsel::PLL2_P;
-    rcc.mux.usbsel = Usbsel::PLL1_Q;
-    rcc.mux.fdcansel = Fdcansel::PLL2_Q;
-    rcc.mux.sdmmcsel = Sdmmcsel::PLL2_R;
+    rcc.mux.spi123sel = Saisel::Pll2P;
+    rcc.mux.usart16910sel = Usart16910sel::Pll2Q;
+    rcc.mux.rngsel = Rngsel::Pll1Q;
+    rcc.mux.i2c1235sel = I2c1235sel::Pll3R;
+    rcc.mux.spi45sel = Spi45sel::Pll2Q;
+    rcc.mux.adcsel = Adcsel::Pll2P;
+    rcc.mux.usbsel = Usbsel::Pll1Q;
+    rcc.mux.fdcansel = Fdcansel::Pll2Q;
+    rcc.mux.sdmmcsel = Sdmmcsel::Pll2R;
 
     config
 }

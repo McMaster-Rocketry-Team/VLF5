@@ -12,6 +12,8 @@ use firmware_common_new::{gps::GPSData, sensor_reading::SensorReading};
 
 use crate::GPSReadingWatch;
 
+use super::exti15_10_irqs::ExtI15_10Irqs;
+
 #[embassy_executor::task]
 pub async fn unix_clock_task(
     pa15: Peri<'static, PA15>,
@@ -20,7 +22,7 @@ pub async fn unix_clock_task(
     gps_reading_watch: &'static GPSReadingWatch,
 ) {
     let mut gps_reading = gps_reading_watch.receiver().unwrap();
-    let mut pps = ExtiInput::new(pa15, exti15, Pull::Down);
+    let mut pps = ExtiInput::new(pa15, exti15, Pull::Down, ExtI15_10Irqs);
 
     gps_reading.get().await;
     loop {

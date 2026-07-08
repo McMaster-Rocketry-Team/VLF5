@@ -1,13 +1,18 @@
 use defmt::info;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
-use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::bind_interrupts;
+use embassy_stm32::dma;
+use embassy_stm32::exti::{self, ExtiInput};
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
-use embassy_stm32::peripherals::{
-    DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6,
-};
+use embassy_stm32::interrupt;
 use embassy_stm32::spi::{Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::{peripherals::SPI3, Peri};
+use embassy_stm32::{
+    peripherals::{
+        DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
+    },
+    Peri,
+};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Delay;
@@ -19,6 +24,16 @@ use lora_phy::sx126x::{self, Sx126x};
 use lora_phy::LoRa;
 
 use crate::drivers::e22::E22;
+
+bind_interrupts!(struct Spi3Irqs {
+    DMA1_STREAM2 => dma::InterruptHandler<DMA1_CH2>;
+    DMA1_STREAM3 => dma::InterruptHandler<DMA1_CH3>;
+});
+
+bind_interrupts!(struct LoraExtiIrqs {
+    EXTI4 => exti::InterruptHandler<interrupt::typelevel::EXTI4>;
+    EXTI1 => exti::InterruptHandler<interrupt::typelevel::EXTI1>;
+});
 
 #[embassy_executor::task]
 pub async fn vlp_avionics_daemon_task(
@@ -42,8 +57,9 @@ pub async fn vlp_avionics_daemon_task(
 ) {
     let mut spi_config = SpiConfig::default();
     spi_config.frequency = Hertz(1_000_000);
-    let spi3 =
-        Mutex::<NoopRawMutex, _>::new(Spi::new(spi3, sck, mosi, miso, tx_dma, rx_dma, spi_config));
+    let spi3 = Mutex::<NoopRawMutex, _>::new(Spi::new(
+        spi3, sck, mosi, miso, tx_dma, rx_dma, Spi3Irqs, spi_config,
+    ));
     let lora_spi_device =
         SpiDeviceWithConfig::new(&spi3, Output::new(cs, Level::High, Speed::High), spi_config);
 
@@ -55,8 +71,8 @@ pub async fn vlp_avionics_daemon_task(
     };
     let iv = GenericSx126xInterfaceVariant::new(
         Output::new(reset, Level::High, Speed::Low),
-        ExtiInput::new(dio1, dio1_exti, Pull::Down),
-        ExtiInput::new(busy, busy_exti, Pull::Down),
+        ExtiInput::new(dio1, dio1_exti, Pull::Down, LoraExtiIrqs),
+        ExtiInput::new(busy, busy_exti, Pull::Down, LoraExtiIrqs),
         Some(Output::new(rxen, Level::High, Speed::High)),
         Some(Output::new(txen, Level::High, Speed::High)),
     )

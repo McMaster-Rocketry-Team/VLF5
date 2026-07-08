@@ -5,16 +5,18 @@ use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_stm32::{
     Peri, bind_interrupts,
     peripherals::{self, PC8, PC9, PC10, PC11, PC12, PD2, SDMMC1},
-    sdmmc::{self, DataBlock, Sdmmc},
+    sdmmc::{self, Sdmmc},
+    sdmmc::sd::{CmdBlock, DataBlock, StorageDevice},
     time::mhz,
 };
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, signal::Signal};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use firmware_common_new::flight_storage::{
     BLOCK_SIZE, DATA_START_BLOCK, RECORDS_PER_BLOCK, RECORD_LEN, SUPERBLOCK_INDEX, USABLE_PER_BLOCK,
     decode_superblock, encode_response_header, encode_superblock, finalize_data_block,
     serialize_record,
 };
+use heapless::Deque;
 
 /// A command from the USB host (see [`firmware_common_new::vlp::usb::CliRequest`]).
 #[derive(Clone, Copy)]
@@ -50,73 +52,170 @@ impl StorageResponse {
 /// Set by the USB control handler, awaited by the SD task.
 pub type StorageCmdSignal = Signal<NoopRawMutex, StorageCommand>;
 /// Filled by the SD task, drained by the USB task onto the bulk-IN endpoint.
-/// Depth gives the SD reader a little runway ahead of the slower USB writer.
-pub type StorageRespChannel = Channel<NoopRawMutex, StorageResponse, 8>;
+pub type StorageRespChannel = embassy_sync::channel::Channel<NoopRawMutex, StorageResponse, 8>;
 
-/// How often the in-progress (partial) block is flushed to the card so a power
-/// cut never loses more than this much data.
+/// How often the superblock is updated so a power cut never loses more than this
+/// much metadata. Partial data blocks are only rewritten when they have new records.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Owns the SD peripheral and all logging state. Records are packed into
-/// 512-byte blocks in RAM and written to raw SD sectors; block 0 holds a
-/// superblock so the log survives a reboot.
+/// Pending SD jobs while the card is busy. Sized for a worst-case ~40 ms stall at
+/// ~54 block commits/s plus periodic superblock updates.
+const SD_WRITE_QUEUE_DEPTH: usize = 16;
+
+/// Warn when the queue is deeper than this — sustained pressure means SDIO cannot
+/// keep up with the producer.
+const SD_QUEUE_WARN_DEPTH: usize = 8;
+
+/// Worst-case single `write_block` latency seen on hardware (microseconds).
+const WORST_CASE_WRITE_US: u32 = 40_000;
+
+/// SDIO calls that exceed this are treated as a dead card so the task never hangs.
+const SD_IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Transient driver errors before the card is declared offline.
+const SD_IO_ERROR_LIMIT: u8 = 3;
+
+/// SD card init timeout per attempt.
+const SD_INIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// SD card init attempts before giving up.
+const SD_INIT_ATTEMPTS: u8 = 5;
+
+#[derive(Clone, Copy)]
+enum SdWriteJob {
+    Data {
+        index: u32,
+        block: [u8; BLOCK_SIZE],
+    },
+    Superblock {
+        block: [u8; BLOCK_SIZE],
+    },
+}
+
+enum SdIoError {
+    Timeout,
+    Driver,
+}
+
+enum DrainResult {
+    Ok,
+    Failed,
+    Dead,
+}
+
+async fn write_block_timed(
+    storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+    index: u32,
+    block: &DataBlock,
+) -> Result<(), SdIoError> {
+    match select(
+        Timer::after(SD_IO_TIMEOUT),
+        storage.write_block(index, block),
+    )
+    .await
+    {
+        Either::First(_) => Err(SdIoError::Timeout),
+        Either::Second(Ok(())) => Ok(()),
+        Either::Second(Err(_)) => Err(SdIoError::Driver),
+    }
+}
+
+async fn read_block_timed(
+    storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+    index: u32,
+    block: &mut DataBlock,
+) -> Result<(), SdIoError> {
+    match select(
+        Timer::after(SD_IO_TIMEOUT),
+        storage.read_block(index, block),
+    )
+    .await
+    {
+        Either::First(_) => Err(SdIoError::Timeout),
+        Either::Second(Ok(())) => Ok(()),
+        Either::Second(Err(_)) => Err(SdIoError::Driver),
+    }
+}
+
+/// In-RAM logging state. SDIO is decoupled via a pending write queue.
 struct FlightLogger {
-    sdmmc: Sdmmc<'static, SDMMC1>,
-    /// The block currently being filled (records at the front, CRC stamped on
-    /// write).
     cur: [u8; BLOCK_SIZE],
-    /// Bytes of `cur` occupied by records.
     cur_offset: usize,
-    /// Records held in `cur`.
     cur_records: u32,
-    /// SD block index that `cur` will be written to.
     write_index: u32,
-    /// Total records in the log.
     record_count: u32,
-    /// `cur` has records not yet persisted to the card.
-    dirty: bool,
+    /// Bytes of `cur` already committed to the card at `write_index`.
+    last_persisted_offset: usize,
+    pending: Deque<SdWriteJob, SD_WRITE_QUEUE_DEPTH>,
+    queue_warned: bool,
 }
 
 impl FlightLogger {
-    /// Number of live data blocks the host should read back.
     fn block_count(&self) -> u32 {
         (self.write_index - DATA_START_BLOCK) + if self.cur_records > 0 { 1 } else { 0 }
     }
 
-    /// Resume from the existing superblock if present, otherwise start fresh.
-    async fn new(sdmmc: Sdmmc<'static, SDMMC1>) -> Self {
-        let mut empty = Self {
+    fn empty() -> Self {
+        Self {
             cur: [0u8; BLOCK_SIZE],
             cur_offset: 0,
             cur_records: 0,
             write_index: DATA_START_BLOCK,
             record_count: 0,
-            dirty: false,
-            sdmmc,
-        };
+            last_persisted_offset: 0,
+            pending: Deque::new(),
+            queue_warned: false,
+        }
+    }
 
-        let mut sb = DataBlock([0u8; BLOCK_SIZE]);
-        if empty.sdmmc.read_block(SUPERBLOCK_INDEX, &mut sb).await.is_ok()
-            && let Some(info) = decode_superblock(&sb.0)
+    fn drop_pending(&mut self) {
+        self.pending.clear();
+        self.queue_warned = false;
+    }
+
+    fn push_job(&mut self, job: SdWriteJob) -> Result<(), ()> {
+        self.pending.push_back(job).map_err(|_| {
+            error!("SD write queue full ({} jobs)", SD_WRITE_QUEUE_DEPTH);
+        })?;
+        if self.pending.len() >= SD_QUEUE_WARN_DEPTH && !self.queue_warned {
+            warn!(
+                "SD write queue depth {} (worst-case write {}us)",
+                self.pending.len(),
+                WORST_CASE_WRITE_US
+            );
+            self.queue_warned = true;
+        }
+        Ok(())
+    }
+
+    async fn new(storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>) -> Self {
+        let mut empty = Self::empty();
+
+        let mut sb = DataBlock::new();
+        if read_block_timed(storage, SUPERBLOCK_INDEX, &mut sb)
+            .await
+            .is_ok()
+            && let Some(info) = decode_superblock(&*sb)
             && info.block_count > 0
         {
             let per_block = RECORDS_PER_BLOCK as u32;
             let full_blocks = info.block_count - 1;
             let mut records_in_last = info.record_count.saturating_sub(full_blocks * per_block);
             if records_in_last == 0 || records_in_last > per_block {
-                // Counts disagree (corruption / interrupted write) — treat the
-                // last block as full so the "only the last block is partial"
-                // invariant the host relies on still holds.
                 records_in_last = per_block;
             }
             let last_index = DATA_START_BLOCK + info.block_count - 1;
-            let mut last = DataBlock([0u8; BLOCK_SIZE]);
-            if empty.sdmmc.read_block(last_index, &mut last).await.is_ok() {
-                empty.cur = last.0;
+            let mut last = DataBlock::new();
+            if read_block_timed(storage, last_index, &mut last)
+                .await
+                .is_ok()
+            {
+                empty.cur.copy_from_slice(&*last);
                 empty.cur_records = records_in_last;
                 empty.cur_offset = records_in_last as usize * RECORD_LEN;
                 empty.write_index = last_index;
                 empty.record_count = full_blocks * per_block + records_in_last;
+                empty.last_persisted_offset = empty.cur_offset;
                 info!(
                     "Resuming log: {} records across {} blocks",
                     empty.record_count, info.block_count
@@ -129,45 +228,126 @@ impl FlightLogger {
         empty
     }
 
-    /// Append one serialised record, persisting the previous block when this one
-    /// fills up. The partial tail is flushed separately by [`Self::persist`].
-    async fn append(&mut self, bytes: &[u8]) {
+    /// Buffer a record. Full blocks are queued for SDIO — never written inline.
+    fn append(&mut self, bytes: &[u8]) -> Result<(), ()> {
         if self.cur_offset + bytes.len() > USABLE_PER_BLOCK {
-            // `cur` is full — persist it before reusing the buffer, then advance.
-            self.write_current_block().await;
+            self.enqueue_current_block()?;
             self.write_index += 1;
             self.cur = [0u8; BLOCK_SIZE];
             self.cur_offset = 0;
             self.cur_records = 0;
+            self.last_persisted_offset = 0;
         }
         self.cur[self.cur_offset..self.cur_offset + bytes.len()].copy_from_slice(bytes);
         self.cur_offset += bytes.len();
         self.cur_records += 1;
         self.record_count += 1;
-        self.dirty = true;
+        Ok(())
     }
 
-    async fn write_current_block(&mut self) {
+    fn enqueue_current_block(&mut self) -> Result<(), ()> {
         let mut block = self.cur;
         finalize_data_block(&mut block);
-        if let Err(e) = self.sdmmc.write_block(self.write_index, &DataBlock(block)).await {
-            error!("SD write_block {} failed: {}", self.write_index, e);
+        self.push_job(SdWriteJob::Data {
+            index: self.write_index,
+            block,
+        })?;
+        self.last_persisted_offset = self.cur_offset;
+        Ok(())
+    }
+
+    fn enqueue_superblock(&mut self) -> Result<(), ()> {
+        let raw = encode_superblock(self.record_count, self.block_count());
+        let mut block = [0u8; BLOCK_SIZE];
+        block.copy_from_slice(&raw);
+        self.push_job(SdWriteJob::Superblock { block })
+    }
+
+    /// Queue any dirty in-RAM data and a superblock update for crash safety.
+    fn enqueue_flush(&mut self) -> Result<(), ()> {
+        if self.cur_offset > self.last_persisted_offset {
+            self.enqueue_current_block()?;
+        }
+        self.enqueue_superblock()?;
+        self.queue_warned = false;
+        Ok(())
+    }
+
+    fn note_io_result(io_failures: &mut u8, result: &Result<(), SdIoError>) -> DrainResult {
+        match result {
+            Ok(()) => {
+                *io_failures = 0;
+                DrainResult::Ok
+            }
+            Err(SdIoError::Timeout) => DrainResult::Dead,
+            Err(SdIoError::Driver) => {
+                *io_failures = io_failures.saturating_add(1);
+                if *io_failures >= SD_IO_ERROR_LIMIT {
+                    DrainResult::Dead
+                } else {
+                    DrainResult::Failed
+                }
+            }
         }
     }
 
-    async fn write_superblock(&mut self) {
-        let block = encode_superblock(self.record_count, self.block_count());
-        if let Err(e) = self.sdmmc.write_block(SUPERBLOCK_INDEX, &DataBlock(block)).await {
-            error!("SD superblock write failed: {}", e);
+    async fn drain_one(
+        &mut self,
+        storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+        io_failures: &mut u8,
+    ) -> DrainResult {
+        let Some(job) = self.pending.pop_front() else {
+            return DrainResult::Ok;
+        };
+
+        let t0 = Instant::now();
+        let result = match job {
+            SdWriteJob::Data { index, block } => {
+                let mut data = DataBlock::new();
+                data.copy_from_slice(&block);
+                write_block_timed(storage, index, &data).await
+            }
+            SdWriteJob::Superblock { block } => {
+                let mut data = DataBlock::new();
+                data.copy_from_slice(&block);
+                write_block_timed(storage, SUPERBLOCK_INDEX, &data).await
+            }
+        };
+
+        let elapsed_us = (Instant::now() - t0).as_micros() as u32;
+        if elapsed_us > WORST_CASE_WRITE_US {
+            warn!("SD write took {}us (queue depth {})", elapsed_us, self.pending.len());
         }
+
+        let outcome = Self::note_io_result(io_failures, &result);
+        if matches!(outcome, DrainResult::Failed | DrainResult::Dead) {
+            match result {
+                Err(SdIoError::Timeout) => {
+                    error!("SD write timed out after {}ms", SD_IO_TIMEOUT.as_millis())
+                }
+                Err(SdIoError::Driver) => {
+                    error!("SD write failed ({} consecutive errors)", *io_failures)
+                }
+                _ => {}
+            }
+        }
+        outcome
     }
 
-    /// Persist the in-progress block and superblock if anything changed.
-    async fn persist(&mut self) {
-        if self.dirty {
-            self.write_current_block().await;
-            self.write_superblock().await;
-            self.dirty = false;
+    async fn drain_all(
+        &mut self,
+        storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+        io_failures: &mut u8,
+    ) -> bool {
+        loop {
+            match self.drain_one(storage, io_failures).await {
+                DrainResult::Ok => {}
+                DrainResult::Failed => return true,
+                DrainResult::Dead => return false,
+            }
+            if self.pending.is_empty() {
+                return true;
+            }
         }
     }
 
@@ -176,10 +356,40 @@ impl FlightLogger {
         resp.send(StorageResponse::chunk(&header)).await;
     }
 
-    /// Handle a host command, pushing the reply onto `resp`.
-    async fn handle_command(&mut self, cmd: StorageCommand, resp: &StorageRespChannel) {
-        // Make the card consistent with RAM so a download sees every record.
-        self.persist().await;
+    async fn finish_response(&self, resp: &StorageRespChannel) {
+        resp.send(StorageResponse::End).await;
+    }
+
+    async fn handle_command_offline(&mut self, cmd: StorageCommand, resp: &StorageRespChannel) {
+        match cmd {
+            StorageCommand::List => {
+                warn!("USB: list while SD offline ({} records in RAM)", self.record_count);
+                self.send_header(resp).await;
+            }
+            StorageCommand::Download => {
+                warn!("USB: download while SD offline");
+                self.send_header(resp).await;
+            }
+            StorageCommand::Clear => {
+                info!("USB: clear in-RAM log (SD offline)");
+                *self = Self::empty();
+                self.send_header(resp).await;
+            }
+        }
+        self.finish_response(resp).await;
+    }
+
+    async fn handle_command(
+        &mut self,
+        storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+        cmd: StorageCommand,
+        resp: &StorageRespChannel,
+        io_failures: &mut u8,
+    ) -> bool {
+        let _ = self.enqueue_flush();
+        if !self.drain_all(storage, io_failures).await {
+            return false;
+        }
 
         match cmd {
             StorageCommand::List => {
@@ -194,29 +404,60 @@ impl FlightLogger {
                 );
                 self.send_header(resp).await;
                 for i in 0..block_count {
-                    let mut blk = DataBlock([0u8; BLOCK_SIZE]);
-                    match self.sdmmc.read_block(DATA_START_BLOCK + i, &mut blk).await {
-                        Ok(()) => resp.send(StorageResponse::chunk(&blk.0)).await,
-                        Err(e) => {
-                            error!("SD read_block {} failed: {}", DATA_START_BLOCK + i, e);
-                            break;
-                        }
+                    let mut blk = DataBlock::new();
+                    if read_block_timed(storage, DATA_START_BLOCK + i, &mut blk)
+                        .await
+                        .is_ok()
+                    {
+                        resp.send(StorageResponse::chunk(&*blk)).await;
+                    } else {
+                        error!("SD read_block {} failed", DATA_START_BLOCK + i);
+                        return false;
                     }
                 }
             }
             StorageCommand::Clear => {
                 info!("USB: clear storage");
-                self.record_count = 0;
-                self.write_index = DATA_START_BLOCK;
-                self.cur = [0u8; BLOCK_SIZE];
-                self.cur_offset = 0;
-                self.cur_records = 0;
-                self.dirty = false;
-                self.write_superblock().await;
+                *self = Self::empty();
+                let _ = self.enqueue_superblock();
+                if !self.drain_all(storage, io_failures).await {
+                    return false;
+                }
                 self.send_header(resp).await;
             }
         }
-        resp.send(StorageResponse::End).await;
+        self.finish_response(resp).await;
+        true
+    }
+}
+
+fn mark_card_offline(
+    card_alive: &mut bool,
+    logger: &mut FlightLogger,
+    vl_status: &VLStatusMutex,
+) {
+    if !*card_alive {
+        return;
+    }
+    error!("SD card offline; flight logging isolated from avionics");
+    logger.drop_pending();
+    *card_alive = false;
+    vl_status.lock(|s| s.borrow_mut().sd_ok = false);
+}
+
+async fn run_offline_loop(
+    channel: &'static FlightDataChannel,
+    storage_cmd: &'static StorageCmdSignal,
+    storage_resp: &'static StorageRespChannel,
+    vl_status: &'static VLStatusMutex,
+) -> ! {
+    let mut logger = FlightLogger::empty();
+    loop {
+        match select3(storage_cmd.wait(), channel.receive(), Timer::after(FLUSH_INTERVAL)).await {
+            Either3::First(cmd) => logger.handle_command_offline(cmd, storage_resp).await,
+            Either3::Second(_) => {}
+            Either3::Third(_) => {}
+        }
     }
 }
 
@@ -239,6 +480,8 @@ pub async fn sd_card_writer(
         SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
     });
 
+    vl_status.lock(|s| s.borrow_mut().sd_ok = false);
+
     let mut sdmmc = Sdmmc::new_4bit(
         sdmmc1,
         Irqs,
@@ -251,67 +494,90 @@ pub async fn sd_card_writer(
         Default::default(),
     );
 
-    info!("SDMMC bus init clock: {}", sdmmc.clock().0);
-
-    // Let the soldered SD-NAND's supply settle before talking to it.
     Timer::after_millis(50).await;
 
-    // Bound each attempt with a timeout so a stuck transfer can't silently stall
-    // the whole logger; if the card never comes up, keep the rest of the system
-    // alive by draining the queue instead of spamming "backlogged" warnings.
-    const INIT_TIMEOUT: Duration = Duration::from_secs(2);
-    const INIT_ATTEMPTS: u8 = 5;
-    let mut init_ok = false;
-    for attempt in 1..=INIT_ATTEMPTS {
-        // 25 MHz requested → ~20 MHz actual with the 40 MHz SDMMC kernel clock
-        // (clkdiv=1). ~20x faster than the old 1 MHz for both logging and USB
-        // readback. The SD-NAND traces are short; drop this if CRC errors appear.
-        match select(Timer::after(INIT_TIMEOUT), sdmmc.init_sd_card(mhz(25))).await {
-            Either::Second(Ok(())) => {
-                info!("SD card initialised (attempt {})", attempt);
-                init_ok = true;
-                break;
+    let mut storage = 'init: loop {
+        for attempt in 1..=SD_INIT_ATTEMPTS {
+            let mut cmd_block = CmdBlock::new();
+            match select(
+                Timer::after(SD_INIT_TIMEOUT),
+                StorageDevice::new_sd_card(&mut sdmmc, &mut cmd_block, mhz(25)),
+            )
+            .await
+            {
+                Either::Second(Ok(s)) => {
+                    info!("SD card initialised (attempt {})", attempt);
+                    break 'init s;
+                }
+                Either::Second(Err(e)) => error!("SD init attempt {} failed: {}", attempt, e),
+                Either::First(_) => warn!("SD init attempt {} timed out", attempt),
             }
-            Either::Second(Err(e)) => error!("SD init attempt {} failed: {}", attempt, e),
-            Either::First(_) => warn!("SD init attempt {} timed out", attempt),
+            Timer::after_millis(200).await;
         }
-        Timer::after_millis(200).await;
-    }
+        error!("SD card unavailable; avionics continues without SD logging");
+        run_offline_loop(channel, storage_cmd, storage_resp, vl_status).await;
+    };
 
-    if !init_ok {
-        error!("SD card unavailable; flight logging disabled");
-        vl_status.lock(|s| s.borrow_mut().sd_ok = false);
-        // Drain so the producer side doesn't back up and spam warnings.
-        loop {
-            let _ = channel.receive().await;
-        }
-    }
     vl_status.lock(|s| s.borrow_mut().sd_ok = true);
+    let mut logger = FlightLogger::new(&mut storage).await;
+    let mut card_alive = true;
 
-    let mut logger = FlightLogger::new(sdmmc).await;
     let mut flush_ticker = Ticker::every(FLUSH_INTERVAL);
+    let mut io_failures = 0u8;
 
     loop {
-        // `select` is biased toward its first future, so the USB command goes
-        // first: at ~416 Hz the record branch is almost always ready and would
-        // otherwise starve host commands. A command only becomes ready when the
-        // host actually sends one, so logging is unaffected in the common case.
-        match select3(
-            storage_cmd.wait(),
-            channel.receive(),
-            flush_ticker.next(),
-        )
-        .await
-        {
+        let mut go_offline = false;
+
+        if card_alive {
+            loop {
+                match logger.drain_one(&mut storage, &mut io_failures).await {
+                    DrainResult::Ok => {
+                        if logger.pending.is_empty() {
+                            break;
+                        }
+                    }
+                    DrainResult::Failed => break,
+                    DrainResult::Dead => {
+                        go_offline = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if go_offline {
+            mark_card_offline(&mut card_alive, &mut logger, vl_status);
+            continue;
+        }
+
+        match select3(storage_cmd.wait(), channel.receive(), flush_ticker.next()).await {
             Either3::First(cmd) => {
-                logger.handle_command(cmd, storage_resp).await;
+                if card_alive {
+                    if !logger
+                        .handle_command(&mut storage, cmd, storage_resp, &mut io_failures)
+                        .await
+                    {
+                        mark_card_offline(&mut card_alive, &mut logger, vl_status);
+                    }
+                } else {
+                    logger.handle_command_offline(cmd, storage_resp).await;
+                }
             }
             Either3::Second(record) => {
+                if !card_alive {
+                    continue;
+                }
                 let bytes = serialize_record(&record);
-                logger.append(&bytes).await;
+                if logger.append(&bytes).is_err() {
+                    warn!("SD queue full, dropping flight record");
+                }
             }
             Either3::Third(_) => {
-                logger.persist().await;
+                if card_alive {
+                    if logger.enqueue_flush().is_err() {
+                        warn!("SD flush enqueue failed (queue full)");
+                    }
+                }
             }
         }
     }

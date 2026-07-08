@@ -12,6 +12,8 @@ use firmware_common_new::vlp::packets::fire_pyro::PyroSelect;
 
 use crate::{ContinuityWatch, FireSignal};
 
+use super::exti15_10_irqs::ExtI15_10Irqs;
+
 #[derive(Clone, defmt::Format, PartialEq, Eq)]
 pub struct ContinuityUpdate {
     pub pyro_main_continuity: bool,
@@ -38,13 +40,13 @@ pub async fn pyro_task(
 ) {
     // https://www.notion.so/mcmasterrocketry/VLF5-1c0d3a029ea580f882dfee3f98b0b897?pvs=4#1ebd3a029ea5807e8651fe9f530ff869
     let mut pyro_n_en = Output::new(pyro_n_en, Level::High, Speed::Low);
-    let mut pyro_pg = ExtiInput::new(pyro_pg, pyro_pg_exti, Pull::Up);
+    let mut pyro_pg = ExtiInput::new(pyro_pg, pyro_pg_exti, Pull::Up, ExtI15_10Irqs);
 
     let mut pyro1_ctrl = Output::new(pyro1_ctrl, Level::Low, Speed::Low);
     let pyro1_cont = Input::new(pyro1_cont, Pull::Up);
 
     let mut pyro2_ctrl = Output::new(pyro2_ctrl, Level::Low, Speed::Low);
-    let mut pyro2_cont = ExtiInput::new(pyro2_cont, pyro2_cont_exti, Pull::Up);
+    let mut pyro2_cont = ExtiInput::new(pyro2_cont, pyro2_cont_exti, Pull::Up, ExtI15_10Irqs);
 
     pyro_n_en.set_low();
     Timer::after(Duration::from_millis(10)).await;

@@ -94,7 +94,7 @@ pub async fn setup_usb_handler(
 
     let usb = builder.build();
     info!("USB handler initialised.");
-    spawner.must_spawn(run_usb(usb));
+    spawner.spawn(run_usb(usb).unwrap());
 
     // Drain responses produced by the SD task onto the bulk endpoint. A
     // response is a sequence of `Chunk`s terminated by `End` (a zero-length

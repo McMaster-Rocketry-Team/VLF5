@@ -48,7 +48,7 @@ use firmware_common_new::{
 
 use crate::{
     avionics_mode::AvionicsMode,
-    bootloader::watchdog_task,
+    watchdog::watchdog_task,
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
     modes::{
@@ -71,7 +71,6 @@ use crate::{
 use receive_vlp_task::receive_vlp_task;
 
 mod avionics_mode;
-mod bootloader;
 mod can;
 mod can_central;
 mod clock_config;
@@ -82,6 +81,7 @@ mod tasks;
 mod time;
 mod utils;
 mod usb_handler;
+mod watchdog;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
@@ -146,7 +146,7 @@ fn main() -> ! {
 
     interrupt::USART2.set_priority(Priority::P6);
     let spawner = EXECUTOR_HIGH.start(interrupt::USART2);
-    spawner.must_spawn(high_prio_main(
+    spawner.spawn(high_prio_main(
         spawner,
         can_tx,
         buzzer_pubsub,
@@ -156,11 +156,11 @@ fn main() -> ! {
         gps_reading_watch,
         vl_status,
         unix_clock,
-    ));
+    ).unwrap());
 
     let executor_low = singleton!(: Executor = Executor::new()).unwrap();
     executor_low.run(|spawner| {
-        spawner.must_spawn(low_prio_main(
+        spawner.spawn(low_prio_main(
             spawner,
             can_tx,
             can_rx,
@@ -171,7 +171,7 @@ fn main() -> ! {
             gps_reading_watch,
             vl_status,
             unix_clock,
-        ));
+        ).unwrap());
     })
 }
 
@@ -188,8 +188,8 @@ async fn high_prio_main(
     unix_clock: &'static UnixClock,
 ) {
     let p = unsafe { Peripherals::steal() };
-    spawner.must_spawn(buzzer_task(p.PC15, buzzer_pubsub));
-    spawner.must_spawn(imu_baro_task(
+    spawner.spawn(buzzer_task(p.PC15, buzzer_pubsub).unwrap());
+    spawner.spawn(imu_baro_task(
         p.SPI4,
         p.PE2,
         p.PE6,
@@ -209,8 +209,8 @@ async fn high_prio_main(
         imu_baro_reading_pubsub,
         vl_status,
         avionics_mode_watch,
-    ));
-    spawner.must_spawn(mag_task(
+    ).unwrap());
+    spawner.spawn(mag_task(
         p.I2C2,
         p.PB10,
         p.PB11,
@@ -219,14 +219,14 @@ async fn high_prio_main(
         mag_reading_pubsub,
         vl_status,
         avionics_mode_watch,
-    ));
-    spawner.must_spawn(unix_clock_task(
+    ).unwrap());
+    spawner.spawn(unix_clock_task(
         p.PA15,
         p.EXTI15,
         unix_clock,
         gps_reading_watch,
-    ));
-    spawner.must_spawn(can_bus_broadcast_unix_time_task(can_tx, unix_clock));
+    ).unwrap());
+    spawner.spawn(can_bus_broadcast_unix_time_task(can_tx, unix_clock).unwrap());
 }
 
 #[embassy_executor::task]
@@ -265,24 +265,24 @@ async fn low_prio_main(
     )
     .unwrap();
 
-    spawner.must_spawn(usb_handler::setup_usb_handler(
+    spawner.spawn(usb_handler::setup_usb_handler(
         p.USB_OTG_FS,
         p.PA12,
         p.PA11,
         storage_cmd,
         storage_resp,
         spawner,
-    ));
+    ).unwrap());
 
-    spawner.must_spawn(power_led_task(
+    spawner.spawn(power_led_task(
         p.PA2,
         p.PA7,
         gps_reading_watch.receiver().unwrap(),
-    ));
-    spawner.must_spawn(periodic_beep_task(buzzer_pubsub));
+    ).unwrap());
+    spawner.spawn(periodic_beep_task(buzzer_pubsub).unwrap());
 
-    spawner.must_spawn(adc_task(p.ADC1, p.PB0, battery_v_watch));
-    spawner.must_spawn(pyro_task(
+    spawner.spawn(adc_task(p.ADC1, p.PB0, battery_v_watch).unwrap());
+    spawner.spawn(pyro_task(
         p.PE9,
         p.PE13,
         p.EXTI13,
@@ -293,15 +293,15 @@ async fn low_prio_main(
         p.EXTI12,
         continuity_watch,
         fire_signal,
-    ));
-    spawner.must_spawn(gps_task(
+    ).unwrap());
+    spawner.spawn(gps_task(
         p.USART1,
         p.PA10,
         p.PB14,
         gps_reading_watch.sender(),
         vl_status,
-    ));
-    spawner.must_spawn(vlp_avionics_daemon_task(
+    ).unwrap());
+    spawner.spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
         VLP_KEY.try_into().unwrap(),
         LORA_CONFIG.clone(),
@@ -319,7 +319,7 @@ async fn low_prio_main(
         p.PA8,
         p.DMA1_CH3,
         p.DMA1_CH2,
-    ));
+    ).unwrap());
     let (can_sender, can_receiver, can_central) = start_can_bus_low_prio_tasks(
         &spawner,
         can_tx,
@@ -330,7 +330,7 @@ async fn low_prio_main(
     )
     .await;
 
-    spawner.must_spawn(receive_vlp_task(
+    spawner.spawn(receive_vlp_task(
         vlp_avionics_client,
         avionics_mode_watch,
         fire_signal,
@@ -338,25 +338,25 @@ async fn low_prio_main(
         buzzer_pubsub,
         can_sender,
         can_central,
-    ));
+    ).unwrap());
 
-    spawner.must_spawn(broadcast_imu_baro_measurement_task(
+    spawner.spawn(broadcast_imu_baro_measurement_task(
         imu_baro_reading_pubsub,
         can_sender,
         unix_clock,
-    ));
-    spawner.must_spawn(broadcast_mag_measurement_task(
+    ).unwrap());
+    spawner.spawn(broadcast_mag_measurement_task(
         mag_reading_pubsub,
         can_sender,
         unix_clock,
-    ));
-    spawner.must_spawn(amp_control_task(can_sender, amp_control_watch));
+    ).unwrap());
+    spawner.spawn(amp_control_task(can_sender, amp_control_watch).unwrap());
 
     let flight_data_channel = singleton!(
         : tasks::data_logger::FlightDataChannel = tasks::data_logger::FlightDataChannel::new()
     )
     .unwrap();
-    spawner.must_spawn(tasks::data_logger::data_logger(
+    spawner.spawn(tasks::data_logger::data_logger(
         imu_baro_reading_pubsub,
         mag_reading_pubsub,
         gps_reading_watch,
@@ -364,9 +364,10 @@ async fn low_prio_main(
         continuity_watch,
         flight_stage,
         avionics_mode_watch,
+        vl_status,
         flight_data_channel,
-    ));
-    spawner.must_spawn(tasks::sd_card_writer::sd_card_writer(
+    ).unwrap());
+    spawner.spawn(tasks::sd_card_writer::sd_card_writer(
         p.SDMMC1,
         p.PC12,
         p.PD2,
@@ -378,10 +379,10 @@ async fn low_prio_main(
         storage_cmd,
         storage_resp,
         vl_status,
-    ));
+    ).unwrap());
 
     if cfg!(not(debug_assertions)) {
-        spawner.must_spawn(watchdog_task(p.IWDG1));
+        spawner.spawn(watchdog_task(p.IWDG1).unwrap());
     } else {
         defmt::warn!("Watchdog is disabled in debug build");
     }

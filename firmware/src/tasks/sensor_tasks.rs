@@ -12,16 +12,20 @@ use embassy_futures::{
 };
 use embassy_stm32::{
     Peri,
-    adc::{self, Adc, AdcChannel as _},
+    adc::{self, Adc},
     bind_interrupts,
+    dma,
+    exti,
     exti::ExtiInput,
     gpio::{Level, Output, Pull, Speed},
     i2c::{self, Config as I2cConfig, Error as I2cError, I2c},
+    interrupt,
+    mode::Async,
     peripherals::{
         ADC1, DMA1_CH4, DMA1_CH5, DMA1_CH6, DMA1_CH7, DMA2_CH0, DMA2_CH1, EXTI14, I2C2, PA5, PA6,
         PB0, PB10, PB11, PC6, PC13, PC14, PD7, PE2, PE5, PE6, SPI1, SPI4,
     },
-    spi::{Config as SpiConfig, Spi},
+    spi::{self, Config as SpiConfig, Spi},
     time::Hertz,
 };
 use embassy_sync::{
@@ -38,6 +42,25 @@ use firmware_common_new::{
     sensor_reading::SensorReading,
     time::BootTimestamp,
 };
+
+bind_interrupts!(struct Spi4Irqs {
+    DMA2_STREAM0 => dma::InterruptHandler<DMA2_CH0>;
+    DMA2_STREAM1 => dma::InterruptHandler<DMA2_CH1>;
+});
+
+bind_interrupts!(struct Spi1Irqs {
+    DMA1_STREAM4 => dma::InterruptHandler<DMA1_CH4>;
+    DMA1_STREAM5 => dma::InterruptHandler<DMA1_CH5>;
+});
+
+use super::exti15_10_irqs::ExtI15_10Irqs;
+
+bind_interrupts!(struct I2c2Irqs {
+    I2C2_EV => i2c::EventInterruptHandler<I2C2>;
+    I2C2_ER => i2c::ErrorInterruptHandler<I2C2>;
+    DMA1_STREAM6 => dma::InterruptHandler<DMA1_CH6>;
+    DMA1_STREAM7 => dma::InterruptHandler<DMA1_CH7>;
+});
 
 pub type IMUBaroReadingPubSub = PubSubChannel<
     CriticalSectionRawMutex,
@@ -84,13 +107,14 @@ pub async fn imu_baro_task(
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = Hertz(1_000_000);
 
-        let spi4 = singleton!(: Mutex<NoopRawMutex, Spi<'static, embassy_stm32::mode::Async>> = Mutex::new(Spi::new(
+        let spi4 = singleton!(: Mutex<NoopRawMutex, Spi<'static, Async, spi::mode::Master>> = Mutex::new(Spi::new(
             imu_spi4,
             imu_sck,
             imu_mosi,
             imu_miso,
             imu_tx_dma,
             imu_rx_dma,
+            Spi4Irqs,
             spi_config,
         ))).unwrap();
         let imu_spi_device = SpiDeviceWithConfig::new(
@@ -100,18 +124,19 @@ pub async fn imu_baro_task(
         );
         let mut imu = LSM6DSM::new(imu_spi_device);
         imu.reset().await.map_err(IMUOrBaroError::IMU)?;
-        let mut imu_int1 = ExtiInput::new(imu_int1, imu_int1_exti, Pull::None);
+        let mut imu_int1 = ExtiInput::new(imu_int1, imu_int1_exti, Pull::None, ExtI15_10Irqs);
         info!("IMU initialized");
 
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = Hertz(1_000_000);
-        let spi1 = singleton!(: Mutex<NoopRawMutex, Spi<'static, embassy_stm32::mode::Async>> = Mutex::new(Spi::new(
+        let spi1 = singleton!(: Mutex<NoopRawMutex, Spi<'static, Async, spi::mode::Master>> = Mutex::new(Spi::new(
             baro_spi1,
             baro_sck,
             baro_mosi,
             baro_miso,
             baro_tx_dma,
             baro_rx_dma,
+            Spi1Irqs,
             spi_config,
         ))).unwrap();
         let baro_spi_device = SpiDeviceWithConfig::new(
@@ -205,7 +230,7 @@ async fn read_baro_low_power_loop<B: SpiDevice>(
 }
 
 async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
-    imu_int1: &mut ExtiInput<'static>,
+    imu_int1: &mut ExtiInput<'static, Async>,
     imu: &mut LSM6DSM<I>,
     baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
@@ -227,7 +252,7 @@ async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
 }
 
 pub type MagReadingPubSub =
-    PubSubChannel<CriticalSectionRawMutex, SensorReading<BootTimestamp, MagData>, 10, 1, 1>;
+    PubSubChannel<CriticalSectionRawMutex, SensorReading<BootTimestamp, MagData>, 10, 2, 1>;
 
 #[embassy_executor::task]
 pub async fn mag_task(
@@ -250,17 +275,12 @@ pub async fn mag_task(
     let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
 
     let result: Result<!, I2cError> = try {
-        bind_interrupts!(struct Irqs {
-            I2C2_EV => i2c::EventInterruptHandler<I2C2>;
-            I2C2_ER => i2c::ErrorInterruptHandler<I2C2>;
-        });
-
         let mut config = I2cConfig::default();
         config.sda_pullup = true;
         config.scl_pullup = true;
         config.frequency = Hertz(400_000);
         let i2c: I2c<'_, embassy_stm32::mode::Async, i2c::Master> =
-            I2c::new(i2c, scl, sda, Irqs, tx_dma, rx_dma, config);
+            I2c::new(i2c, scl, sda, tx_dma, rx_dma, I2c2Irqs, config);
         let mut mag = LIS2MDL::new(i2c);
         mag.reset().await?;
         info!("Magnetometer initialized");
@@ -320,10 +340,14 @@ pub async fn adc_task(
     battery_v_pin: Peri<'static, PB0>,
     battery_v_watch: &'static BatteryVWatch,
 ) {
-    let mut adc = Adc::new(adc1);
-    adc.set_resolution(adc::Resolution::BITS12V);
-    adc.set_sample_time(adc::SampleTime::CYCLES810_5);
-    let mut bat_v_m = battery_v_pin.degrade_adc();
+    let mut adc = Adc::new_with_config(
+        adc1,
+        adc::AdcConfig {
+            resolution: Some(adc::Resolution::Bits12),
+            ..Default::default()
+        },
+    );
+    let mut battery_v_pin = battery_v_pin;
 
     let mut read_battery_voltage = || {
         let vrefint = 1.21f32;
@@ -334,7 +358,7 @@ pub async fn adc_task(
         let ratio = vrefint / vrefint_raw as f32;
 
         // TODO: move to async?
-        let pb0_raw = adc.blocking_read(&mut bat_v_m);
+        let pb0_raw = adc.blocking_read(&mut battery_v_pin, adc::SampleTime::Cycles645);
         let pb0 = pb0_raw as f32 * ratio;
         let batt_v = pb0 / 0.161;
         batt_v

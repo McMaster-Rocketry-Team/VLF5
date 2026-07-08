@@ -1,0 +1,2 @@
+# VLF5 WinUSB flight-log interface (rocket-cli list/download/clear-flight-log)
+SUBSYSTEM=="usb", ATTR{idVendor}=="c0de", ATTR{idProduct}=="cafe", MODE="0666", GROUP="plugdev"

@@ -38,7 +38,6 @@ use stm32_device_signature::device_id;
 
 use crate::{
     FlightStageMutex, VLStatusMutex,
-    bootloader::{BootOption, configure_next_boot},
     can_central::CanCentral,
     tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
 };
@@ -135,15 +134,15 @@ pub async fn start_can_bus_low_prio_tasks(
         singleton!(: CanReceiver<NoopRawMutex, 4, 3> = CanReceiver::new(can_node_id)).unwrap();
     let can_central = singleton!(: CanCentral<NoopRawMutex> = CanCentral::new()).unwrap();
 
-    spawner.must_spawn(can_bus_tx_task(can_sender, tx));
-    spawner.must_spawn(can_bus_rx_task(can_receiver, rx, vl_status));
-    spawner.must_spawn(node_status_task(can_sender, flight_stage, battery_v_watch, vl_status));
+    spawner.spawn(can_bus_tx_task(can_sender, tx).unwrap());
+    spawner.spawn(can_bus_rx_task(can_receiver, rx, vl_status).unwrap());
+    spawner.spawn(node_status_task(can_sender, flight_stage, battery_v_watch, vl_status).unwrap());
     let can_receiver_sub = can_receiver.subscriber().unwrap();
-    spawner.must_spawn(can_message_receive_task(
+    spawner.spawn(can_message_receive_task(
         can_node_id,
         can_central,
         can_receiver_sub,
-    ));
+    ).unwrap());
 
     (can_sender, can_receiver, can_central)
 }
@@ -267,11 +266,6 @@ async fn can_message_receive_task(
         match data.message {
             CanBusMessageEnum::Reset(reset_message) => {
                 if reset_message.node_id == self_can_id || reset_message.reset_all {
-                    configure_next_boot(if reset_message.into_bootloader {
-                        BootOption::Bootloader
-                    } else {
-                        BootOption::Application
-                    });
                     cortex_m::peripheral::SCB::sys_reset();
                 }
             }

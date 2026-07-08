@@ -10,7 +10,9 @@ mod clock_config;
 use crate::clock_config::vlf5_clock_config;
 use embassy_stm32::{
     bind_interrupts,
+    dma,
     gpio::AnyPin,
+    mode::Async,
     peripherals::{PA7, PA11, PA12, USB_OTG_FS},
     usb::Driver,
 };
@@ -28,12 +30,13 @@ use cortex_m::singleton;
 use defmt::{error, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_executor::Spawner;
-use embassy_stm32::exti::ExtiInput;
+use embassy_stm32::exti::{self, ExtiInput};
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
+use embassy_stm32::interrupt;
 use embassy_stm32::peripherals::{
     DMA1_CH2, DMA1_CH3, EXTI1, EXTI4, PA8, PB3, PB4, PC7, PD0, PD1, PD4, PD5, PD6, SPI3,
 };
-use embassy_stm32::spi::{Config as SpiConfig, Spi};
+use embassy_stm32::spi::{self, Config as SpiConfig, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::{Peri, peripherals::IWDG1, wdg::IndependentWatchdog};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
@@ -48,13 +51,24 @@ use lora_phy::{
     sx126x::{DeviceSel, Sx126xVariant},
 };
 
+
+bind_interrupts!(struct Spi3Irqs {
+    DMA1_STREAM2 => dma::InterruptHandler<DMA1_CH2>;
+    DMA1_STREAM3 => dma::InterruptHandler<DMA1_CH3>;
+});
+
+bind_interrupts!(struct LoraExtiIrqs {
+    EXTI4 => exti::InterruptHandler<interrupt::typelevel::EXTI4>;
+    EXTI1 => exti::InterruptHandler<interrupt::typelevel::EXTI1>;
+});
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_stm32::init(vlf5_clock_config());
     info!("Hello VLF5 GCM!");
 
     if cfg!(not(debug_assertions)) {
-        spawner.must_spawn(watchdog_task(p.IWDG1));
+        spawner.spawn(watchdog_task(p.IWDG1).unwrap());
     } else {
         defmt::warn!("Watchdog is disabled in debug build");
     }
@@ -100,11 +114,11 @@ impl HalfDuplexSerial for USBSerial {
     type Error = EndpointError;
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        self.1.read(buf).await
+        self.1.read(buf).await.map_err(|_| EndpointError::BufferOverflow)
     }
 
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        self.0.write(buf).await
+        self.0.write(buf).await.map_err(|_| EndpointError::BufferOverflow)
     }
 
     async fn clear_read_buffer(&mut self) -> Result<(), Self::Error> {
@@ -152,7 +166,7 @@ pub async fn start_usb_tasks(
 
     let class = CdcAcmClass::new(&mut builder, state, 64);
 
-    spawner.must_spawn(usb_task(builder.build()));
+    spawner.spawn(usb_task(builder.build()).unwrap());
 
     class
 }
@@ -177,10 +191,10 @@ pub struct LoraRpc<'a> {
             SpiDeviceWithConfig<
                 'static,
                 NoopRawMutex,
-                Spi<'static, embassy_stm32::mode::Async>,
+                Spi<'static, Async, spi::mode::Master>,
                 Output<'static>,
             >,
-            GenericSx126xInterfaceVariant<Output<'static>, ExtiInput<'static>>,
+            GenericSx126xInterfaceVariant<Output<'static>, ExtiInput<'static, Async>>,
             E22,
         >,
         Delay,
@@ -208,13 +222,13 @@ impl<'a> LoraRpc<'a> {
     ) -> Self {
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = Hertz(1_000_000);
-        let spi3 = singleton!(: Mutex<NoopRawMutex, Spi<'static, embassy_stm32::mode::Async>> = Mutex::<NoopRawMutex, _>::new(Spi::new(
-            spi3, sck, mosi, miso, tx_dma, rx_dma, spi_config,
+        let spi3 = singleton!(: Mutex<NoopRawMutex, Spi<'static, Async, spi::mode::Master>> = Mutex::<NoopRawMutex, _>::new(Spi::new(
+            spi3, sck, mosi, miso, tx_dma, rx_dma, Spi3Irqs, spi_config,
         ))).unwrap();
         let lora_spi_device: SpiDeviceWithConfig<
             'static,
             NoopRawMutex,
-            Spi<'static, embassy_stm32::mode::Async>,
+            Spi<'static, Async, spi::mode::Master>,
             Output<'static>,
         > = SpiDeviceWithConfig::new(spi3, Output::new(cs, Level::High, Speed::High), spi_config);
 
@@ -226,8 +240,8 @@ impl<'a> LoraRpc<'a> {
         };
         let iv = GenericSx126xInterfaceVariant::new(
             Output::new(reset, Level::High, Speed::Low),
-            ExtiInput::new(dio1, dio1_exti, Pull::Down),
-            ExtiInput::new(busy, busy_exti, Pull::Down),
+            ExtiInput::new(dio1, dio1_exti, Pull::Down, LoraExtiIrqs),
+            ExtiInput::new(busy, busy_exti, Pull::Down, LoraExtiIrqs),
             Some(Output::new(rxen, Level::High, Speed::High)),
             Some(Output::new(txen, Level::High, Speed::High)),
         )
@@ -293,8 +307,7 @@ impl<'a> LoraRpcServer for LoraRpc<'a> {
         match result {
             Ok(value) => {
                 self.spawner
-                    .spawn(blink_led_once(unsafe { PA7::steal().into() }))
-                    .ok();
+                    .spawn(blink_led_once(unsafe { PA7::steal().into() }).unwrap());
                 RxResponse {
                     result: LoraRpcRxResult::Success {
                         len: value.0,
@@ -343,8 +356,7 @@ impl<'a> LoraRpcServer for LoraRpc<'a> {
             warn!("{}", e);
         } else {
             self.spawner
-                .spawn(blink_led_once(unsafe { PA8::steal().into() }))
-                .ok();
+                .spawn(blink_led_once(unsafe { PA8::steal().into() }).unwrap());
         }
 
         TxResponse {
@@ -366,16 +378,14 @@ impl<'a> LoraRpcServer for LoraRpc<'a> {
             };
         } else {
             self.spawner
-                .spawn(blink_led_once(unsafe { PA8::steal().into() }))
-                .ok();
+                .spawn(blink_led_once(unsafe { PA8::steal().into() }).unwrap());
         }
 
         let rx_result = self.rx(rx_timeout_ms).await;
 
         if matches!(rx_result.result, LoraRpcRxResult::Success { .. }) {
             self.spawner
-                .spawn(blink_led_once(unsafe { PA7::steal().into() }))
-                .ok();
+                .spawn(blink_led_once(unsafe { PA7::steal().into() }).unwrap());
         }
 
         return TxThenRxResponse {
