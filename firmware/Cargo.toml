@@ -62,9 +62,30 @@ micromath = "2.1.0"
 embassy-usb = { git = "https://github.com/embassy-rs/embassy.git", features = [
     "defmt",
 ] }
+rkyv = { version = "0.8.10", default-features = false, features = [
+    "pointer_width_32",
+] }
 
+# Local embassy copy with H7 SDMMC IDMA fix (DBCKEND never fires, embassy #4723).
+# Populate with: git clone --depth 1 https://github.com/embassy-rs/embassy.git vendor/embassy
+# then apply the complete_datapath_transfer fix in embassy-stm32/src/sdmmc/mod.rs.
 [patch.crates-io]
-embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
+embassy-sync = { path = "vendor/embassy/embassy-sync" }
+
+[patch."https://github.com/embassy-rs/embassy.git"]
+embassy-embedded-hal = { path = "vendor/embassy/embassy-embedded-hal" }
+embassy-executor = { path = "vendor/embassy/embassy-executor" }
+embassy-executor-macros = { path = "vendor/embassy/embassy-executor-macros" }
+embassy-futures = { path = "vendor/embassy/embassy-futures" }
+embassy-hal-internal = { path = "vendor/embassy/embassy-hal-internal" }
+embassy-stm32 = { path = "vendor/embassy/embassy-stm32" }
+embassy-sync = { path = "vendor/embassy/embassy-sync" }
+embassy-time = { path = "vendor/embassy/embassy-time" }
+embassy-time-driver = { path = "vendor/embassy/embassy-time-driver" }
+embassy-time-queue-utils = { path = "vendor/embassy/embassy-time-queue-utils" }
+embassy-usb = { path = "vendor/embassy/embassy-usb" }
+embassy-usb-driver = { path = "vendor/embassy/embassy-usb-driver" }
+embassy-usb-synopsys-otg = { path = "vendor/embassy/embassy-usb-synopsys-otg" }
 
 
 [[bin]]

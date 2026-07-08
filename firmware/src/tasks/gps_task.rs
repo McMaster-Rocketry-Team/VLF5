@@ -31,7 +31,7 @@ pub async fn gps_task(
         'static,
         CriticalSectionRawMutex,
         SensorReading<BootTimestamp, GPSData>,
-        3,
+        4,
     >,
     vl_status: &'static VLStatusMutex,
 ) {
