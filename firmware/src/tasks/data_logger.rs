@@ -8,21 +8,17 @@ use defmt::warn;
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::{Duration, Instant, Timer};
-use firmware_common_new::flight_data_record::FlightDataRecord;
+use firmware_common_new::flight_data_record::{
+    FlightDataImuRecord, FlightDataSlowRecord, LogRecord, VALID_BARO, VALID_BATTERY,
+    VALID_GPS_ALT, VALID_GPS_FIX, VALID_IMU, VALID_MAG,
+};
 
-/// Queue between the IMU-clocked logger and the SD writer. Sized for ~1 s of
-/// backlog at 416 Hz and worst-case ~40 ms SDIO stalls (see `sd_bench`).
+/// Queue between the IMU-clocked logger and the SD writer.
 pub const FLIGHT_DATA_CHANNEL_DEPTH: usize = 512;
-pub type FlightDataChannel = Channel<NoopRawMutex, FlightDataRecord, FLIGHT_DATA_CHANNEL_DEPTH>;
-
-pub const VALID_IMU: u8 = 1 << 0;
-pub const VALID_BARO: u8 = 1 << 1;
-pub const VALID_MAG: u8 = 1 << 2;
-pub const VALID_GPS_FIX: u8 = 1 << 3;
-pub const VALID_GPS_ALT: u8 = 1 << 4;
-pub const VALID_BATTERY: u8 = 1 << 5;
+pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNEL_DEPTH>;
 
 const IMU_TIMEOUT: Duration = Duration::from_millis(20);
+const SLOW_HEARTBEAT: Duration = Duration::from_secs(1);
 
 #[embassy_executor::task]
 pub async fn data_logger(
@@ -43,8 +39,10 @@ pub async fn data_logger(
     let mut continuity_receiver = continuity_watch.receiver().unwrap();
     let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
 
-    let mut record_count: u32 = 0;
+    let mut sequence: u32 = 0;
     let mut backlog_warned = false;
+    let mut last_slow: Option<FlightDataSlowRecord> = None;
+    let mut last_slow_emit = Instant::now();
 
     loop {
         if !avionics_mode
@@ -54,6 +52,7 @@ pub async fn data_logger(
         {
             avionics_mode.changed().await;
             backlog_warned = false;
+            last_slow = None;
             continue;
         }
 
@@ -72,10 +71,10 @@ pub async fn data_logger(
         let continuity_opt = continuity_receiver.try_get();
         let stage = flight_stage.lock(|r| *r.borrow());
 
-        let mut valid = 0u8;
+        let mut imu_valid = 0u8;
         let (acc, gyro) = match imu_opt {
             Some(imu) => {
-                valid |= VALID_IMU;
+                imu_valid |= VALID_IMU;
                 (
                     [imu.acc.x, imu.acc.y, imu.acc.z],
                     [imu.gyro.x, imu.gyro.y, imu.gyro.z],
@@ -85,22 +84,24 @@ pub async fn data_logger(
         };
         let (temperature, pressure) = match baro_opt {
             Some(b) => {
-                valid |= VALID_BARO;
+                imu_valid |= VALID_BARO;
                 (b.temperature, b.pressure)
             }
             None => (0.0, 0.0),
         };
         let mag = match mag_opt {
             Some(r) => {
-                valid |= VALID_MAG;
+                imu_valid |= VALID_MAG;
                 let m = r.data.mag;
                 [m.x, m.y, m.z]
             }
             None => [0.0; 3],
         };
+
+        let mut slow_valid = 0u8;
         let battery_voltage = match battery_opt {
             Some(r) => {
-                valid |= VALID_BATTERY;
+                slow_valid |= VALID_BATTERY;
                 r.data
             }
             None => 0.0,
@@ -109,10 +110,10 @@ pub async fn data_logger(
             Some(r) => {
                 let g = r.data;
                 if g.lat_lon.is_some() {
-                    valid |= VALID_GPS_FIX;
+                    slow_valid |= VALID_GPS_FIX;
                 }
                 if g.altitude.is_some() {
-                    valid |= VALID_GPS_ALT;
+                    slow_valid |= VALID_GPS_ALT;
                 }
                 (
                     g.lat_lon.unwrap_or((0.0, 0.0)),
@@ -136,16 +137,26 @@ pub async fn data_logger(
             None => 0,
         };
 
-        let record = FlightDataRecord {
-            record_count,
+        let sd_ok = vl_status.lock(|s| s.borrow().sd_ok);
+        if !sd_ok {
+            continue;
+        }
+
+        let imu_record = LogRecord::Imu(FlightDataImuRecord {
+            sequence,
             timestamp_us,
             acc,
             gyro,
             temperature,
             pressure,
             mag,
+            valid: imu_valid,
+        });
+        sequence = sequence.wrapping_add(1);
+
+        let slow_record = FlightDataSlowRecord {
+            timestamp_us,
             battery_voltage,
-            valid,
             lat_lon,
             altitude,
             num_of_fixed_satalites: num_sats,
@@ -154,15 +165,26 @@ pub async fn data_logger(
             pdop,
             flight_stage: stage,
             pyro_flags,
+            valid: slow_valid,
         };
-        record_count = record_count.wrapping_add(1);
 
-        let sd_ok = vl_status.lock(|s| s.borrow().sd_ok);
-        if !sd_ok {
-            continue;
+        let slow_changed = last_slow.as_ref() != Some(&slow_record);
+        let slow_due = last_slow_emit.elapsed() >= SLOW_HEARTBEAT;
+        let emit_slow = slow_changed || slow_due;
+
+        let mut send_failed = false;
+        if channel.try_send(imu_record).is_err() {
+            send_failed = true;
+        } else if emit_slow {
+            if channel.try_send(LogRecord::Slow(slow_record.clone())).is_err() {
+                send_failed = true;
+            } else {
+                last_slow = Some(slow_record);
+                last_slow_emit = Instant::now();
+            }
         }
 
-        if channel.try_send(record).is_err() {
+        if send_failed {
             if !backlog_warned {
                 warn!("data_logger: SD path busy, dropping flight record");
                 backlog_warned = true;

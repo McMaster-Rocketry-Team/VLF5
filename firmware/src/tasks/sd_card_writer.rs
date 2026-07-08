@@ -12,9 +12,9 @@ use embassy_stm32::{
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use firmware_common_new::flight_storage::{
-    BLOCK_SIZE, DATA_START_BLOCK, RECORDS_PER_BLOCK, RECORD_LEN, SUPERBLOCK_INDEX, USABLE_PER_BLOCK,
-    decode_superblock, encode_response_header, encode_superblock, finalize_data_block,
-    serialize_record,
+    BLOCK_SIZE, DATA_START_BLOCK, STORAGE_VERSION, SUPERBLOCK_INDEX, USABLE_PER_BLOCK,
+    count_records_in_bytes, decode_superblock, encode_response_header, encode_superblock,
+    finalize_data_block, serialize_log_record,
 };
 use heapless::Deque;
 
@@ -196,14 +196,9 @@ impl FlightLogger {
             .await
             .is_ok()
             && let Some(info) = decode_superblock(&*sb)
+            && info.storage_version == STORAGE_VERSION
             && info.block_count > 0
         {
-            let per_block = RECORDS_PER_BLOCK as u32;
-            let full_blocks = info.block_count - 1;
-            let mut records_in_last = info.record_count.saturating_sub(full_blocks * per_block);
-            if records_in_last == 0 || records_in_last > per_block {
-                records_in_last = per_block;
-            }
             let last_index = DATA_START_BLOCK + info.block_count - 1;
             let mut last = DataBlock::new();
             if read_block_timed(storage, last_index, &mut last)
@@ -211,10 +206,10 @@ impl FlightLogger {
                 .is_ok()
             {
                 empty.cur.copy_from_slice(&*last);
-                empty.cur_records = records_in_last;
-                empty.cur_offset = records_in_last as usize * RECORD_LEN;
+                empty.cur_offset = info.last_block_offset as usize;
+                empty.cur_records = count_records_in_bytes(&empty.cur, empty.cur_offset);
                 empty.write_index = last_index;
-                empty.record_count = full_blocks * per_block + records_in_last;
+                empty.record_count = info.record_count;
                 empty.last_persisted_offset = empty.cur_offset;
                 info!(
                     "Resuming log: {} records across {} blocks",
@@ -257,7 +252,11 @@ impl FlightLogger {
     }
 
     fn enqueue_superblock(&mut self) -> Result<(), ()> {
-        let raw = encode_superblock(self.record_count, self.block_count());
+        let raw = encode_superblock(
+            self.record_count,
+            self.block_count(),
+            self.cur_offset as u32,
+        );
         let mut block = [0u8; BLOCK_SIZE];
         block.copy_from_slice(&raw);
         self.push_job(SdWriteJob::Superblock { block })
@@ -567,8 +566,8 @@ pub async fn sd_card_writer(
                 if !card_alive {
                     continue;
                 }
-                let bytes = serialize_record(&record);
-                if logger.append(&bytes).is_err() {
+                let (bytes, len) = serialize_log_record(&record);
+                if logger.append(&bytes[..len]).is_err() {
                     warn!("SD queue full, dropping flight record");
                 }
             }

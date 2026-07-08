@@ -23,7 +23,7 @@ use embassy_stm32::{
     sdmmc::{self, Sdmmc},
 };
 use embassy_time::{Duration, Instant, Timer};
-use firmware_common_new::flight_storage::{BLOCK_SIZE, RECORD_LEN, USABLE_PER_BLOCK};
+use firmware_common_new::flight_storage::{BLOCK_SIZE, IMU_WIRE_LEN, USABLE_PER_BLOCK};
 use heapless::Deque;
 use sd_bench::{LatencyStats, WORST_CASE_WRITE_US};
 
@@ -63,16 +63,16 @@ impl QueuedLogger {
         }
     }
 
-    fn append(&mut self, record: &[u8; RECORD_LEN]) -> Result<(), ()> {
-        if self.cur_offset + RECORD_LEN > USABLE_PER_BLOCK {
+    fn append(&mut self, record: &[u8]) -> Result<(), ()> {
+        if self.cur_offset + record.len() > USABLE_PER_BLOCK {
             self.enqueue_current()?;
             self.write_index += 1;
             self.cur = [0u8; BLOCK_SIZE];
             self.cur_offset = 0;
             self.last_persisted_offset = 0;
         }
-        self.cur[self.cur_offset..self.cur_offset + RECORD_LEN].copy_from_slice(record);
-        self.cur_offset += RECORD_LEN;
+        self.cur[self.cur_offset..self.cur_offset + record.len()].copy_from_slice(record);
+        self.cur_offset += record.len();
         Ok(())
     }
 
@@ -157,7 +157,7 @@ async fn drain_one(
 async fn bench_logging_pattern(
     storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
     start_block: u32,
-    record: &[u8; RECORD_LEN],
+    record: &[u8],
     superblock: &[u8; BLOCK_SIZE],
     duration: Duration,
 ) -> LatencyStats {
@@ -245,8 +245,9 @@ async fn main(_spawner: Spawner) {
     crc.feed_bytes(&block[..USABLE_PER_BLOCK]);
     block[USABLE_PER_BLOCK..BLOCK_SIZE].copy_from_slice(&crc.read().to_le_bytes());
 
-    let mut record = [0u8; RECORD_LEN];
-    rng.async_fill_bytes(&mut record).await.unwrap();
+    let mut record = [0u8; IMU_WIRE_LEN];
+    record[0] = 0x01; // IMU tag
+    rng.async_fill_bytes(&mut record[1..]).await.unwrap();
 
     let mut superblock = [0u8; BLOCK_SIZE];
     superblock[..16].copy_from_slice(b"VLF5bench0000000");
@@ -265,7 +266,7 @@ async fn main(_spawner: Spawner) {
     let log = bench_logging_pattern(
         &mut storage,
         BENCH_BASE + BENCH_BLOCKS as u32,
-        &record,
+        &record[..],
         &superblock,
         LOGGING_DURATION,
     )
