@@ -18,4 +18,3 @@ compile_error!("hil-replay requires hil-dual or hil-single");
 pub mod gps_stub;
 pub mod pyro_monitor;
 pub mod sensor_replay;
-pub mod vlp_script;

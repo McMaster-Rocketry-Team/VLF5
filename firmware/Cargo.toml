@@ -104,6 +104,13 @@ path = "src/main_sd_test.rs"
 test = false
 bench = false
 
+# Baro noise-characterization bench (streams raw MS5607 over RTT; not flight fw).
+[[bin]]
+name = "baro_bench"
+path = "src/main_baro_bench.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true
