@@ -6,6 +6,9 @@ use embassy_stm32::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::PubSubChannel};
 use embassy_time::{Duration, Ticker, Timer};
 
+/// Set to `true` to silence the buzzer (messages are still drained).
+pub const DISABLE_BUZZER: bool = false;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuzzerTone {
     Low(
@@ -39,7 +42,12 @@ pub async fn buzzer_task(
     let mut buzzer_ctrl = Output::new(buzzer_ctrl, Level::Low, Speed::Low);
 
     loop {
-        let (frequency, duration, silent_duration) = match sub.next_message_pure().await {
+        let tone = sub.next_message_pure().await;
+        if DISABLE_BUZZER {
+            continue;
+        }
+
+        let (frequency, duration, silent_duration) = match tone {
             BuzzerTone::Low(duration, silent_duration) => (2600, duration, silent_duration),
             BuzzerTone::Mid(duration, silent_duration) => (2800, duration, silent_duration),
             BuzzerTone::High(duration, silent_duration) => (3000, duration, silent_duration),

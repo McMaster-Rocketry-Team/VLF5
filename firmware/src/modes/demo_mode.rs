@@ -1,7 +1,7 @@
 use core::f32::consts::PI;
 
 use crate::{
-    AvionicsModeWatch, FlightStageMutex, GPSReadingWatch,
+    AvionicsModeWatch, AirBrakesWatch, FlightStageMutex, GPSReadingWatch, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
@@ -38,6 +38,7 @@ pub async fn demo_mode(
     imu_baro_pubsub: &'static IMUBaroReadingPubSub,
     mut can_receiver_sub: CanReceiverSub,
     amp_control_watch: &'static AmpControlWatch,
+    air_brakes_watch: &'static AirBrakesWatch,
     flight_stage: &'static FlightStageMutex,
 ) {
     info!("enter demo mode");
@@ -113,6 +114,7 @@ pub async fn demo_mode(
         loop {
             let now_s = Instant::now().as_millis() as f32 / 1000.0;
             let airbrake_extension_percentage = (frequency * PI * 2.0 * now_s).sin() * 0.5 + 0.5;
+            publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
 
             ticker.next().await;

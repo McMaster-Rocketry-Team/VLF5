@@ -6,13 +6,13 @@ use embassy_stm32::{
     Peri, bind_interrupts,
     peripherals::{self, PC8, PC9, PC10, PC11, PC12, PD2, SDMMC1},
     sdmmc::{self, Sdmmc},
-    sdmmc::sd::{CmdBlock, DataBlock, StorageDevice},
+    sdmmc::sd::{Addressable, CmdBlock, DataBlock, StorageDevice},
     time::mhz,
 };
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use firmware_common_new::flight_storage::{
-    BLOCK_SIZE, DATA_START_BLOCK, STORAGE_VERSION, SUPERBLOCK_INDEX, USABLE_PER_BLOCK,
+    BLOCK_SIZE, DATA_START_BLOCK, MAX_WIRE_LEN, STORAGE_VERSION, SUPERBLOCK_INDEX, USABLE_PER_BLOCK,
     count_records_in_bytes, decode_superblock, encode_response_header, encode_superblock,
     finalize_data_block, serialize_log_record,
 };
@@ -101,6 +101,15 @@ enum DrainResult {
     Ok,
     Failed,
     Dead,
+}
+
+enum AppendError {
+    QueueFull,
+    CardFull,
+}
+
+fn card_max_block_index(storage: &StorageDevice<'_, 'static, sdmmc::sd::Card>) -> u32 {
+    (storage.card().size() / BLOCK_SIZE as u64).saturating_sub(1) as u32
 }
 
 async fn write_block_timed(
@@ -224,9 +233,21 @@ impl FlightLogger {
     }
 
     /// Buffer a record. Full blocks are queued for SDIO — never written inline.
-    fn append(&mut self, bytes: &[u8]) -> Result<(), ()> {
+    fn has_space(&self, bytes_len: usize, max_block_index: u32) -> bool {
+        let next_index = if self.cur_offset + bytes_len > USABLE_PER_BLOCK {
+            self.write_index.saturating_add(1)
+        } else {
+            self.write_index
+        };
+        next_index <= max_block_index
+    }
+
+    fn append(&mut self, bytes: &[u8], max_block_index: u32) -> Result<(), AppendError> {
+        if !self.has_space(bytes.len(), max_block_index) {
+            return Err(AppendError::CardFull);
+        }
         if self.cur_offset + bytes.len() > USABLE_PER_BLOCK {
-            self.enqueue_current_block()?;
+            self.enqueue_current_block().map_err(|_| AppendError::QueueFull)?;
             self.write_index += 1;
             self.cur = [0u8; BLOCK_SIZE];
             self.cur_offset = 0;
@@ -444,6 +465,27 @@ fn mark_card_offline(
     vl_status.lock(|s| s.borrow_mut().sd_ok = false);
 }
 
+async fn mark_card_full(
+    log_full: &mut bool,
+    logger: &mut FlightLogger,
+    storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+    io_failures: &mut u8,
+    vl_status: &VLStatusMutex,
+) {
+    if *log_full {
+        return;
+    }
+    warn!(
+        "SD card full ({} records, {} blocks); stopping flight logging",
+        logger.record_count,
+        logger.block_count()
+    );
+    let _ = logger.enqueue_flush();
+    let _ = logger.drain_all(storage, io_failures).await;
+    *log_full = true;
+    vl_status.lock(|s| s.borrow_mut().sd_ok = false);
+}
+
 async fn run_offline_loop(
     channel: &'static FlightDataChannel,
     storage_cmd: &'static StorageCmdSignal,
@@ -518,8 +560,17 @@ pub async fn sd_card_writer(
     };
 
     vl_status.lock(|s| s.borrow_mut().sd_ok = true);
+    let max_block_index = card_max_block_index(&storage);
     let mut logger = FlightLogger::new(&mut storage).await;
     let mut card_alive = true;
+    let mut log_full = !logger.has_space(MAX_WIRE_LEN, max_block_index);
+
+    if log_full {
+        warn!("SD card log already occupies all available blocks");
+        vl_status.lock(|s| s.borrow_mut().sd_ok = false);
+    } else {
+        info!("SD log capacity: blocks {}..={}", DATA_START_BLOCK, max_block_index);
+    }
 
     let mut flush_ticker = Ticker::every(FLUSH_INTERVAL);
     let mut io_failures = 0u8;
@@ -546,6 +597,7 @@ pub async fn sd_card_writer(
 
         if go_offline {
             mark_card_offline(&mut card_alive, &mut logger, vl_status);
+            log_full = true;
             continue;
         }
 
@@ -557,22 +609,39 @@ pub async fn sd_card_writer(
                         .await
                     {
                         mark_card_offline(&mut card_alive, &mut logger, vl_status);
+                        log_full = true;
+                    } else if matches!(cmd, StorageCommand::Clear) {
+                        log_full = false;
+                        vl_status.lock(|s| s.borrow_mut().sd_ok = true);
                     }
                 } else {
                     logger.handle_command_offline(cmd, storage_resp).await;
                 }
             }
             Either3::Second(record) => {
-                if !card_alive {
+                if !card_alive || log_full {
                     continue;
                 }
                 let (bytes, len) = serialize_log_record(&record);
-                if logger.append(&bytes[..len]).is_err() {
-                    warn!("SD queue full, dropping flight record");
+                match logger.append(&bytes[..len], max_block_index) {
+                    Ok(()) => {}
+                    Err(AppendError::CardFull) => {
+                        mark_card_full(
+                            &mut log_full,
+                            &mut logger,
+                            &mut storage,
+                            &mut io_failures,
+                            vl_status,
+                        )
+                        .await;
+                    }
+                    Err(AppendError::QueueFull) => {
+                        warn!("SD queue full, dropping flight record");
+                    }
                 }
             }
             Either3::Third(_) => {
-                if card_alive {
+                if card_alive && !log_full {
                     if logger.enqueue_flush().is_err() {
                         warn!("SD flush enqueue failed (queue full)");
                     }

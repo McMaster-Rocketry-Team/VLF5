@@ -33,9 +33,9 @@ use firmware_common_new::{
 use nalgebra::Vector2;
 
 use crate::{
-    AvionicsModeWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE, FireSignal,
-    FlightStageMutex, GPSReadingWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
-    ROCKET_PARAMETERS, SetTargetWatch,
+    AvionicsModeWatch, AirBrakesWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
+    FireSignal, FlightStageMutex, GPSReadingWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    ROCKET_PARAMETERS, SetTargetWatch, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
@@ -61,6 +61,7 @@ pub async fn armed_mode(
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static FlightStageMutex,
     amp_control_watch: &'static AmpControlWatch,
+    air_brakes_watch: &'static AirBrakesWatch,
     unix_clock: &'static UnixClock,
 ) {
     info!("enter armed mode");
@@ -462,6 +463,7 @@ pub async fn armed_mode(
     };
 
     let control_airbrakes_fut = async {
+        publish_airbrakes_commanded(air_brakes_watch, 0.0);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;
@@ -497,6 +499,7 @@ pub async fn armed_mode(
             } = state
             {
                 let airbrake_extension_percentage = airbrakes_mpc.update(altitude_asl, velocity);
+                publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
                 can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
                 packet_builder.update(|packet| {
                     packet.air_brakes_commanded_extension_percentage =
@@ -509,6 +512,7 @@ pub async fn armed_mode(
             ticker.next().await;
         }
 
+        publish_airbrakes_commanded(air_brakes_watch, 0.0);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;

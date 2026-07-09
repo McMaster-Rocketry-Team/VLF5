@@ -37,7 +37,7 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    FlightStageMutex, VLStatusMutex,
+    AirBrakesWatch, FlightStageMutex, VLStatusMutex,
     can_central::CanCentral,
     tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
 };
@@ -118,6 +118,7 @@ pub async fn start_can_bus_low_prio_tasks(
     rx: CanRx<'static>,
     flight_stage: &'static FlightStageMutex,
     battery_v_watch: &'static BatteryVWatch,
+    air_brakes_watch: &'static AirBrakesWatch,
     vl_status: &'static VLStatusMutex,
 ) -> (
     &'static CanSender<NoopRawMutex>,
@@ -141,6 +142,7 @@ pub async fn start_can_bus_low_prio_tasks(
     spawner.spawn(can_message_receive_task(
         can_node_id,
         can_central,
+        air_brakes_watch,
         can_receiver_sub,
     ).unwrap());
 
@@ -256,6 +258,7 @@ async fn node_status_task(
 async fn can_message_receive_task(
     self_can_id: u16,
     can_central: &'static CanCentral<NoopRawMutex>,
+    air_brakes_watch: &'static AirBrakesWatch,
     mut can_receiver_sub: CanReceiverSub,
 ) {
     loop {
@@ -271,6 +274,12 @@ async fn can_message_receive_task(
             }
             CanBusMessageEnum::NodeStatus(node_status_message) => {
                 can_central.on_receive_node_status(timestamp_us, &data.id, &node_status_message)
+            }
+            CanBusMessageEnum::IcarusStatus(message) => {
+                let mut state = air_brakes_watch.try_get().unwrap_or_default();
+                state.actual_extension = message.actual_extension_percentage();
+                state.actual_valid = true;
+                let _ = air_brakes_watch.sender().send(state);
             }
             _ => {}
         }

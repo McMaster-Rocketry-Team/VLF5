@@ -57,7 +57,7 @@ use crate::{
     },
     tasks::{
         amp_control_task::{AmpControlWatch, amp_control_task},
-        buzzer_task::{BuzzerPubSub, BuzzerTone, buzzer_task},
+        buzzer_task::{BuzzerPubSub, BuzzerTone, DISABLE_BUZZER, buzzer_task},
         gps_task::gps_task,
         pyro_task::{ContinuityUpdate, pyro_task},
         sensor_tasks::{
@@ -118,6 +118,24 @@ pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
+
+/// Latest airbrakes extension for SD logging (commanded + Icarus-reported actual).
+#[derive(Clone, Copy, Default, defmt::Format)]
+pub struct AirBrakesLogState {
+    pub commanded_extension: f32,
+    pub actual_extension: f32,
+    pub commanded_valid: bool,
+    pub actual_valid: bool,
+}
+
+pub type AirBrakesWatch = Watch<NoopRawMutex, AirBrakesLogState, 2>;
+
+pub fn publish_airbrakes_commanded(watch: &AirBrakesWatch, extension: f32) {
+    let mut state = watch.try_get().unwrap_or_default();
+    state.commanded_extension = extension;
+    state.commanded_valid = true;
+    let _ = watch.sender().send(state);
+}
 
 #[entry]
 fn main() -> ! {
@@ -250,6 +268,7 @@ async fn low_prio_main(
         singleton!(: FlightStageMutex = BlockingMutex::new(RefCell::new(FlightStage::Armed)))
             .unwrap();
     let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
+    let air_brakes_watch = singleton!(: AirBrakesWatch = AirBrakesWatch::new()).unwrap();
 
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
@@ -279,7 +298,9 @@ async fn low_prio_main(
         p.PA7,
         gps_reading_watch.receiver().unwrap(),
     ).unwrap());
-    spawner.spawn(periodic_beep_task(buzzer_pubsub).unwrap());
+    if !DISABLE_BUZZER {
+        spawner.spawn(periodic_beep_task(buzzer_pubsub).unwrap());
+    }
 
     spawner.spawn(adc_task(p.ADC1, p.PB0, battery_v_watch).unwrap());
     spawner.spawn(pyro_task(
@@ -326,6 +347,7 @@ async fn low_prio_main(
         can_rx,
         flight_stage,
         battery_v_watch,
+        air_brakes_watch,
         vl_status,
     )
     .await;
@@ -362,6 +384,7 @@ async fn low_prio_main(
         gps_reading_watch,
         battery_v_watch,
         continuity_watch,
+        air_brakes_watch,
         flight_stage,
         avionics_mode_watch,
         vl_status,
@@ -387,9 +410,11 @@ async fn low_prio_main(
         defmt::warn!("Watchdog is disabled in debug build");
     }
 
-    buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
-    buzzer_pubsub.publish_immediate(BuzzerTone::Mid(250, 100));
-    buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 100));
+    if !DISABLE_BUZZER {
+        buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
+        buzzer_pubsub.publish_immediate(BuzzerTone::Mid(250, 100));
+        buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 100));
+    }
 
     loop {
         match avionics_mode_watch.try_get().unwrap() {
@@ -409,6 +434,7 @@ async fn low_prio_main(
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
                     amp_control_watch,
+                    air_brakes_watch,
                     unix_clock,
                 )
                 .await;
@@ -469,6 +495,7 @@ async fn low_prio_main(
                     imu_baro_reading_pubsub,
                     can_receiver.subscriber().unwrap(),
                     amp_control_watch,
+                    air_brakes_watch,
                     flight_stage,
                 )
                 .await

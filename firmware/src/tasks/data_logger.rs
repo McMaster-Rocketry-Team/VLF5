@@ -1,5 +1,6 @@
 use crate::{
-    AvionicsModeWatch, ContinuityWatch, FlightStageMutex, GPSReadingWatch, VLStatusMutex,
+    AirBrakesWatch, AvionicsModeWatch, ContinuityWatch, FlightStageMutex, GPSReadingWatch,
+    VLStatusMutex,
     tasks::sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
     utils::drain_latest,
 };
@@ -9,8 +10,9 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::flight_data_record::{
-    FlightDataImuRecord, FlightDataSlowRecord, LogRecord, VALID_BARO, VALID_BATTERY,
-    VALID_GPS_ALT, VALID_GPS_FIX, VALID_IMU, VALID_MAG,
+    FlightDataImuRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
+    VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
+    VALID_IMU, VALID_MAG,
 };
 
 /// Queue between the IMU-clocked logger and the SD writer.
@@ -27,6 +29,7 @@ pub async fn data_logger(
     gps_watch: &'static GPSReadingWatch,
     battery_watch: &'static BatteryVWatch,
     continuity_watch: &'static ContinuityWatch,
+    air_brakes_watch: &'static AirBrakesWatch,
     flight_stage: &'static FlightStageMutex,
     avionics_mode_watch: &'static AvionicsModeWatch,
     vl_status: &'static VLStatusMutex,
@@ -69,6 +72,7 @@ pub async fn data_logger(
         let gps_opt = gps_receiver.try_get();
         let battery_opt = battery_receiver.try_get();
         let continuity_opt = continuity_receiver.try_get();
+        let airbrakes_opt = air_brakes_watch.try_get();
         let stage = flight_stage.lock(|r| *r.borrow());
 
         let mut imu_valid = 0u8;
@@ -136,6 +140,19 @@ pub async fn data_logger(
             }
             None => 0,
         };
+        let (air_brakes_commanded_extension, air_brakes_actual_extension) =
+            match airbrakes_opt {
+                Some(ab) => {
+                    if ab.commanded_valid {
+                        slow_valid |= VALID_AIRBRAKES_COMMANDED;
+                    }
+                    if ab.actual_valid {
+                        slow_valid |= VALID_AIRBRAKES_ACTUAL;
+                    }
+                    (ab.commanded_extension, ab.actual_extension)
+                }
+                None => (0.0, 0.0),
+            };
 
         let sd_ok = vl_status.lock(|s| s.borrow().sd_ok);
         if !sd_ok {
@@ -165,6 +182,8 @@ pub async fn data_logger(
             pdop,
             flight_stage: stage,
             pyro_flags,
+            air_brakes_commanded_extension,
+            air_brakes_actual_extension,
             valid: slow_valid,
         };
 
