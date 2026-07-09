@@ -9,6 +9,7 @@ use core::cell::RefCell;
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use air_brakes_controller_core::{FlightProfile, RocketParameters};
+#[cfg(not(feature = "hil-replay"))]
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -25,9 +26,9 @@ use embassy_sync::{
         Mutex as BlockingMutex,
         raw::{CriticalSectionRawMutex, NoopRawMutex},
     },
+    channel::Channel,
     mutex::Mutex,
     pubsub::PubSubBehavior as _,
-    signal::Signal,
     watch::{self, Watch},
 };
 use embassy_time::{Duration, Instant, Ticker, Timer};
@@ -43,8 +44,10 @@ use firmware_common_new::{
     gps::GPSData,
     sensor_reading::SensorReading,
     time::BootTimestamp,
-    vlp::{client::VLPAvionics, lora_config::LoraConfig, packets::fire_pyro::PyroSelect},
+    vlp::{client::VLPAvionics, packets::fire_pyro::PyroSelect},
 };
+#[cfg(not(feature = "hil-replay"))]
+use firmware_common_new::vlp::lora_config::LoraConfig;
 
 use crate::{
     avionics_mode::AvionicsMode,
@@ -58,15 +61,15 @@ use crate::{
     tasks::{
         amp_control_task::{AmpControlWatch, amp_control_task},
         buzzer_task::{BuzzerPubSub, BuzzerTone, DISABLE_BUZZER, buzzer_task},
-        gps_task::gps_task,
-        pyro_task::{ContinuityUpdate, pyro_task},
-        sensor_tasks::{
-            BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub, adc_task, imu_baro_task,
-            mag_task,
-        },
+        pyro_task::ContinuityUpdate,
+        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub, adc_task, mag_task},
         unix_clock::{UnixClock, unix_clock_task},
-        vlp_avionics_daemon_task::vlp_avionics_daemon_task,
     },
+};
+#[cfg(not(feature = "hil-replay"))]
+use crate::tasks::{
+    gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
+    vlp_avionics_daemon_task::vlp_avionics_daemon_task,
 };
 use receive_vlp_task::receive_vlp_task;
 
@@ -75,6 +78,8 @@ mod can;
 mod can_central;
 mod clock_config;
 mod drivers;
+#[cfg(feature = "hil-replay")]
+mod hil;
 mod modes;
 mod receive_vlp_task;
 mod tasks;
@@ -83,7 +88,9 @@ mod utils;
 mod usb_handler;
 mod watchdog;
 
+#[cfg(not(feature = "hil-replay"))]
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
+#[cfg(not(feature = "hil-replay"))]
 const LORA_CONFIG: LoraConfig = LoraConfig {
     frequency: 920_000_000,
     sf: 12,
@@ -96,9 +103,15 @@ pub const DROGUE_BULKHEAD_NODE_ID: u16 = 0x328;
 pub const OZYS_1_NODE_ID: u16 = 0x2B2;
 pub const OZYS_2_NODE_ID: u16 = 0x0E1;
 
-pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
-    ignition_detection_acc_threshold: 4.0 * 9.81,
-    drogue_chute_minimum_time_us: 1_000_000,
+#[cfg(feature = "hil-single")]
+pub const FLIGHT_PROFILE: FlightProfile = FlightProfile::Single {
+    minimum_deployment_altitude_agl: 2000.0,
+    drogue_delay_us: 0,
+    main_delay_us: 0,
+};
+
+#[cfg(not(feature = "hil-single"))]
+pub const FLIGHT_PROFILE: FlightProfile = FlightProfile::Dual {
     drogue_chute_minimum_altitude_agl: 2000.0,
     drogue_chute_delay_us: 0,
     main_chute_altitude_agl: 457.2,
@@ -116,7 +129,7 @@ pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTime
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
-pub type FireSignal = Signal<NoopRawMutex, PyroSelect>;
+pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
 
 /// Latest airbrakes extension for SD logging (commanded + Icarus-reported actual).
@@ -143,6 +156,19 @@ fn main() -> ! {
 
     let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
     let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
+    #[cfg(feature = "hil-replay")]
+    {
+        #[cfg(feature = "hil-dual")]
+        defmt::warn!(
+            "HIL-DUAL build: fake sensors/VLP, no pyro GPIO — do not connect e-matches"
+        );
+        #[cfg(feature = "hil-single")]
+        defmt::warn!(
+            "HIL-SINGLE build: fake sensors/VLP, no pyro GPIO — do not connect e-matches"
+        );
+        avionics_mode.sender().send(AvionicsMode::LowPower);
+    }
+    #[cfg(not(feature = "hil-replay"))]
     avionics_mode.sender().send(AvionicsMode::SelfTest);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
@@ -207,6 +233,16 @@ async fn high_prio_main(
 ) {
     let p = unsafe { Peripherals::steal() };
     spawner.spawn(buzzer_task(p.PC15, buzzer_pubsub).unwrap());
+    #[cfg(feature = "hil-replay")]
+    spawner.spawn(
+        crate::hil::sensor_replay::sensor_replay_task(
+            imu_baro_reading_pubsub,
+            vl_status,
+            avionics_mode_watch,
+        )
+        .unwrap(),
+    );
+    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(imu_baro_task(
         p.SPI4,
         p.PE2,
@@ -303,6 +339,11 @@ async fn low_prio_main(
     }
 
     spawner.spawn(adc_task(p.ADC1, p.PB0, battery_v_watch).unwrap());
+    #[cfg(feature = "hil-replay")]
+    spawner.spawn(
+        crate::hil::pyro_monitor::hil_pyro_monitor(continuity_watch, fire_signal).unwrap(),
+    );
+    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(pyro_task(
         p.PE9,
         p.PE13,
@@ -315,6 +356,9 @@ async fn low_prio_main(
         continuity_watch,
         fire_signal,
     ).unwrap());
+    #[cfg(feature = "hil-replay")]
+    spawner.spawn(crate::hil::gps_stub::hil_gps_stub(gps_reading_watch, vl_status).unwrap());
+    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(gps_task(
         p.USART1,
         p.PA10,
@@ -322,6 +366,14 @@ async fn low_prio_main(
         gps_reading_watch.sender(),
         vl_status,
     ).unwrap());
+    #[cfg(feature = "hil-replay")]
+    {
+        spawner.spawn(
+            crate::hil::vlp_script::hil_vlp_bridge_task(vlp_avionics_client).unwrap(),
+        );
+        spawner.spawn(crate::hil::vlp_script::hil_script_task(vlp_avionics_client).unwrap());
+    }
+    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
         VLP_KEY.try_into().unwrap(),
@@ -360,6 +412,7 @@ async fn low_prio_main(
         buzzer_pubsub,
         can_sender,
         can_central,
+        storage_cmd,
     ).unwrap());
 
     spawner.spawn(broadcast_imu_baro_measurement_task(
@@ -402,6 +455,7 @@ async fn low_prio_main(
         storage_cmd,
         storage_resp,
         vl_status,
+        target_agl_signal,
     ).unwrap());
 
     if cfg!(not(debug_assertions)) {

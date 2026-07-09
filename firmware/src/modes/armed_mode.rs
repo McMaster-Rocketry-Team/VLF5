@@ -1,7 +1,7 @@
 use core::cell::RefCell;
 
 use air_brakes_controller_core::{
-    AirBrakesMPC, Measurement, RocketState, RocketStateEstimator, approximate_speed_of_sound,
+    AirBrakesMPC, RocketState, RocketStateEstimator, approximate_speed_of_sound,
 };
 use defmt::info;
 use embassy_futures::{
@@ -27,10 +27,8 @@ use firmware_common_new::{
         },
         sender::CanSender,
     },
-    sensor_reading::SensorReading,
     vlp::{client::VLPAvionics, packets::telemetry::TelemetryPacketBuilder},
 };
-use nalgebra::Vector2;
 
 use crate::{
     AvionicsModeWatch, AirBrakesWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
@@ -217,25 +215,15 @@ pub async fn armed_mode(
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Armed;
                         }
-                        RocketState::PoweredAscent {
-                            velocity,
+                        RocketState::Ascent {
+                            vertical_velocity,
                             altitude_asl,
                             launch_pad_altitude_asl,
                         } => {
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.air_speed = velocity.magnitude();
-                            packet.tilt_deg = velocity.angle(&Vector2::new(0.0, 1.0)).to_degrees();
+                            packet.air_speed = vertical_velocity.abs();
+                            packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::PoweredAscent;
-                        }
-                        RocketState::Coasting {
-                            velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
-                        } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.air_speed = velocity.magnitude();
-                            packet.tilt_deg = velocity.angle(&Vector2::new(0.0, 1.0)).to_degrees();
-                            packet.flight_stage = FlightStage::Coasting;
                         }
                         RocketState::DrogueChute {
                             vertical_velocity,
@@ -246,7 +234,7 @@ pub async fn armed_mode(
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::Coasting;
+                            packet.flight_stage = FlightStage::DrogueDeployed;
                         }
                         RocketState::MainChute {
                             vertical_velocity,
@@ -257,7 +245,7 @@ pub async fn armed_mode(
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::Coasting;
+                            packet.flight_stage = FlightStage::MainDeployed;
                         }
                         RocketState::Landed => {
                             packet.altitude_agl = 0.0;
@@ -366,27 +354,18 @@ pub async fn armed_mode(
         loop {
             let state = state_estimator.lock(|s| s.borrow().state());
 
+            // Vertical-only: CAN rocket-state velocity is [0, vy].
             let message = match state {
-                RocketState::PoweredAscent {
-                    velocity,
+                RocketState::Ascent {
+                    vertical_velocity,
                     altitude_asl,
                     launch_pad_altitude_asl,
                 } => Some(RocketStateMessage::new(
                     unix_clock.now_us_or_boot_time(),
-                    &velocity.into(),
+                    &[0.0, vertical_velocity],
                     altitude_asl - launch_pad_altitude_asl,
-                    false,
-                )),
-                RocketState::Coasting {
-                    velocity,
-
-                    altitude_asl,
-                    launch_pad_altitude_asl,
-                } => Some(RocketStateMessage::new(
-                    unix_clock.now_us_or_boot_time(),
-                    &velocity.into(),
-                    altitude_asl - launch_pad_altitude_asl,
-                    true,
+                    vertical_velocity > 0.0 && vertical_velocity.abs()
+                        <= 0.85 * approximate_speed_of_sound(altitude_asl),
                 )),
                 _ => None,
             };
@@ -402,63 +381,76 @@ pub async fn armed_mode(
     let start_airbrakes_signal = Signal::<NoopRawMutex, ()>::new();
     let update_state_estimator_fut = async {
         let mut airbrakes_started = false;
+        let mut terminal_handled = false;
         let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
 
         loop {
             let reading = imu_baro_sub.next_message_pure().await;
-            if let SensorReading {
-                data: (Some(imu_data), baro_data),
-                ..
-            } = reading
-            {
-                let (pyro, state) = state_estimator.lock(|s| {
-                    let mut estimator = s.borrow_mut();
+            // Baro-only estimator: feed altitude on every IMU+baro sample (~416 Hz).
+            let baro_data = reading.data.1;
+            let (pyro, state) = state_estimator.lock(|s| {
+                let mut estimator = s.borrow_mut();
+                let pyro = estimator.update(baro_data.altitude_asl());
+                let state = estimator.state();
+                (pyro, state)
+            });
 
-                    let pyro = estimator.update(&Measurement::new(
-                        &imu_data.acc,
-                        &imu_data.gyro.map(|d| d.to_radians()),
-                        baro_data.altitude_asl(),
-                    ));
-
-                    let state = estimator.state();
-
-                    (pyro, state)
-                });
-
-                if let Some(pyro) = pyro {
-                    fire_signal.signal(pyro);
-                }
-
-                if !airbrakes_started
-                    && let RocketState::Coasting {
-                        velocity,
-                        altitude_asl,
-                        ..
-                    } = &state
-                    && velocity.magnitude() <= 0.85 * approximate_speed_of_sound(*altitude_asl)
-                {
-                    start_airbrakes_signal.signal(());
-                    airbrakes_started = true;
-                }
-
-                if let RocketState::Landed | RocketState::FailedToReachMinApogee = state {
-                    Timer::after_secs(30).await;
-                    avionics_mode_watch.sender().send(AvionicsMode::Landed);
-                }
-
-                flight_stage.lock(|r| {
-                    *r.borrow_mut() = match state {
-                        RocketState::OnPad => FlightStage::Armed,
-                        RocketState::PoweredAscent { .. } => FlightStage::PoweredAscent,
-                        RocketState::Coasting { .. } => FlightStage::Coasting,
-                        RocketState::DrogueChute { .. } => FlightStage::DrogueDeployed,
-                        RocketState::MainChute { .. } => FlightStage::MainDeployed,
-                        RocketState::Landed | RocketState::FailedToReachMinApogee => {
-                            FlightStage::Landed
-                        }
-                    };
-                });
+            if let Some(pyro) = pyro {
+                // Channel capacity 2: drogue+main can queue for single-at-apogee.
+                #[cfg(feature = "hil-replay")]
+                info!("HIL: estimator requested pyro {}", pyro);
+                let _ = fire_signal.try_send(pyro);
             }
+
+            if !airbrakes_started
+                && let RocketState::Ascent {
+                    vertical_velocity,
+                    altitude_asl,
+                    ..
+                } = &state
+                && *vertical_velocity > 0.0
+                && vertical_velocity.abs()
+                    <= 0.85 * approximate_speed_of_sound(*altitude_asl)
+            {
+                #[cfg(feature = "hil-replay")]
+                info!(
+                    "HIL: starting airbrakes (vy={} alt_asl={})",
+                    vertical_velocity, altitude_asl
+                );
+                start_airbrakes_signal.signal(());
+                airbrakes_started = true;
+            }
+
+            if !terminal_handled
+                && matches!(
+                    state,
+                    RocketState::Landed | RocketState::FailedToReachMinApogee
+                )
+            {
+                terminal_handled = true;
+                #[cfg(feature = "hil-replay")]
+                info!("HIL: estimator reached terminal state {}", state);
+                Timer::after_secs(30).await;
+                avionics_mode_watch.sender().send(AvionicsMode::Landed);
+            }
+
+            let new_stage = match state {
+                RocketState::OnPad => FlightStage::Armed,
+                RocketState::Ascent { .. } => FlightStage::PoweredAscent,
+                RocketState::DrogueChute { .. } => FlightStage::DrogueDeployed,
+                RocketState::MainChute { .. } => FlightStage::MainDeployed,
+                RocketState::Landed | RocketState::FailedToReachMinApogee => FlightStage::Landed,
+            };
+            #[cfg(feature = "hil-replay")]
+            {
+                let prev = flight_stage.lock(|r| *r.borrow());
+                if prev != new_stage {
+                    info!("HIL: flight_stage {} -> {}", prev, new_stage);
+                }
+            }
+            flight_stage.lock(|r| {
+                *r.borrow_mut() = new_stage;
+            });
         }
     };
 
@@ -472,7 +464,7 @@ pub async fn armed_mode(
         start_airbrakes_signal.wait().await;
         let launch_pad_altitude_asl = state_estimator.lock(|s| {
             let estimator = s.borrow();
-            if let RocketState::Coasting {
+            if let RocketState::Ascent {
                 launch_pad_altitude_asl,
                 ..
             } = estimator.state()
@@ -485,20 +477,25 @@ pub async fn armed_mode(
 
         let mut airbrakes_mpc = AirBrakesMPC::new(
             ROCKET_PARAMETERS.clone(),
-            launch_pad_altitude_asl + target_agl_watch.try_get().unwrap_or(4000.0), // note : you may want to change this default value on launch day just incase
+            launch_pad_altitude_asl
+                + target_agl_watch
+                    .try_get()
+                    .unwrap_or(firmware_common_new::flight_storage::DEFAULT_TARGET_APOGEE_AGL),
         );
 
         let mut ticker = Ticker::every(Duration::from_hz(10));
         loop {
             let state = state_estimator.lock(|s| s.borrow().state());
 
-            if let RocketState::Coasting {
-                velocity,
+            if let RocketState::Ascent {
+                vertical_velocity,
                 altitude_asl,
                 ..
             } = state
+                && vertical_velocity > 0.0
             {
-                let airbrake_extension_percentage = airbrakes_mpc.update(altitude_asl, velocity);
+                let airbrake_extension_percentage =
+                    airbrakes_mpc.update(altitude_asl, vertical_velocity);
                 publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
                 can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
                 packet_builder.update(|packet| {

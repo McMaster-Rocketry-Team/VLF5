@@ -16,3 +16,7 @@ This directory contains the avionics firmware and the GCM (ground control module
 - the debug buttons will open up the vscode debugger which allows you to add break points and inspect variables
 - Unfortunately if a variable is used across `.await` points its not going to show up in the debug panel.
 - The debug modes will disable the watchdog, so run release mode once before installing VLF5 to the rocket.
+
+# Hardware-in-the-Loop (HIL)
+
+In-process sensor/VLP replay plots (`hil-dual` / `hil-single`) are documented in [HIL.md](HIL.md).

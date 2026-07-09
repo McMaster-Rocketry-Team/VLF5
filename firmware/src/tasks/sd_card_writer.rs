@@ -1,4 +1,4 @@
-use crate::{VLStatusMutex, tasks::data_logger::FlightDataChannel};
+use crate::{SetTargetWatch, VLStatusMutex, tasks::data_logger::FlightDataChannel};
 
 use defmt::{error, info, warn};
 use embassy_futures::select::{Either, Either3, select, select3};
@@ -12,13 +12,15 @@ use embassy_stm32::{
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, signal::Signal};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use firmware_common_new::flight_storage::{
-    BLOCK_SIZE, DATA_START_BLOCK, MAX_WIRE_LEN, STORAGE_VERSION, SUPERBLOCK_INDEX, USABLE_PER_BLOCK,
-    count_records_in_bytes, decode_superblock, encode_response_header, encode_superblock,
+    AvionicsConfig, BLOCK_SIZE, DATA_START_BLOCK, DEFAULT_TARGET_APOGEE_AGL, MAX_WIRE_LEN,
+    STORAGE_VERSION, SUPERBLOCK_INDEX, USABLE_PER_BLOCK, count_records_in_bytes, decode_config_block,
+    decode_superblock, encode_config_block, encode_response_header, encode_superblock,
     finalize_data_block, serialize_log_record,
 };
 use heapless::Deque;
 
-/// A command from the USB host (see [`firmware_common_new::vlp::usb::CliRequest`]).
+/// A command from the USB host (see [`firmware_common_new::vlp::usb::CliRequest`])
+/// or from avionics (persist target apogee).
 #[derive(Clone, Copy)]
 pub enum StorageCommand {
     /// Report log metadata only (record / block counts).
@@ -27,6 +29,8 @@ pub enum StorageCommand {
     Download,
     /// Erase the log.
     Clear,
+    /// Persist target apogee AGL (m) to the dedicated config block.
+    SaveTargetApogee(f32),
 }
 
 /// A piece of a USB response, produced by the SD task and drained by the USB
@@ -110,6 +114,66 @@ enum AppendError {
 
 fn card_max_block_index(storage: &StorageDevice<'_, 'static, sdmmc::sd::Card>) -> u32 {
     (storage.card().size() / BLOCK_SIZE as u64).saturating_sub(1) as u32
+}
+
+/// Last block is reserved for [`AvionicsConfig`]; flight log must not use it.
+fn flight_log_max_block_index(storage: &StorageDevice<'_, 'static, sdmmc::sd::Card>) -> u32 {
+    card_max_block_index(storage).saturating_sub(1)
+}
+
+fn config_block_index(storage: &StorageDevice<'_, 'static, sdmmc::sd::Card>) -> u32 {
+    card_max_block_index(storage)
+}
+
+async fn load_avionics_config(
+    storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+) -> AvionicsConfig {
+    let index = config_block_index(storage);
+    let mut block = DataBlock::new();
+    if read_block_timed(storage, index, &mut block).await.is_ok()
+        && let Some(cfg) = decode_config_block(&*block)
+    {
+        info!(
+            "Loaded target apogee from SD: {} m AGL",
+            cfg.target_apogee_agl
+        );
+        return cfg;
+    }
+    info!(
+        "No SD config block; using default target apogee {} m AGL",
+        DEFAULT_TARGET_APOGEE_AGL
+    );
+    AvionicsConfig::default()
+}
+
+async fn save_avionics_config(
+    storage: &mut StorageDevice<'_, 'static, sdmmc::sd::Card>,
+    config: &AvionicsConfig,
+    io_failures: &mut u8,
+) -> bool {
+    let index = config_block_index(storage);
+    let raw = encode_config_block(config);
+    let mut block = DataBlock::new();
+    block.copy_from_slice(&raw);
+    match write_block_timed(storage, index, &block).await {
+        Ok(()) => {
+            *io_failures = 0;
+            info!(
+                "Saved target apogee to SD: {} m AGL (block {})",
+                config.target_apogee_agl, index
+            );
+            true
+        }
+        Err(SdIoError::Timeout) => {
+            error!("SD config write timed out");
+            false
+        }
+        Err(SdIoError::Driver) => {
+            *io_failures = io_failures.saturating_add(1);
+            error!("SD config write failed");
+            *io_failures < SD_IO_ERROR_LIMIT
+        }
+    }
 }
 
 async fn write_block_timed(
@@ -385,18 +449,23 @@ impl FlightLogger {
             StorageCommand::List => {
                 warn!("USB: list while SD offline ({} records in RAM)", self.record_count);
                 self.send_header(resp).await;
+                self.finish_response(resp).await;
             }
             StorageCommand::Download => {
                 warn!("USB: download while SD offline");
                 self.send_header(resp).await;
+                self.finish_response(resp).await;
             }
             StorageCommand::Clear => {
                 info!("USB: clear in-RAM log (SD offline)");
                 *self = Self::empty();
                 self.send_header(resp).await;
+                self.finish_response(resp).await;
+            }
+            StorageCommand::SaveTargetApogee(agl) => {
+                warn!("SD offline; cannot persist target apogee {} m", agl);
             }
         }
-        self.finish_response(resp).await;
     }
 
     async fn handle_command(
@@ -406,6 +475,20 @@ impl FlightLogger {
         resp: &StorageRespChannel,
         io_failures: &mut u8,
     ) -> bool {
+        match cmd {
+            StorageCommand::SaveTargetApogee(agl) => {
+                return save_avionics_config(
+                    storage,
+                    &AvionicsConfig {
+                        target_apogee_agl: agl,
+                    },
+                    io_failures,
+                )
+                .await;
+            }
+            _ => {}
+        }
+
         let _ = self.enqueue_flush();
         if !self.drain_all(storage, io_failures).await {
             return false;
@@ -445,6 +528,7 @@ impl FlightLogger {
                 }
                 self.send_header(resp).await;
             }
+            StorageCommand::SaveTargetApogee(_) => unreachable!(),
         }
         self.finish_response(resp).await;
         true
@@ -516,6 +600,7 @@ pub async fn sd_card_writer(
     storage_cmd: &'static StorageCmdSignal,
     storage_resp: &'static StorageRespChannel,
     vl_status: &'static VLStatusMutex,
+    target_agl_watch: &'static SetTargetWatch,
 ) {
     bind_interrupts!(struct Irqs {
         SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
@@ -556,11 +641,15 @@ pub async fn sd_card_writer(
             Timer::after_millis(200).await;
         }
         error!("SD card unavailable; avionics continues without SD logging");
+        target_agl_watch.sender().send(DEFAULT_TARGET_APOGEE_AGL);
         run_offline_loop(channel, storage_cmd, storage_resp, vl_status).await;
     };
 
+    let config = load_avionics_config(&mut storage).await;
+    target_agl_watch.sender().send(config.target_apogee_agl);
+
     vl_status.lock(|s| s.borrow_mut().sd_ok = true);
-    let max_block_index = card_max_block_index(&storage);
+    let max_block_index = flight_log_max_block_index(&storage);
     let mut logger = FlightLogger::new(&mut storage).await;
     let mut card_alive = true;
     let mut log_full = !logger.has_space(MAX_WIRE_LEN, max_block_index);
@@ -569,7 +658,12 @@ pub async fn sd_card_writer(
         warn!("SD card log already occupies all available blocks");
         vl_status.lock(|s| s.borrow_mut().sd_ok = false);
     } else {
-        info!("SD log capacity: blocks {}..={}", DATA_START_BLOCK, max_block_index);
+        info!(
+            "SD log capacity: blocks {}..={} (config block {})",
+            DATA_START_BLOCK,
+            max_block_index,
+            config_block_index(&storage)
+        );
     }
 
     let mut flush_ticker = Ticker::every(FLUSH_INTERVAL);

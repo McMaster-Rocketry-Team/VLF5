@@ -62,11 +62,12 @@ bind_interrupts!(struct I2c2Irqs {
     DMA1_STREAM7 => dma::InterruptHandler<DMA1_CH7>;
 });
 
+/// Subscribers: data_logger, CAN broadcast, mode telemetry, and (in Armed) state estimator.
 pub type IMUBaroReadingPubSub = PubSubChannel<
     CriticalSectionRawMutex,
     SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>,
     10,
-    3,
+    4,
     1,
 >;
 
@@ -332,7 +333,8 @@ async fn read_mag_loop<B: HalI2c>(
     }
 }
 
-pub type BatteryVWatch = Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 2>;
+/// Receivers: CAN node_status, data_logger, and the active mode (low-power/armed/…).
+pub type BatteryVWatch = Watch<NoopRawMutex, SensorReading<BootTimestamp, f32>, 4>;
 
 #[embassy_executor::task]
 pub async fn adc_task(

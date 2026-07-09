@@ -24,7 +24,10 @@ use crate::{
     AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, FireSignal, MAIN_BULKHEAD_NODE_ID, SetTargetWatch,
     avionics_mode::AvionicsMode,
     can_central::CanCentral,
-    tasks::buzzer_task::{BuzzerPubSub, BuzzerTone},
+    tasks::{
+        buzzer_task::{BuzzerPubSub, BuzzerTone},
+        sd_card_writer::{StorageCmdSignal, StorageCommand},
+    },
 };
 
 #[embassy_executor::task]
@@ -36,6 +39,7 @@ pub async fn receive_vlp_task(
     buzzer_pubsub: &'static BuzzerPubSub,
     can_sender: &'static CanSender<NoopRawMutex>,
     can_central: &'static CanCentral<NoopRawMutex>,
+    storage_cmd: &'static StorageCmdSignal,
 ) {
     let avionics_mode = avionics_mode_watch.sender();
     let buzzer_pub = buzzer_pubsub.immediate_publisher();
@@ -174,11 +178,14 @@ pub async fn receive_vlp_task(
                     Timer::after_millis(1000).await;
                     buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
                     Timer::after_millis(1000).await;
-                    fire_signal.signal(packet.pyro);
+                    let _ = fire_signal.try_send(packet.pyro);
                 }
             }
             VLPUplinkPacket::SetTargetApogee(packet) => {
-                target_agl_watch.sender().send(packet.get_altitude());
+                let agl = packet.get_altitude();
+                info!("SetTargetApogee: {} m AGL (persisting to SD)", agl);
+                target_agl_watch.sender().send(agl);
+                storage_cmd.signal(StorageCommand::SaveTargetApogee(agl));
             }
         }
     }

@@ -7,7 +7,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::PubSubC
 use embassy_time::{Duration, Ticker, Timer};
 
 /// Set to `true` to silence the buzzer (messages are still drained).
-pub const DISABLE_BUZZER: bool = false;
+pub const DISABLE_BUZZER: bool = true;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuzzerTone {

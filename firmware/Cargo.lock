@@ -901,6 +901,8 @@ dependencies = [
  "embedded-sdmmc",
  "firmware-common-new",
  "heapless 0.8.0",
+ "icao-isa",
+ "icao-units",
  "lora-phy",
  "micromath",
  "nalgebra",

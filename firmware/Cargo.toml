@@ -66,6 +66,20 @@ rkyv = { version = "0.8.10", default-features = false, features = [
     "pointer_width_32",
 ] }
 
+icao-isa = { version = "1.1.0", optional = true }
+icao-units = { version = "1.1.0", optional = true }
+
+[features]
+default = []
+# Base HIL infrastructure (fake sensors / VLP / pyro). Prefer hil-dual or hil-single.
+hil-replay = ["dep:icao-isa", "dep:icao-units"]
+# Dual-deploy HIL plot (drogue at apogee, main at altitude).
+#   cargo run --bin main --features hil-dual
+hil-dual = ["hil-replay"]
+# Single-deploy HIL plot (drogue then main back-to-back at apogee).
+#   cargo run --bin main --features hil-single
+hil-single = ["hil-replay"]
+
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
 

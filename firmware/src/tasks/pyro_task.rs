@@ -97,7 +97,7 @@ pub async fn pyro_task(
 
     let fire_fut = async {
         loop {
-            let pyro = fire_signal.wait().await;
+            let pyro = fire_signal.receive().await;
             match pyro {
                 PyroSelect::PyroMain => {
                     state.lock(|state| {
