@@ -156,11 +156,11 @@ fn main() -> ! {
     {
         #[cfg(feature = "hil-dual")]
         defmt::warn!(
-            "HIL-DUAL build: fake sensors/VLP, no pyro GPIO — do not connect e-matches"
+            "HIL-DUAL build: fake sensors/GPS + no pyro GPIO, REAL LoRa radio — do not connect e-matches"
         );
         #[cfg(feature = "hil-single")]
         defmt::warn!(
-            "HIL-SINGLE build: fake sensors/VLP, no pyro GPIO — do not connect e-matches"
+            "HIL-SINGLE build: fake sensors/GPS + no pyro GPIO, REAL LoRa radio — do not connect e-matches"
         );
         avionics_mode.sender().send(AvionicsMode::LowPower);
     }
