@@ -34,15 +34,13 @@ use crate::{
 pub async fn receive_vlp_task(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
     avionics_mode_watch: &'static AvionicsModeWatch,
-    fire_signal: &'static FireSignal,
+    fire_pyro_request: &'static FireSignal,
     target_agl_watch: &'static SetTargetWatch,
-    buzzer_pubsub: &'static BuzzerPubSub,
     can_sender: &'static CanSender<NoopRawMutex>,
     can_central: &'static CanCentral<NoopRawMutex>,
     storage_cmd: &'static StorageCmdSignal,
 ) {
     let avionics_mode = avionics_mode_watch.sender();
-    let buzzer_pub = buzzer_pubsub.immediate_publisher();
 
     loop {
         let (packet, _) = vlp_avionics_client.receive().await;
@@ -172,13 +170,11 @@ pub async fn receive_vlp_task(
             }
             VLPUplinkPacket::FirePyro(packet) => {
                 if avionics_mode.try_get() == Some(AvionicsMode::Armed) {
-                    buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
-                    Timer::after_millis(1000).await;
-                    buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
-                    Timer::after_millis(1000).await;
-                    buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
-                    Timer::after_millis(1000).await;
-                    let _ = fire_signal.try_send(packet.pyro);
+                    // Hand the fire request off to `fire_pyro_countdown_task` so the
+                    // ~3 s buzzer countdown runs off this loop. Blocking here would
+                    // stop `vlp.receive()` from draining the rx Signal, silently
+                    // dropping any uplinks that arrive during the countdown.
+                    let _ = fire_pyro_request.try_send(packet.pyro);
                 }
             }
             VLPUplinkPacket::SetTargetApogee(packet) => {
@@ -188,5 +184,34 @@ pub async fn receive_vlp_task(
                 storage_cmd.signal(StorageCommand::SaveTargetApogee(agl));
             }
         }
+    }
+}
+
+/// Plays the manual `fire-pyro` buzzer countdown and then fires the pyro, off the
+/// `receive_vlp_task` uplink loop.
+///
+/// `receive_vlp_task` hands a `PyroSelect` here via `fire_pyro_request` (a
+/// non-blocking `try_send`) so its `vlp.receive()` loop keeps draining uplinks
+/// instead of stalling for the ~3 s countdown. This task then drives the same
+/// `fire_signal` the autonomous apogee-deploy path uses, so the pyro fires
+/// identically. Autonomous deploy is unaffected: it still sends to `fire_signal`
+/// directly and never passes through here.
+#[embassy_executor::task]
+pub async fn fire_pyro_countdown_task(
+    fire_pyro_request: &'static FireSignal,
+    fire_signal: &'static FireSignal,
+    buzzer_pubsub: &'static BuzzerPubSub,
+) {
+    let buzzer_pub = buzzer_pubsub.immediate_publisher();
+
+    loop {
+        let pyro = fire_pyro_request.receive().await;
+        buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
+        Timer::after_millis(1000).await;
+        buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
+        Timer::after_millis(1000).await;
+        buzzer_pub.publish_immediate(BuzzerTone::Low(500, 500));
+        Timer::after_millis(1000).await;
+        let _ = fire_signal.try_send(pyro);
     }
 }

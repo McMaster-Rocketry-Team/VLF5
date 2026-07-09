@@ -74,7 +74,7 @@ use crate::tasks::{
     gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
     vlp_avionics_daemon_task::vlp_avionics_daemon_task,
 };
-use receive_vlp_task::receive_vlp_task;
+use receive_vlp_task::{fire_pyro_countdown_task, receive_vlp_task};
 
 mod avionics_mode;
 mod can;
@@ -311,6 +311,10 @@ async fn low_prio_main(
 
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
+    // Manual `fire-pyro` requests are handed here so the buzzer countdown runs off
+    // `receive_vlp_task` (see `fire_pyro_countdown_task`); autonomous deploy still
+    // uses `fire_signal` directly.
+    let fire_pyro_request = singleton!(: FireSignal = FireSignal::new()).unwrap();
     let amp_control_watch = singleton!(: AmpControlWatch = AmpControlWatch::new()).unwrap();
     let target_agl_signal = singleton!(:SetTargetWatch= SetTargetWatch::new()).unwrap();
 
@@ -410,13 +414,15 @@ async fn low_prio_main(
     spawner.spawn(receive_vlp_task(
         vlp_avionics_client,
         avionics_mode_watch,
-        fire_signal,
+        fire_pyro_request,
         target_agl_signal,
-        buzzer_pubsub,
         can_sender,
         can_central,
         storage_cmd,
     ).unwrap());
+    spawner.spawn(
+        fire_pyro_countdown_task(fire_pyro_request, fire_signal, buzzer_pubsub).unwrap(),
+    );
 
     spawner.spawn(broadcast_imu_baro_measurement_task(
         imu_baro_reading_pubsub,
