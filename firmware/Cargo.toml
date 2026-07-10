@@ -71,7 +71,8 @@ icao-units = { version = "1.1.0", optional = true }
 
 [features]
 default = []
-# Base HIL infrastructure (fake sensors / GPS / pyro; real LoRa radio + GCM). Prefer hil-dual or hil-single.
+# Base HIL infrastructure: simulate ONLY the barometer; IMU/GPS/pyro/mag/CAN/SD/LoRa are
+# all real and the board boots into SelfTest. Prefer hil-dual or hil-single.
 hil-replay = ["dep:icao-isa", "dep:icao-units"]
 # Dual-deploy HIL plot (drogue at apogee, main at altitude).
 #   cargo run --bin main --features hil-dual

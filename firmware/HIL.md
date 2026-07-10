@@ -1,19 +1,31 @@
 # VLF5 In-Process HIL Plots
 
-Desk-test the full avionics path on hardware **without** real IMU/baro SPI, GPS UART, or pyro GPIO. Fake sensors drive the real armed-mode estimator, airbrakes MPC, pyro queue, telemetry, and SD logger. **VLP runs over the real LoRa radio + GCM** — you fly the plot from **rocket-cli** exactly like a real flight ([OPERATOR.md](OPERATOR.md)). Monitor with **defmt RTT** and/or the rocket-cli telemetry stream; dump the flight log afterward with rocket-cli.
+Desk-test the **entire** avionics flow on real hardware by faking **only the barometer
+reading**. IMU, GPS, magnetometer, pyro GPIO, CAN, SD, USB, and the LoRa radio all run
+for real — the board boots into **SelfTest** exactly like a flight build, and you fly the
+plot from **rocket-cli** over the real radio just like a real flight ([OPERATOR.md](OPERATOR.md)).
+Because the barometer is the one sensor a static bench can't exercise (it can't feel
+altitude), its value is replaced by a scripted single-deploy vertical trajectory; every
+other decision, task, and GPIO exercises the production path. Monitor with **defmt RTT**
+and/or the rocket-cli telemetry stream; dump the flight log afterward with rocket-cli.
 
-**Never flash a HIL build with live e-matches connected.**
+> **The real pyro task drives real pyro GPIO in HIL.** At apogee the drogue/main FETs are
+> energized for real. **Never flash a HIL build with live e-matches connected.**
 
 ## Features
 
 | Feature | Deployment profile | Expected pyro |
 |---------|-------------------|---------------|
 | `hil-dual` | Drogue at apogee, main at ~457 m AGL | `PyroDrogue` near apogee, then `PyroMain` near main altitude |
-| `hil-single` | Both pyros at apogee | `PyroDrogue` then `PyroMain` back-to-back (~3 s apart with HIL pyro pulse) |
+| `hil-single` | Both pyros at apogee | `PyroDrogue` then `PyroMain` back-to-back at apogee |
 
-Enable **exactly one** of `hil-dual` / `hil-single` (both pull in base `hil-replay`). Bare `hil-replay` alone does not compile.
+Enable **exactly one** of `hil-dual` / `hil-single` (both pull in base `hil-replay`). Bare
+`hil-replay` alone does not compile.
 
-Flight builds (no HIL feature) are unchanged and still use `FlightProfile::Dual` by default. HIL and flight builds use the **same** real VLP daemon, mode machine, estimator, airbrakes, pyro queue, and radio config — only the sensors, GPS, and pyro GPIO are faked, and HIL boots into `LowPower` (so you arm over the radio).
+Flight builds (no HIL feature) are unchanged. The **only** difference in a HIL build is the
+barometer: instead of reading the MS5607 over SPI, `imu_baro_task` synthesizes the pressure
+from the scripted trajectory. The boot mode, mode machine, estimator, airbrakes MPC, pyro
+queue, GPS, mag, CAN, SD logger, telemetry, and radio config are all identical to flight.
 
 ## Run
 
@@ -36,11 +48,13 @@ TUI (`rocket-cli ground-station`) or the headless stream:
 
 ```bash
 rocket-cli control --frequency 920000000 --vlp-key <base64 vlp.key>
-# then, one per line: mode self-test / target-apogee 2500 / mode low-power / arm
+# then, one per line: (mode self-test) / target-apogee 2500 / mode low-power / arm
 ```
 
-The HIL sensor replay latches its flight clock when you send **arm**, then plays the trajectory
-(pad → burn → coast → apogee → deploy → descent → landed). Pyro fires drive **no GPIO**.
+The board boots straight into **SelfTest** (self-test result telemetry every 2 s). Send
+`arm` — the baro flight clock latches on entry to Armed and plays the trajectory (pad → burn
+→ coast → apogee → deploy → descent → landed). Pyro fires drive **real GPIO** (safe only with
+no e-matches connected).
 
 Optional: clear the SD log before a clean run (USB-C to the board):
 
@@ -50,9 +64,11 @@ rocket-cli clear-flight-log
 
 ## What is simulated
 
-### Sensor profile (`sample_at(t)`)
+### Barometer only (`baro_sim::generate_baro`)
 
-Vertical 1D rocket (always upright). Baro pressure is ISA from altitude; IMU is a simple vertical accel stub for logging/CAN. The flight clock is **relative to entering Armed** (t below is time since `arm`).
+Vertical 1D rocket (always upright). Baro pressure is ISA from the scripted altitude plus
+measured per-sample sensor noise (sigma ~0.36 m). The flight clock is **relative to entering
+Armed** (t below is time since `arm`); pre-arm modes read the noisy pad altitude.
 
 | Phase | Time since Arm | Physics |
 |-------|-----------|---------|
@@ -63,28 +79,41 @@ Vertical 1D rocket (always upright). Baro pressure is ISA from altitude; IMU is 
 
 Rough outcome: apogee ~3.3 km AGL; full flight ~3–4 minutes wall time.
 
-### Replaced vs real tasks
+### Everything else is real
 
-| Real task | HIL replacement |
-|-----------|-----------------|
-| `imu_baro_task` | `sensor_replay_task` (416 Hz when Armed) |
-| `pyro_task` | `hil_pyro_monitor` (logs fires, 3 s continuity pulse, **no GPIO**) |
-| `gps_task` | `hil_gps_stub` |
-| Boot mode | `LowPower` (skips SelfTest hardware checks; arm over the radio) |
+| Subsystem | HIL behavior |
+|-----------|--------------|
+| IMU (`imu_baro_task`) | **Real** LSM6DSM read, real data-ready interrupt clocks the loop |
+| GPS (`gps_task`) | **Real** (no fix indoors is expected; the module still reports) |
+| Pyro (`pyro_task`) | **Real GPIO** — drogue/main FETs fire for real (no e-matches!) |
+| Mag / CAN / SD / USB | **Real** |
+| LoRa radio + VLP | **Real** — the operator drives every uplink from rocket-cli |
+| Boot mode | **SelfTest** (same as flight) |
 
-`vlp_avionics_daemon_task` (the real LoRa radio + VLP), CAN, USB, SD, mag, and ADC all run on
-real hardware — HIL does **not** fake the radio. The operator drives every uplink from rocket-cli.
+The barometer is the single seam: in flight `read_baro_or_sim` reads the MS5607; in HIL it
+returns `HilBaroState::next(mode)`. The real baro is never touched in HIL, so a bench baro
+fault can't abort the simulated flight.
+
+## Flight-log gating
+
+Flight-data logging runs **only from Arm through Landed** (`AvionicsMode::should_log`). SelfTest,
+LowPower, and Demo do not write to the SD card, so preflight doesn't fill the log and downloads
+stay small. The mode stays `Armed` for the entire ascent/coast/deploy/descent, then auto-switches
+to `Landed` — so the log spans the whole flight and the landed GPS beacon.
 
 ## RTT checklist
 
 Watch for panics (`[ERROR]`, `panicked`, `Firmware exited`) while the plot runs.
 
-1. Boot: `HIL-DUAL` or `HIL-SINGLE` warning; `enter low power mode`; `LoRa initialized`.
-2. Operator `mode self-test` → `enter self test mode`; `target-apogee` → `SetTargetApogee … persisting to SD`; `mode low-power` → `enter low power mode`.
-3. Operator `arm` → `enter armed mode`; sensor replay goes to 416 Hz; flight clock starts.
+1. Boot: `HIL-DUAL` / `HIL-SINGLE` warning; `enter self test mode`; `IMU initialized`;
+   `Barometer initialized`; `LoRa initialized`.
+2. Operator preflight over the radio: `target-apogee` → `SetTargetApogee … persisting to SD`;
+   optional `mode low-power` → `enter low power mode`.
+3. Operator `arm` → `enter armed mode`; baro flight clock starts.
 4. ~15 s after arm: ascent / `HIL: starting airbrakes` / `Armed -> PoweredAscent`.
 5. Telemetry `alt_agl` climbs (not stuck near 0); `air_speed` tracks vertical speed.
-6. Pyro per plot table (`HIL: FIRE PyroDrogue` / `PyroMain`).
+6. Pyro at apogee (`HIL: estimator requested pyro PyroDrogue` / `PyroMain`) — the real
+   `pyro_task` then drives the FETs (SD log `pyro_*_fire` edges confirm).
 7. `terminal state Landed` → `enter landed mode` after ~30 s settle.
 
 ### Expected timings (time since Arm)
@@ -108,23 +137,23 @@ rocket-cli list-flight-log
 rocket-cli download-flight-log hil_flight_log.csv
 ```
 
-Expect a large tagged log (IMU + SLOW) spanning LowPower → Armed → ascent → deploy → Main/Landed.
-The log is append-only across flights — `clear-flight-log` between runs to keep downloads small.
+Expect a tagged log (IMU + SLOW) spanning Armed → ascent → deploy → Main/Landed (preflight is
+not logged). The log is append-only across flights — `clear-flight-log` between runs to keep
+downloads small.
 
 ### SD write latency warnings
 
 `SD write took ~55ms (queue depth 0)` means a block write exceeded the 40 ms warn threshold. With
 queue depth 0 and no "queue full" / offline messages, logging is still healthy; this card is just
-slower than the warn budget under 416 Hz logging.
+slower than the warn budget under high-rate logging.
 
 ## Source layout
 
 | Path | Role |
 |------|------|
-| `src/hil/mod.rs` | Feature gates + short overview |
-| `src/hil/sensor_replay.rs` | `sample_at(t)` + 416 Hz publisher, Arm-relative flight clock |
-| `src/hil/pyro_monitor.rs` | Safe pyro fire logging (no GPIO) |
-| `src/hil/gps_stub.rs` | Fake GPS so mode loops do not stall |
+| `src/hil/mod.rs` | Feature gates + overview |
+| `src/hil/baro_sim.rs` | `trajectory_altitude_asl` + noise + `generate_baro` + `HilBaroState` (Arm-relative clock) |
+| `src/tasks/sensor_tasks.rs` | `read_baro_or_sim` seam (real MS5607 vs simulated) inside `imu_baro_task` |
 | `Cargo.toml` | `hil-replay` / `hil-dual` / `hil-single` |
 
 Related monorepo pieces: baro-only `RocketStateEstimator`, vertical `AirBrakesMPC`, the real

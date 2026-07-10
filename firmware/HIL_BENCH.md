@@ -2,46 +2,53 @@
 
 Physical bench setup for hardware-in-the-loop testing of the **VLF5 avionics** and the
 **Endgame GCM** (ground control module). This is the *lab wiring / host access / control-path*
-reference. For the **in-process** sensor-replay plots that run entirely on the VLF5 with fake
-sensors (no radio), see [HIL.md](HIL.md).
+reference. For the HIL firmware model (what's faked vs real, the flight timeline, RTT
+checklist), see [HIL.md](HIL.md).
 
-> Probed and written 2026-07-09. Spans three repos:
-> `VLF5/firmware` (this dir), `The_Endgame/{gcm_firmware,main_firmware}`, `Rust_Monorepo`.
+> Probed 2026-07-09; §0/§5c/§7 rewritten 2026-07-10 for the baro-only-over-radio HIL model.
+> Spans three repos: `VLF5/firmware` (this dir), `The_Endgame/{gcm_firmware,main_firmware}`,
+> `Rust_Monorepo`.
 
 ---
 
-## 0. HIL over USB — the working end-to-end path (no GCM, no radio) ✅
+## 0. HIL over the real GCM/radio — the working end-to-end path ✅
 
-As of 2026-07-09 the `hil-single`/`hil-dual` firmware **bridges the full VLP path over the
-VLF5's own USB** (WinUSB `c0de:cafe`), so a bench needs no GCM and no radio link. Sensors,
-GPS, and pyro GPIO are faked (bench-safe, no e-matches); the mode machine, baro estimator,
-airbrakes MPC, pyro queue, SD logger, and telemetry are all real.
+The `hil-single`/`hil-dual` firmware fakes **only the barometer reading**; IMU, GPS, pyro
+**GPIO (fires for real!)**, mag, CAN, SD, and the **real LoRa radio** all run. The board
+**boots into SelfTest** exactly like a flight build, and you fly it from `rocket-cli` over the
+**GCM + LoRa**, same as a real flight. (The old USB-VLP-bridge path and the `hil-radio`
+feature are **deleted** — HIL always uses the real radio now.)
+
+> **Real pyro GPIO energizes the drogue/main FETs at apogee — never flash HIL with live
+> e-matches connected.**
 
 ```bash
 cd VLF5/firmware
 # 1. Flash HIL + watch RTT (keep this running; pick the VLF5 probe)
-cargo build --release --bin main --features hil-single
-probe-rs run --chip STM32H743VIHx --connect-under-reset \
-  --probe 0483:374b:066EFF525086874967123920 target/thumbv7em-none-eabihf/release/main
+cargo run --release --bin main --features hil-single -- \
+  --probe 0483:374b:066EFF525086874967123920
 
-# 2. In another shell: stream telemetry + drive the flight over USB
-rocket-cli control --usb            # JSON telemetry to stdout, commands on stdin
-#   commands: arm | mode <low-power|self-test|armed|landed|demo> | target-apogee <m>
-#             | fire-pyro <main|drogue> | reset [all|void-lake|amp|icarus] | quit
-rocket-cli send-uplink --usb arm    # one-shot
+# 2. Clean the SD log (it accumulates ~1.1M records across runs), then fly over the radio
+rocket-cli clear-flight-log                                       # VLF5 WinUSB c0de:cafe
+rocket-cli control --frequency 920000000 --vlp-key "$(cat vlp.key)"
+#   Board boots SelfTest. Downlink JSON types: self_test_result / low_power_telemetry /
+#   telemetry / landed_telemetry, plus ack|nack|timeout. Commands on stdin:
+#   arm | mode <low-power|self-test|armed|landed|demo> | target-apogee <m>
+#   | fire-pyro <main|drogue> | reset [all|void-lake|amp|icarus] | quit
+#   Sequence: confirm self_test_result -> `mode low-power` -> `arm` -> fly (~3.5 min) -> landed
+rocket-cli send-uplink --frequency 920000000 --vlp-key "$(cat vlp.key)" arm   # one-shot
 
-# Or drive a whole single-deploy flight + assert the outcome:
-ROCKET_CLI=…/rocket-cli python3 hil_operator.py --usb --target 3000 --rtt-log rtt.log
+# 3. Pull the flight log (this flight only, if cleared first)
+rocket-cli download-flight-log out.csv
 ```
 
-Wire protocol (firmware `usb_handler.rs` + rocket-cli `gs/headless.rs`): VLP **downlinks**
-stream on **EP2 bulk-IN** as `[len:u8][payload]` frames; **uplinks** ride a
-`CliRequest::Uplink=4` **control-OUT** whose data stage is a serialized `VLPUplinkPacket`,
-injected via `inject_uplink` (no VLP signing — USB is a trusted local link, so an uplink is
-reported `{"type":"sent"}`, not ack'd). Verified: full single-deploy flight
-(`Armed → PoweredAscent → drogue+main at apogee → Landed`, apogee ~3295 m AGL, airbrakes
-commanded, both pyros fired in RTT). The GCM/LoRa path (§5c) is the *field* path but is
-currently RF-blocked on this bench (GCM hears no packets); prefer USB for bench HIL.
+Verified 2026-07-10 end-to-end over the air: `SelfTest → LowPower → Armed → PoweredAscent →
+DrogueDeployed → MainDeployed → Landed`, apogee ~3295 m AGL, airbrakes commanded full
+extension (target 2500 m < natural apogee), **both pyros fired via the real `pyro_task` GPIO**
+(SD `pyro_*_fire` edges), link strong (RSSI ~-44, every uplink acked first try). Note: this
+firmware never reports `FlightStage::Coasting` — `armed_mode` maps ascent+coast both to
+`PoweredAscent`. Flight-data logging is gated to **Armed→Landed** (`AvionicsMode::should_log`),
+so preflight is not logged and downloads stay small.
 
 ---
 
@@ -62,11 +69,11 @@ currently RF-blocked on this bench (GCM hears no packets); prefer USB for bench 
     USB 120a:0005 ───────┤  CDC-ACM /dev/ttyACM2  ◄── LoRa RPC (rkyv/CRC8 @115200)        │
     (CDC serial)         └───────────────────────────────┬────────────────────────────────┘
         │                                                 │
-        └── SX1262 / E22 ─── 915 MHz LoRa ────────────────┘
+        └── SX1262 / E22 ─── 920 MHz LoRa ────────────────┘
                  ▲
                  │  VLP (signed + Reed-Solomon), downlink-first half-duplex
                  ▼
-           [ VLF5 avionics radio ]   ← only in a normal flight build (not in-process HIL)
+           [ VLF5 avionics radio ]   ← used in BOTH flight and HIL builds (HIL fakes only baro)
 ```
 
 Also physically present but **not a named test target**: **Endgame Main** (F405,
@@ -162,16 +169,22 @@ cargo run -p rocket-cli --manifest-path ../../Rust_Monorepo/rocket-cli/Cargo.tom
 ```
 USB command set is exactly List/Download/Clear (vendor control transfer `wValue`, bulk-IN `0x81`).
 
-### 5c. Commanding the avionics over the real radio — via GCM, rocket-cli ground-station
+### 5c. Commanding the avionics over the real radio — via GCM, rocket-cli
 ```bash
-cargo run -p rocket-cli --manifest-path ../../Rust_Monorepo/rocket-cli/Cargo.toml -- ground-station
+# Interactive TUI:
+rocket-cli ground-station
+# Non-interactive (scriptable) — streams downlink JSON on stdout, reads commands on stdin:
+rocket-cli control --frequency 920000000 --vlp-key "$(cat vlp.key)"
+# One-shot uplink:
+rocket-cli send-uplink --frequency 920000000 --vlp-key "$(cat vlp.key)" arm
 ```
 - Auto-finds the single GCM (`120a:0005`) on `/dev/ttyACM2`, opens at 115200, does the RPC
-  reset handshake, then `configure`s the radio (freq/power from `ground-station.toml`; SF12 /
-  BW 250 kHz / CR 4/8 hardcoded).
+  reset handshake, then `configure`s the radio. There is **no `ground-station.toml`** on this
+  bench, so `control`/`send-uplink` need `--frequency 920000000 --vlp-key "$(cat vlp.key)"`
+  (SF12 / BW 250 kHz / CR 4/8 are hardcoded).
 - Data path: `rocket-cli` VLP daemon (signs + ECC) → RPC (`configure`/`rx`/`tx`/`tx_then_rx`,
-  rkyv+CRC8 over CDC) → GCM firmware → SX1262/E22 → 915 MHz → avionics VLP daemon.
-- **Uplinks are TUI buttons, not CLI flags** (see §7).
+  rkyv+CRC8 over CDC) → GCM firmware → SX1262/E22 → 920 MHz → avionics VLP daemon.
+- `control` command grammar + downlink JSON schema: `rocket-cli/src/gs/headless.rs`.
 
 ---
 
@@ -181,8 +194,9 @@ Shared crate `Rust_Monorepo/firmware-common-new/src/vlp/`. Downlink-first half-d
 rocket transmits telemetry, then listens ~500 ms; the ground station piggybacks a signed
 uplink into that gap; the rocket replies with a signed `Ack`. Uplinks are
 `SHA256(key ‖ last_downlink ‖ uplink)[..16]`-signed; everything is Reed-Solomon ECC. Shared
-`vlp_key` is a 32-byte secret that **must match** across avionics + `ground-station.toml`
-(`VLF5/firmware/vlp.key` is the base64 form flashed into firmware).
+`vlp_key` is a 32-byte secret that **must match** across avionics and the ground station
+(passed via `--vlp-key "$(cat vlp.key)"`, or `ground-station.toml` if one exists).
+`VLF5/firmware/vlp.key` is the base64 form flashed into firmware.
 
 **Uplink (ground→rocket)** — `ChangeMode`, `Reset`, `PayloadEPSOutputOverwrite`,
 `AMPOutputOverwrite`, `FirePyro` (**Armed-only**, ignored otherwise), `SetTargetApogee`.
@@ -202,30 +216,26 @@ symbols (~4.2 s at SF12/250 kHz), so the host loops `rx(4000)`.
 
 ---
 
-## 7. Two HIL modes — pick the right one
+## 7. HIL build vs full flight build
 
-| | **In-process replay** (existing) | **Over-the-air** (real radio) |
+There is **one** HIL model now: `--features hil-single` / `hil-dual` fakes **only the
+barometer** and runs everything else for real over the GCM/radio. A HIL build differs from a
+real flight in exactly three ways:
+
+| | **HIL build** (`hil-single`/`hil-dual`) | **Full flight build** (no hil feature) |
 |---|---|---|
-| Avionics build | `--features hil-dual` / `hil-single` | **normal flight build** (no hil feature) |
-| Sensors/GPS/pyro | faked in-process | real (⚠ pyro drives GPIO — no e-matches!) |
-| Radio / GCM | **not used** (radio daemon replaced) | GCM + SX1262 carry real VLP |
-| Command injection | scripted `inject_uplink` (t≈2s apogee, t≈3s Armed) | rocket-cli `ground-station` TUI |
-| Observe | defmt RTT + SD dump | ground-station telemetry + RTT + SD dump |
-| Doc | [HIL.md](HIL.md) | this file, §5c |
+| Barometer | **simulated** scripted trajectory (`baro_sim.rs`) | real MS5607 |
+| IMU / GPS / pyro GPIO / mag / CAN / SD / LoRa | **real** (pyro fires for real ⚠ no e-matches) | real |
+| Boot mode | SelfTest | SelfTest |
+| Deploy profile | compile-time (`hil-single` = both at apogee) | `FlightProfile::Dual` default |
+| Command path | rocket-cli `control`/`send-uplink`/`ground-station` over GCM | same |
+| Observe | GCM telemetry JSON + RTT + SD dump | same |
+| Doc | [HIL.md](HIL.md) | — |
 
-They are **mutually exclusive**: the in-process HIL build replaces the LoRa daemon, so it
-cannot talk to the GCM. To exercise the GCM↔avionics radio link, flash a normal avionics build.
-
-### Automation gap to solve for scripted HIL
-The VLP uplink actions (**ChangeMode / SetTargetApogee / FirePyro / Reset / overrides**) are
-**interactive buttons inside the `ground-station` TUI** — there is **no** non-interactive
-rocket-cli subcommand for them. For scripted over-the-air HIL we'll need one of:
-- a small rocket-cli subcommand that sends a single `VLPUplinkPacket` and exits, or
-- drive the GCM's LoRa RPC directly (`configure`/`tx_then_rx`) with our own signing, or
-- reuse the in-process `hil_script` approach for avionics-only runs (no radio).
-
-Non-interactive helpers that already exist: `testing send-vlp-telemetry`, `testing
-mock-ground-station`, and the flight-log commands.
+Scripting is fully supported: `rocket-cli control` streams downlink JSON on stdout and reads
+`arm` / `mode …` / `target-apogee …` / `fire-pyro …` / `reset …` / `quit` on stdin; `send-uplink`
+is the one-shot form. (The old interactive-only "automation gap" is closed, and the old
+in-process USB-VLP-bridge / `hil-radio` / `vlp_script` paths are deleted.)
 
 ---
 

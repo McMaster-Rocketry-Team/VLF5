@@ -1,29 +1,19 @@
-//! Time-based IMU/baro replay publisher for HIL.
+//! HIL barometer simulation.
 //!
-//! The barometer is the only sensor that drives flight decisions (launch detect,
-//! apogee, deploy, landing, airbrakes MPC), so it is generated from a scripted
-//! single-deploy vertical trajectory plus per-sample sensor noise. The flight clock
-//! is relative to **entering Armed**, not boot: the operator arms over the radio and
-//! the flight plays out from that instant, so re-arming replays the flight cleanly.
-//! IMU is a constant stub (telemetry/logging only).
+//! The barometer is the one sensor that cannot be exercised on a static bench — it
+//! can't feel altitude — so in HIL builds its *value* is replaced by a scripted
+//! single-deploy vertical trajectory plus measured sensor noise. Every other sensor,
+//! task, and GPIO stays real (IMU, GPS, pyro, mag, CAN, SD, LoRa): HIL affects only
+//! the baro reading. The flight clock is relative to **entering Armed**, not boot —
+//! the operator arms over the radio and the flight plays out from that instant, and
+//! leaving Armed resets the clock so a re-arm replays cleanly from the pad.
 
-use defmt::info;
-use embassy_futures::select::{select, Either};
-use embassy_sync::pubsub::DynPublisher;
-use embassy_time::{Duration, Instant, Ticker};
-use firmware_common_new::{
-    readings::{BaroData, IMUData},
-    sensor_reading::SensorReading,
-    time::BootTimestamp,
-};
+use embassy_time::Instant;
+use firmware_common_new::readings::BaroData;
 use icao_isa::calculate_isa_pressure;
 use icao_units::si::Metres;
-use nalgebra::Vector3;
 
-use crate::{
-    avionics_mode::AvionicsMode, tasks::sensor_tasks::IMUBaroReadingPubSub, AvionicsModeWatch,
-    VLStatusMutex,
-};
+use crate::avionics_mode::AvionicsMode;
 
 /// Pad altitude ASL used by the scripted flight profile (m).
 pub const PAD_ALTITUDE_ASL: f32 = 200.0;
@@ -120,93 +110,41 @@ pub fn generate_baro(t_s: f32, sample_idx: u32) -> BaroData {
     }
 }
 
-/// One replay sample: noisy baro + constant IMU stub.
-fn sample_at(t_s: f32, sample_idx: u32) -> (Option<IMUData>, BaroData) {
-    let baro = generate_baro(t_s, sample_idx);
-    // IMU is decision-irrelevant here (flight logic is baro-only); a constant upright
-    // resting reading keeps CAN/telemetry/logging fields sane.
-    let imu = Some(IMUData {
-        acc: Vector3::new(0.0, 0.0, GRAVITY),
-        gyro: Vector3::zeros(),
-    });
-    (imu, baro)
+/// Per-task HIL baro state: a monotonic sample counter plus the Arm-relative
+/// flight-clock origin.
+pub struct HilBaroState {
+    idx: u32,
+    armed_t0: Option<Instant>,
 }
 
-#[embassy_executor::task]
-pub async fn sensor_replay_task(
-    pubsub: &'static IMUBaroReadingPubSub,
-    vl_status: &'static VLStatusMutex,
-    avionics_mode_watch: &'static AvionicsModeWatch,
-) {
-    info!("HIL: sensor_replay_task started (flight clock starts on Arm, 416 Hz)");
-    vl_status.lock(|s| {
-        let mut s = s.borrow_mut();
-        s.imu_ok = true;
-        s.baro_ok = true;
-    });
-
-    let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
-    let publisher = pubsub.dyn_publisher().unwrap();
-
-    loop {
-        match avionics_mode.get().await {
-            AvionicsMode::Armed => {
-                // Flight clock is latched on entry to Armed; leaving Armed drops it so a
-                // re-arm restarts the flight deterministically from the pad.
-                let armed_t0 = Instant::now();
-                match select(
-                    publish_loop(&publisher, Some(armed_t0), 416),
-                    avionics_mode.changed_and(|m| *m != AvionicsMode::Armed),
-                )
-                .await
-                {
-                    Either::First(never) => match never {},
-                    Either::Second(_) => {}
-                }
-            }
-            AvionicsMode::SelfTest => {
-                // Stable pad reading (flight clock held at 0) so self-test baro check passes.
-                match select(
-                    publish_loop(&publisher, None, 416),
-                    avionics_mode.changed_and(|m| *m != AvionicsMode::SelfTest),
-                )
-                .await
-                {
-                    Either::First(never) => match never {},
-                    Either::Second(_) => {}
-                }
-            }
-            AvionicsMode::LowPower | AvionicsMode::Demo => {
-                match select(publish_loop(&publisher, None, 5), avionics_mode.changed()).await {
-                    Either::First(never) => match never {},
-                    Either::Second(_) => {}
-                }
-            }
-            AvionicsMode::Landed => {
-                avionics_mode.changed().await;
-            }
+impl HilBaroState {
+    pub const fn new() -> Self {
+        Self {
+            idx: 0,
+            armed_t0: None,
         }
     }
-}
 
-/// Publish samples at `hz`. When `armed_t0` is set, the flight clock is `now - armed_t0`;
-/// otherwise the clock is held at 0 (pad hold), still applying per-sample noise.
-async fn publish_loop(
-    publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
-    armed_t0: Option<Instant>,
-    hz: u64,
-) -> ! {
-    let mut ticker = Ticker::every(Duration::from_hz(hz));
-    let mut idx: u32 = 0;
-    loop {
-        ticker.next().await;
-        let t_s = match armed_t0 {
-            Some(t0) => (Instant::now() - t0).as_micros() as f32 / 1_000_000.0,
+    /// Next synthetic baro sample for the current avionics `mode`.
+    ///
+    /// The flight clock latches on the first `Armed` sample and resets whenever the
+    /// mode leaves `Armed`, so pre-arm modes (SelfTest / LowPower / Demo) always read
+    /// the noisy pad altitude and re-arming replays the flight cleanly from the pad.
+    pub fn next(&mut self, mode: AvionicsMode) -> BaroData {
+        let now = Instant::now();
+        if mode == AvionicsMode::Armed {
+            if self.armed_t0.is_none() {
+                self.armed_t0 = Some(now);
+            }
+        } else {
+            self.armed_t0 = None;
+        }
+        let t_s = match self.armed_t0 {
+            Some(t0) => (now - t0).as_micros() as f32 / 1_000_000.0,
             None => 0.0,
         };
-        let (imu, baro) = sample_at(t_s, idx);
-        idx = idx.wrapping_add(1);
-        let timestamp_us = Instant::now().as_micros();
-        publisher.publish_immediate(SensorReading::new(timestamp_us, (imu, baro)));
+        let baro = generate_baro(t_s, self.idx);
+        self.idx = self.idx.wrapping_add(1);
+        baro
     }
 }

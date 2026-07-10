@@ -71,6 +71,49 @@ pub type IMUBaroReadingPubSub = PubSubChannel<
     1,
 >;
 
+// --- HIL baro injection -----------------------------------------------------
+// The barometer is the one sensor a static bench can't exercise (it can't feel
+// altitude), so HIL builds synthesize its reading from a scripted flight while the
+// IMU, its data-ready interrupt timing, the SPI buses, and every other task/GPIO
+// stay real — HIL affects only the baro reading. `read_baro_or_sim` is the single
+// seam: the real MS5607 read in flight builds, the trajectory generator in HIL.
+#[cfg(feature = "hil-replay")]
+use crate::hil::baro_sim::HilBaroState;
+
+/// Flight-build stand-in so the read loops carry an identical signature in both
+/// builds; the real state lives in [`crate::hil::baro_sim::HilBaroState`].
+#[cfg(not(feature = "hil-replay"))]
+struct HilBaroState;
+#[cfg(not(feature = "hil-replay"))]
+impl HilBaroState {
+    const fn new() -> Self {
+        Self
+    }
+}
+
+/// Flight build: read the real barometer over SPI.
+#[cfg(not(feature = "hil-replay"))]
+#[inline]
+async fn read_baro_or_sim<B: SpiDevice>(
+    baro: &mut MS5607<'static, B>,
+    _hil: &mut HilBaroState,
+    _mode_watch: &AvionicsModeWatch,
+) -> Result<BaroData, B::Error> {
+    Ok(baro.read().await?.data)
+}
+
+/// HIL build: synthesize the barometer from the scripted flight (never touches the
+/// real baro, so a bench baro fault can't abort the simulated flight).
+#[cfg(feature = "hil-replay")]
+#[inline]
+async fn read_baro_or_sim<B: SpiDevice>(
+    _baro: &mut MS5607<'static, B>,
+    hil: &mut HilBaroState,
+    mode_watch: &AvionicsModeWatch,
+) -> Result<BaroData, B::Error> {
+    Ok(hil.next(mode_watch.try_get().unwrap_or(AvionicsMode::SelfTest)))
+}
+
 #[embassy_executor::task]
 pub async fn imu_baro_task(
     imu_spi4: Peri<'static, SPI4>,
@@ -151,12 +194,22 @@ pub async fn imu_baro_task(
         info!("Barometer initialized");
 
         let publisher = pubsub.dyn_publisher().unwrap();
+        // In flight builds this is a zero-sized stand-in; in HIL it holds the baro
+        // flight clock + sample counter across mode changes (so a re-arm replays).
+        let mut hil = HilBaroState::new();
         loop {
             match avionics_mode.get().await {
                 AvionicsMode::Armed | AvionicsMode::SelfTest => {
                     imu.power_up().await.map_err(IMUOrBaroError::IMU)?;
                     match select(
-                        read_imu_baro_loop(&mut imu_int1, &mut imu, &mut baro, &publisher),
+                        read_imu_baro_loop(
+                            &mut imu_int1,
+                            &mut imu,
+                            &mut baro,
+                            &publisher,
+                            &mut hil,
+                            avionics_mode_watch,
+                        ),
                         avionics_mode.changed_and(|m| {
                             *m != AvionicsMode::Armed && *m != AvionicsMode::SelfTest
                         }),
@@ -170,7 +223,12 @@ pub async fn imu_baro_task(
                 }
                 AvionicsMode::LowPower | AvionicsMode::Demo => {
                     match select(
-                        read_baro_low_power_loop(&mut baro, &publisher),
+                        read_baro_low_power_loop(
+                            &mut baro,
+                            &publisher,
+                            &mut hil,
+                            avionics_mode_watch,
+                        ),
                         avionics_mode.changed(),
                     )
                     .await
@@ -217,14 +275,16 @@ enum IMUOrBaroError<I: SpiDevice, B: SpiDevice> {
 async fn read_baro_low_power_loop<B: SpiDevice>(
     baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
+    hil: &mut HilBaroState,
+    mode_watch: &AvionicsModeWatch,
 ) -> Result<!, B::Error> {
     let mut ticker = Ticker::every(Duration::from_hz(5));
 
     loop {
-        let reading = baro.read().await?;
+        let baro_data = read_baro_or_sim(baro, hil, mode_watch).await?;
         publisher.publish_immediate(SensorReading::new(
-            reading.timestamp_us,
-            (None, reading.data),
+            Instant::now().as_micros(),
+            (None, baro_data),
         ));
         ticker.next().await;
     }
@@ -235,13 +295,15 @@ async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
     imu: &mut LSM6DSM<I>,
     baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
+    hil: &mut HilBaroState,
+    mode_watch: &AvionicsModeWatch,
 ) -> Result<!, IMUOrBaroError<I, B>> {
     loop {
         imu_int1.wait_for_rising_edge().await;
-        match join(imu.read(), baro.read()).await {
-            (Ok(imu_reading), Ok(baro_reading)) => publisher.publish_immediate(SensorReading::new(
+        match join(imu.read(), read_baro_or_sim(baro, hil, mode_watch)).await {
+            (Ok(imu_reading), Ok(baro_data)) => publisher.publish_immediate(SensorReading::new(
                 imu_reading.timestamp_us,
-                (Some(imu_reading.data), baro_reading.data),
+                (Some(imu_reading.data), baro_data),
             )),
             (Ok(_), Err(baro_error)) => Err(IMUOrBaroError::Baro(baro_error))?,
             (Err(imu_error), Ok(_)) => Err(IMUOrBaroError::IMU(imu_error))?,

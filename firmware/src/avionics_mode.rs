@@ -20,7 +20,11 @@ impl From<firmware_common_new::vlp::packets::change_mode::Mode> for AvionicsMode
 }
 
 impl AvionicsMode {
-    pub fn sensors_active(&self) -> bool {
-        matches!(self, AvionicsMode::Armed | AvionicsMode::SelfTest)
+    /// Flight-data logging runs only from Arm through Landed — the whole flight — so
+    /// pre-flight modes (SelfTest / LowPower / Demo) don't fill the SD card. The mode
+    /// stays `Armed` for the entire ascent/coast/deploy/descent, then auto-switches to
+    /// `Landed`, so `{Armed, Landed}` covers "armed all the way to landed".
+    pub fn should_log(&self) -> bool {
+        matches!(self, AvionicsMode::Armed | AvionicsMode::Landed)
     }
 }

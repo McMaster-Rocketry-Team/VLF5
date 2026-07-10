@@ -3,7 +3,7 @@
 //! Streams raw MS5607 pressure (Pa) + temperature (degC) over defmt RTT as fast as
 //! the sensor converts (~300 Hz), while the board sits perfectly still. Capture a
 //! stationary window and compute the drift-removed altitude-noise std to set
-//! `BARO_NOISE_M` in `hil/sensor_replay.rs`. Measured 2026-07: sigma ~= 0.36 m.
+//! `BARO_NOISE_M` in `hil/baro_sim.rs`. Measured 2026-07: sigma ~= 0.36 m.
 //!
 //! Run: `cargo run --release --bin baro_bench --probe 0483:374b:066EFF525086874967123920`
 

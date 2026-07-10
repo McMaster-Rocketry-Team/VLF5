@@ -50,7 +50,7 @@ pub async fn data_logger(
     loop {
         if !avionics_mode
             .try_get()
-            .map(|m| m.sensors_active())
+            .map(|m| m.should_log())
             .unwrap_or(false)
         {
             avionics_mode.changed().await;

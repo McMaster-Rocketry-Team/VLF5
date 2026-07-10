@@ -64,13 +64,13 @@ use crate::{
         unix_clock::{UnixClock, unix_clock_task},
     },
 };
-// The LoRa daemon always runs: flight and HIL both drive VLP over the real radio + GCM.
-// Only the sensor/GPS/pyro drivers are gated out and replaced by HIL stubs under `hil-replay`.
-#[cfg(not(feature = "hil-replay"))]
+// Every task runs on real hardware in both flight and HIL builds — IMU, GPS, pyro
+// GPIO, mag, CAN, SD, and the LoRa radio. HIL only synthesizes the barometer reading
+// (inside `imu_baro_task`) and boots into SelfTest exactly like a flight build.
 use crate::tasks::{
     gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
+    vlp_avionics_daemon_task::vlp_avionics_daemon_task,
 };
-use crate::tasks::vlp_avionics_daemon_task::vlp_avionics_daemon_task;
 use receive_vlp_task::{fire_pyro_countdown_task, receive_vlp_task};
 
 mod avionics_mode;
@@ -104,8 +104,7 @@ pub const OZYS_2_NODE_ID: u16 = 0x0E1;
 #[cfg(feature = "hil-single")]
 pub const FLIGHT_PROFILE: FlightProfile = FlightProfile::Single {
     minimum_deployment_altitude_agl: 2000.0,
-    drogue_delay_us: 0,
-    main_delay_us: 0,
+    delay_us: 0,
 };
 
 #[cfg(not(feature = "hil-single"))]
@@ -154,19 +153,15 @@ fn main() -> ! {
 
     let buzzer_pubsub = singleton!(: BuzzerPubSub = BuzzerPubSub::new()).unwrap();
     let avionics_mode = singleton!(: AvionicsModeWatch = AvionicsModeWatch::new()).unwrap();
-    #[cfg(feature = "hil-replay")]
-    {
-        #[cfg(feature = "hil-dual")]
-        defmt::warn!(
-            "HIL-DUAL build: fake sensors/GPS + no pyro GPIO, REAL LoRa radio — do not connect e-matches"
-        );
-        #[cfg(feature = "hil-single")]
-        defmt::warn!(
-            "HIL-SINGLE build: fake sensors/GPS + no pyro GPIO, REAL LoRa radio — do not connect e-matches"
-        );
-        avionics_mode.sender().send(AvionicsMode::LowPower);
-    }
-    #[cfg(not(feature = "hil-replay"))]
+    #[cfg(feature = "hil-dual")]
+    defmt::warn!(
+        "HIL-DUAL build: baro is SIMULATED; IMU/GPS/mag/CAN/SD/LoRa are REAL and the real pyro task drives real GPIO — do NOT connect e-matches"
+    );
+    #[cfg(feature = "hil-single")]
+    defmt::warn!(
+        "HIL-SINGLE build: baro is SIMULATED; IMU/GPS/mag/CAN/SD/LoRa are REAL and the real pyro task drives real GPIO — do NOT connect e-matches"
+    );
+    // Flight and HIL boot identically into SelfTest; the operator arms over the radio.
     avionics_mode.sender().send(AvionicsMode::SelfTest);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
@@ -231,16 +226,6 @@ async fn high_prio_main(
 ) {
     let p = unsafe { Peripherals::steal() };
     spawner.spawn(buzzer_task(p.PC15, buzzer_pubsub).unwrap());
-    #[cfg(feature = "hil-replay")]
-    spawner.spawn(
-        crate::hil::sensor_replay::sensor_replay_task(
-            imu_baro_reading_pubsub,
-            vl_status,
-            avionics_mode_watch,
-        )
-        .unwrap(),
-    );
-    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(imu_baro_task(
         p.SPI4,
         p.PE2,
@@ -336,11 +321,6 @@ async fn low_prio_main(
         gps_reading_watch.receiver().unwrap(),
     ).unwrap());
     spawner.spawn(adc_task(p.ADC1, p.PB0, battery_v_watch).unwrap());
-    #[cfg(feature = "hil-replay")]
-    spawner.spawn(
-        crate::hil::pyro_monitor::hil_pyro_monitor(continuity_watch, fire_signal).unwrap(),
-    );
-    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(pyro_task(
         p.PE9,
         p.PE13,
@@ -353,9 +333,6 @@ async fn low_prio_main(
         continuity_watch,
         fire_signal,
     ).unwrap());
-    #[cfg(feature = "hil-replay")]
-    spawner.spawn(crate::hil::gps_stub::hil_gps_stub(gps_reading_watch, vl_status).unwrap());
-    #[cfg(not(feature = "hil-replay"))]
     spawner.spawn(gps_task(
         p.USART1,
         p.PA10,
