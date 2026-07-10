@@ -9,7 +9,7 @@ use core::cell::RefCell;
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use air_brakes_controller_core::{FlightProfile, RocketParameters};
-#[cfg(not(feature = "hil-replay"))]
+#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -46,7 +46,7 @@ use firmware_common_new::{
     time::BootTimestamp,
     vlp::{client::VLPAvionics, packets::fire_pyro::PyroSelect},
 };
-#[cfg(not(feature = "hil-replay"))]
+#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 use firmware_common_new::vlp::lora_config::LoraConfig;
 
 use crate::{
@@ -72,8 +72,10 @@ use crate::{
 #[cfg(not(feature = "hil-replay"))]
 use crate::tasks::{
     gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
-    vlp_avionics_daemon_task::vlp_avionics_daemon_task,
 };
+// The real LoRa daemon is also used by Option B (`hil-radio`): HIL sensors, real radio.
+#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
+use crate::tasks::vlp_avionics_daemon_task::vlp_avionics_daemon_task;
 use receive_vlp_task::{fire_pyro_countdown_task, receive_vlp_task};
 
 mod avionics_mode;
@@ -91,9 +93,9 @@ mod utils;
 mod usb_handler;
 mod watchdog;
 
-#[cfg(not(feature = "hil-replay"))]
+#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
-#[cfg(not(feature = "hil-replay"))]
+#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 const LORA_CONFIG: LoraConfig = LoraConfig {
     frequency: 920_000_000,
     sf: 12,
@@ -345,10 +347,6 @@ async fn low_prio_main(
         p.PA7,
         gps_reading_watch.receiver().unwrap(),
     ).unwrap());
-    if !DISABLE_BUZZER {
-        spawner.spawn(periodic_beep_task(buzzer_pubsub).unwrap());
-    }
-
     spawner.spawn(adc_task(p.ADC1, p.PB0, battery_v_watch).unwrap());
     #[cfg(feature = "hil-replay")]
     spawner.spawn(
@@ -377,10 +375,10 @@ async fn low_prio_main(
         gps_reading_watch.sender(),
         vl_status,
     ).unwrap());
-    // Flight builds bridge VLP over the real LoRa radio. HIL builds instead bridge VLP
-    // over USB (see `usb_handler`), so this daemon (and the SX126x peripherals) are gated
-    // out and the on-USB bridge drives the same `vlp_avionics_client`.
-    #[cfg(not(feature = "hil-replay"))]
+    // Flight builds bridge VLP over the real LoRa radio. Plain HIL builds instead bridge
+    // VLP over USB (see `usb_handler`); Option B (`hil-radio`) keeps the real radio while
+    // faking sensors, so the daemon runs and the on-USB VLP bridge is disabled.
+    #[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
     spawner.spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
         VLP_KEY.try_into().unwrap(),
@@ -564,17 +562,6 @@ async fn low_prio_main(
                 .await
             }
         }
-    }
-}
-
-#[embassy_executor::task]
-async fn periodic_beep_task(buzzer_pubsub: &'static BuzzerPubSub) {
-    let buzzer_pub = buzzer_pubsub.immediate_publisher();
-    let mut ticker = Ticker::every(Duration::from_millis(5000));
-
-    loop {
-        ticker.next().await;
-        buzzer_pub.publish_immediate(BuzzerTone::Low(50, 50));
     }
 }
 

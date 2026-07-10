@@ -14,7 +14,7 @@ use embassy_usb::types::InterfaceNumber;
 use embassy_usb::{Builder, Handler, UsbDevice};
 
 use firmware_common_new::vlp::client::VLPAvionics;
-#[cfg(feature = "hil-replay")]
+#[cfg(all(feature = "hil-replay", not(feature = "hil-radio")))]
 use firmware_common_new::vlp::packets::{MAX_VLP_PACKET_SIZE, VLPUplinkPacket};
 use firmware_common_new::vlp::usb::CliRequest;
 use panic_probe as _;
@@ -40,7 +40,7 @@ bind_interrupts!(struct Irqs {
 /// Bulk-IN endpoint address the host reads flight-log downloads from (EP 1 IN -> 0x81).
 const EP_IN_ADDR: u8 = 1;
 /// Bulk-IN endpoint the host reads VLP downlink frames from in HIL builds (EP 2 IN -> 0x82).
-#[cfg(feature = "hil-replay")]
+#[cfg(all(feature = "hil-replay", not(feature = "hil-radio")))]
 const EP_VLP_IN_ADDR: u8 = 2;
 
 #[embassy_executor::task]
@@ -102,7 +102,7 @@ pub async fn setup_usb_handler(
     // Full-speed bulk endpoints have a 64-byte max packet size.
     let mut ep_in = alt.endpoint_bulk_in(Some(EndpointAddress::from(EP_IN_ADDR)), 64);
     // HIL: a second bulk-IN carries VLP downlink frames (independent of flight-log).
-    #[cfg(feature = "hil-replay")]
+    #[cfg(all(feature = "hil-replay", not(feature = "hil-radio")))]
     let mut ep_vlp_in = alt.endpoint_bulk_in(Some(EndpointAddress::from(EP_VLP_IN_ADDR)), 64);
 
     control_handler.interface_num = interface.interface_number();
@@ -117,10 +117,13 @@ pub async fn setup_usb_handler(
 
     ep_in.wait_enabled().await;
 
-    #[cfg(not(feature = "hil-replay"))]
+    // Flight builds and Option B (`hil-radio`) drive VLP over the real radio, so USB only
+    // carries flight-log traffic here.
+    #[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
     storage_drain(&mut ep_in, storage_resp).await;
 
-    #[cfg(feature = "hil-replay")]
+    // Plain HIL builds bridge VLP over USB alongside the flight-log stream.
+    #[cfg(all(feature = "hil-replay", not(feature = "hil-radio")))]
     embassy_futures::join::join3(
         storage_drain(&mut ep_in, storage_resp),
         vlp_downlink_drain(&mut ep_vlp_in, vlp_client),
@@ -183,7 +186,7 @@ async fn storage_drain(ep_in: &mut impl EndpointIn, storage_resp: &'static Stora
 /// HIL: forward each VLP downlink the avionics app emits to the host over EP2 as a
 /// fixed 101-byte frame `[len: u8][payload (100)]`. Fixed size means the transfer
 /// always ends on a short packet, so the host reads exactly one frame per read.
-#[cfg(feature = "hil-replay")]
+#[cfg(all(feature = "hil-replay", not(feature = "hil-radio")))]
 async fn vlp_downlink_drain(
     ep: &mut impl EndpointIn,
     vlp: &'static VLPAvionics<NoopRawMutex>,
@@ -207,7 +210,7 @@ async fn vlp_downlink_drain(
 
 /// HIL: deserialize host uplinks queued from control-OUT and inject them into the
 /// avionics VLP client as if received+verified over the air (no signing on USB).
-#[cfg(feature = "hil-replay")]
+#[cfg(all(feature = "hil-replay", not(feature = "hil-radio")))]
 async fn vlp_uplink_drain(
     chan: &'static VlpUplinkChannel,
     vlp: &'static VLPAvionics<NoopRawMutex>,

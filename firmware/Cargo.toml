@@ -79,6 +79,10 @@ hil-dual = ["hil-replay"]
 # Single-deploy HIL plot (drogue then main back-to-back at apogee).
 #   cargo run --bin main --features hil-single
 hil-single = ["hil-replay"]
+# Option B: HIL sensor replay, but drive VLP over the REAL LoRa radio (GCM in the
+# loop) instead of the on-USB VLP bridge. Combine with hil-single/hil-dual.
+#   cargo run --bin main --features hil-single,hil-radio
+hil-radio = []
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }

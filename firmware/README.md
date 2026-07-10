@@ -17,6 +17,10 @@ This directory contains the avionics firmware and the GCM (ground control module
 - Unfortunately if a variable is used across `.await` points its not going to show up in the debug panel.
 - The debug modes will disable the watchdog, so run release mode once before installing VLF5 to the rocket.
 
+# Operator guide
+
+Pad ops (beeps + rocket-cli): [OPERATOR.md](OPERATOR.md).
+
 # Hardware-in-the-Loop (HIL)
 
 In-process sensor/VLP replay plots (`hil-dual` / `hil-single`) are documented in [HIL.md](HIL.md).
