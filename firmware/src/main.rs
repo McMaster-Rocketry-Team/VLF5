@@ -9,7 +9,6 @@ use core::cell::RefCell;
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use air_brakes_controller_core::{FlightProfile, RocketParameters};
-#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -46,7 +45,6 @@ use firmware_common_new::{
     time::BootTimestamp,
     vlp::{client::VLPAvionics, packets::fire_pyro::PyroSelect},
 };
-#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 use firmware_common_new::vlp::lora_config::LoraConfig;
 
 use crate::{
@@ -66,15 +64,12 @@ use crate::{
         unix_clock::{UnixClock, unix_clock_task},
     },
 };
-// Flight builds run VLP over the real LoRa radio; HIL builds run VLP over USB
-// (`usb_handler`), so the LoRa daemon and the real sensor/GPS/pyro drivers are all
-// gated out and replaced by HIL stubs when `hil-replay` is on.
+// The LoRa daemon always runs: flight and HIL both drive VLP over the real radio + GCM.
+// Only the sensor/GPS/pyro drivers are gated out and replaced by HIL stubs under `hil-replay`.
 #[cfg(not(feature = "hil-replay"))]
 use crate::tasks::{
     gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
 };
-// The real LoRa daemon is also used by Option B (`hil-radio`): HIL sensors, real radio.
-#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 use crate::tasks::vlp_avionics_daemon_task::vlp_avionics_daemon_task;
 use receive_vlp_task::{fire_pyro_countdown_task, receive_vlp_task};
 
@@ -93,9 +88,7 @@ mod utils;
 mod usb_handler;
 mod watchdog;
 
-#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
-#[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
 const LORA_CONFIG: LoraConfig = LoraConfig {
     frequency: 920_000_000,
     sf: 12,
@@ -328,17 +321,12 @@ async fn low_prio_main(
         : tasks::sd_card_writer::StorageRespChannel = tasks::sd_card_writer::StorageRespChannel::new()
     )
     .unwrap();
-    let vlp_uplink_cmd =
-        singleton!(: usb_handler::VlpUplinkChannel = usb_handler::VlpUplinkChannel::new()).unwrap();
-
     spawner.spawn(usb_handler::setup_usb_handler(
         p.USB_OTG_FS,
         p.PA12,
         p.PA11,
         storage_cmd,
         storage_resp,
-        vlp_avionics_client,
-        vlp_uplink_cmd,
         spawner,
     ).unwrap());
 
@@ -375,10 +363,7 @@ async fn low_prio_main(
         gps_reading_watch.sender(),
         vl_status,
     ).unwrap());
-    // Flight builds bridge VLP over the real LoRa radio. Plain HIL builds instead bridge
-    // VLP over USB (see `usb_handler`); Option B (`hil-radio`) keeps the real radio while
-    // faking sensors, so the daemon runs and the on-USB VLP bridge is disabled.
-    #[cfg(any(not(feature = "hil-replay"), feature = "hil-radio"))]
+    // VLP always runs over the real LoRa radio + GCM, in both flight and HIL builds.
     spawner.spawn(vlp_avionics_daemon_task(
         vlp_avionics_client,
         VLP_KEY.try_into().unwrap(),
