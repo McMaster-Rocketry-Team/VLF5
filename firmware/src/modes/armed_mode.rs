@@ -207,6 +207,7 @@ pub async fn armed_mode(
 
                 state_estimator.lock(|s| {
                     let estimator = s.borrow();
+                    let coasting = estimator.is_coasting();
 
                     match estimator.state() {
                         RocketState::OnPad => {
@@ -223,7 +224,11 @@ pub async fn armed_mode(
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::PoweredAscent;
+                            packet.flight_stage = if coasting {
+                                FlightStage::Coasting
+                            } else {
+                                FlightStage::PoweredAscent
+                            };
                         }
                         RocketState::DrogueChute {
                             vertical_velocity,
@@ -352,7 +357,10 @@ pub async fn armed_mode(
         let mut ticker = Ticker::every(Duration::from_hz(10));
 
         loop {
-            let state = state_estimator.lock(|s| s.borrow().state());
+            let (state, coasting) = state_estimator.lock(|s| {
+                let estimator = s.borrow();
+                (estimator.state(), estimator.is_coasting())
+            });
 
             // Vertical-only: CAN rocket-state velocity is [0, vy].
             let message = match state {
@@ -364,8 +372,7 @@ pub async fn armed_mode(
                     unix_clock.now_us_or_boot_time(),
                     &[0.0, vertical_velocity],
                     altitude_asl - launch_pad_altitude_asl,
-                    vertical_velocity > 0.0 && vertical_velocity.abs()
-                        <= 0.85 * approximate_speed_of_sound(altitude_asl),
+                    coasting,
                 )),
                 _ => None,
             };
@@ -388,11 +395,11 @@ pub async fn armed_mode(
             let reading = imu_baro_sub.next_message_pure().await;
             // Baro-only estimator: feed altitude on every IMU+baro sample (~416 Hz).
             let baro_data = reading.data.1;
-            let (pyro, state) = state_estimator.lock(|s| {
+            let (pyro, state, coasting) = state_estimator.lock(|s| {
                 let mut estimator = s.borrow_mut();
                 let pyro = estimator.update(baro_data.altitude_asl());
                 let state = estimator.state();
-                (pyro, state)
+                (pyro, state, estimator.is_coasting())
             });
 
             if let Some(pyro) = pyro {
@@ -402,7 +409,10 @@ pub async fn armed_mode(
                 let _ = fire_signal.try_send(pyro);
             }
 
+            // Airbrakes only after burnout (never under thrust), ascending, and
+            // subsonic — the transonic KF velocity is not trustworthy.
             if !airbrakes_started
+                && coasting
                 && let RocketState::Ascent {
                     vertical_velocity,
                     altitude_asl,
@@ -436,6 +446,7 @@ pub async fn armed_mode(
 
             let new_stage = match state {
                 RocketState::OnPad => FlightStage::Armed,
+                RocketState::Ascent { .. } if coasting => FlightStage::Coasting,
                 RocketState::Ascent { .. } => FlightStage::PoweredAscent,
                 RocketState::DrogueChute { .. } => FlightStage::DrogueDeployed,
                 RocketState::MainChute { .. } => FlightStage::MainDeployed,
