@@ -12,8 +12,7 @@ use firmware_common_new::{
         },
         node_types::{
             AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
-            PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE, PAYLOAD_EPS2_NODE_TYPE,
-            PAYLOAD_ROCKET_WIFI_NODE_TYPE,
+            PAYLOAD_SDRM_NODE_TYPE,
         },
     },
     vlp::{
@@ -177,7 +176,7 @@ pub async fn self_test_mode(
                 out3_enable: false,
                 out4_enable: true,
             });
-            Timer::after_millis(10000).await; // longer time for payload activation pcb to connect to payload
+            Timer::after_millis(10000).await; // longer time for payload sdrm to connect to payload
             let out4_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
@@ -204,48 +203,19 @@ pub async fn self_test_mode(
                     self_test_partial_failure = true;
                 }
 
-                if let Some(payload_activation_pcb) = can_central
-                    .get_nodes::<1>(PAYLOAD_ACTIVATION_NODE_TYPE)
+                if let Some(payload_sdrm) = can_central
+                    .get_nodes::<1>(PAYLOAD_SDRM_NODE_TYPE)
                     .first()
                 {
-                    packet.payload_activation_pcb =
-                        NodeStatus::from_message(&payload_activation_pcb.status);
+                    packet.payload_sdrm =
+                        NodeStatus::from_message(&payload_sdrm.status);
                 } else {
-                    packet.payload_activation_pcb = NodeStatus::offline();
+                    packet.payload_sdrm = NodeStatus::offline();
                 }
-                if !packet.payload_activation_pcb.healthy() {
+                if !packet.payload_sdrm.healthy() {
                     self_test_partial_failure = true;
                 }
 
-                if let Some(rocket_wifi) = can_central
-                    .get_nodes::<1>(PAYLOAD_ROCKET_WIFI_NODE_TYPE)
-                    .first()
-                {
-                    packet.rocket_wifi = NodeStatus::from_message(&rocket_wifi.status);
-                } else {
-                    packet.rocket_wifi = NodeStatus::offline();
-                }
-                if !packet.rocket_wifi.healthy() {
-                    self_test_partial_failure = true;
-                }
-
-                if let Some(eps_1) = can_central.get_nodes::<1>(PAYLOAD_EPS1_NODE_TYPE).first() {
-                    packet.payload_eps1 = NodeStatus::from_message(&eps_1.status);
-                } else {
-                    packet.payload_eps1 = NodeStatus::offline();
-                }
-                if !packet.payload_eps1.healthy() {
-                    self_test_partial_failure = true;
-                }
-
-                if let Some(eps_2) = can_central.get_nodes::<1>(PAYLOAD_EPS2_NODE_TYPE).first() {
-                    packet.payload_eps2 = NodeStatus::from_message(&eps_2.status);
-                } else {
-                    packet.payload_eps2 = NodeStatus::offline();
-                }
-                if !packet.payload_eps2.healthy() {
-                    self_test_partial_failure = true;
-                }
             });
         }
 

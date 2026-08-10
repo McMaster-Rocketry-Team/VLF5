@@ -5,12 +5,11 @@ use firmware_common_new::{
     can_bus::{
         messages::{
             amp_overwrite::AmpOverwriteMessage, amp_reset_output::AmpResetOutputMessage,
-            payload_eps_output_overwrite::PayloadEPSOutputOverwriteMessage, reset::ResetMessage,
+            reset::ResetMessage,
         },
         node_types::{
             AERO_RUST_NODE_TYPE, AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
-            PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE, PAYLOAD_EPS2_NODE_TYPE,
-            PAYLOAD_ROCKET_WIFI_NODE_TYPE, VOID_LAKE_NODE_TYPE,
+            PAYLOAD_SDRM_NODE_TYPE, VOID_LAKE_NODE_TYPE,
         },
         sender::CanSender,
     },
@@ -81,17 +80,12 @@ pub async fn receive_vlp_task(
                     DeviceToReset::AMP => NodeSelection::NodeType(AMP_NODE_TYPE),
 
                     DeviceToReset::Icarus => NodeSelection::NodeType(ICARUS_NODE_TYPE),
-                    DeviceToReset::PayloadActivationPCB => {
-                        NodeSelection::NodeType(PAYLOAD_ACTIVATION_NODE_TYPE)
-                    }
-                    DeviceToReset::RocketWifi => {
-                        NodeSelection::NodeType(PAYLOAD_ROCKET_WIFI_NODE_TYPE)
+                    DeviceToReset::PayloadSDRM => {
+                        NodeSelection::NodeType(PAYLOAD_SDRM_NODE_TYPE)
                     }
                     DeviceToReset::OzysAll => NodeSelection::NodeType(OZYS_NODE_TYPE),
                     DeviceToReset::MainBulkhead => NodeSelection::NodeId(MAIN_BULKHEAD_NODE_ID),
                     DeviceToReset::DrogueBulkhead => NodeSelection::NodeId(DROGUE_BULKHEAD_NODE_ID),
-                    DeviceToReset::PayloadEPS1 => NodeSelection::NodeType(PAYLOAD_EPS1_NODE_TYPE),
-                    DeviceToReset::PayloadEPS2 => NodeSelection::NodeType(PAYLOAD_EPS2_NODE_TYPE),
                     DeviceToReset::AeroRust => NodeSelection::NodeType(AERO_RUST_NODE_TYPE),
                 };
                 info!("node selection: {}", node_selection);
@@ -130,31 +124,6 @@ pub async fn receive_vlp_task(
                         );
                     }
                     NodeSelection::None => {}
-                }
-            }
-            VLPUplinkPacket::PayloadEPSOutputOverwrite(packet) => {
-                for eps1 in can_central.get_nodes::<2>(PAYLOAD_EPS1_NODE_TYPE) {
-                    can_sender.send(
-                        PayloadEPSOutputOverwriteMessage {
-                            out_3v3: packet.eps1_3v3,
-                            out_5v: packet.eps1_5v,
-                            out_9v: packet.eps1_9v,
-                            node_id: eps1.id,
-                        }
-                        .into(),
-                    );
-                }
-
-                for eps2 in can_central.get_nodes::<2>(PAYLOAD_EPS2_NODE_TYPE) {
-                    can_sender.send(
-                        PayloadEPSOutputOverwriteMessage {
-                            out_3v3: packet.eps2_3v3,
-                            out_5v: packet.eps2_5v,
-                            out_9v: packet.eps2_9v,
-                            node_id: eps2.id,
-                        }
-                        .into(),
-                    );
                 }
             }
             VLPUplinkPacket::AMPOutputOverwrite(packet) => {

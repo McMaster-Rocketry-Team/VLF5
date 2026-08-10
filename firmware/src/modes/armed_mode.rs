@@ -15,15 +15,15 @@ use embassy_sync::{
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
+        custom_status::payload_sdrm_custom_status::PayloadSDRMCustomStatus,
         messages::{
             CanBusMessageEnum, airbrakes_control::AirBrakesControlMessage,
-            amp_control::AmpControlMessage, rocket_state::RocketStateMessage,
-            vl_status::FlightStage,
+            amp_control::AmpControlMessage, custom_payload_status::CustomPayloadStatusMessage,
+            rocket_state::RocketStateMessage, vl_status::FlightStage,
         },
         node_types::{
             AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
-            PAYLOAD_ACTIVATION_NODE_TYPE, PAYLOAD_EPS1_NODE_TYPE, PAYLOAD_EPS2_NODE_TYPE,
-            PAYLOAD_ROCKET_WIFI_NODE_TYPE,
+            PAYLOAD_SDRM_NODE_TYPE,
         },
         sender::CanSender,
     },
@@ -167,42 +167,20 @@ pub async fn armed_mode(
                     packet.ozys2_uptime_s = 0;
                 }
 
-                if let Some(payload_activation_pcb) = can_central
-                    .get_nodes::<1>(PAYLOAD_ACTIVATION_NODE_TYPE)
+                if let Some(payload_sdrm) = can_central
+                    .get_nodes::<1>(PAYLOAD_SDRM_NODE_TYPE)
                     .first()
                 {
-                    packet.payload_activation_pcb_online = payload_activation_pcb.is_online();
-                    packet.payload_activation_pcb_uptime_s = payload_activation_pcb.status.uptime_s;
+                    packet.payload_sdrm_online = payload_sdrm.is_online();
+                    packet.payload_sdrm_uptime_s = payload_sdrm.status.uptime_s;
+                    // Stack flags ride along in the node status heartbeat.
+                    packet.payload_stack_status = payload_sdrm
+                        .status
+                        .custom_status::<PayloadSDRMCustomStatus>();
                 } else {
-                    packet.payload_activation_pcb_online = false;
-                    packet.payload_activation_pcb_uptime_s = 0;
-                }
-
-                if let Some(rocket_wifi) = can_central
-                    .get_nodes::<1>(PAYLOAD_ROCKET_WIFI_NODE_TYPE)
-                    .first()
-                {
-                    packet.rocket_wifi_online = rocket_wifi.is_online();
-                    packet.rocket_wifi_uptime_s = rocket_wifi.status.uptime_s;
-                } else {
-                    packet.rocket_wifi_online = false;
-                    packet.rocket_wifi_uptime_s = 0;
-                }
-
-                if let Some(eps_1) = can_central.get_nodes::<1>(PAYLOAD_EPS1_NODE_TYPE).first() {
-                    packet.eps1_online = eps_1.is_online();
-                    packet.eps1_uptime_s = eps_1.status.uptime_s;
-                } else {
-                    packet.eps1_online = false;
-                    packet.eps1_uptime_s = 0;
-                }
-
-                if let Some(eps_2) = can_central.get_nodes::<1>(PAYLOAD_EPS2_NODE_TYPE).first() {
-                    packet.eps2_online = eps_2.is_online();
-                    packet.eps2_uptime_s = eps_2.status.uptime_s;
-                } else {
-                    packet.eps2_online = false;
-                    packet.eps2_uptime_s = 0;
+                    packet.payload_sdrm_online = false;
+                    packet.payload_sdrm_uptime_s = 0;
+                    packet.payload_stack_status = PayloadSDRMCustomStatus::new();
                 }
 
                 state_estimator.lock(|s| {
@@ -276,7 +254,6 @@ pub async fn armed_mode(
         loop {
             let message = can_receiver_sub.next_message_pure().await.data;
             let node_id = message.id.node_id;
-            let node_type = message.id.node_type;
             packet_builder.update(|packet| match message.message {
                 CanBusMessageEnum::AmpStatus(message) => {
                     packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
@@ -301,42 +278,17 @@ pub async fn armed_mode(
                         message.actual_extension_percentage();
                     packet.air_brakes_servo_temp = message.servo_temperature();
                 }
-                CanBusMessageEnum::PayloadEPSStatus(message) => {
-                    if node_type == PAYLOAD_EPS1_NODE_TYPE {
-                        packet.eps1_battery1_v = message.battery1_mv as f32 / 1000.0;
-                        packet.eps1_battery1_temperature = message.battery1_temperature();
-                        packet.eps1_battery2_v = message.battery2_mv as f32 / 1000.0;
-                        packet.eps1_battery2_temperature = message.battery2_temperature();
-                        packet.eps1_output_3v3_current =
-                            message.output_3v3.current_ma as f32 / 1000.0;
-                        packet.eps1_output_3v3_overwrote = message.output_3v3.overwrote;
-                        packet.eps1_output_3v3_status = message.output_3v3.status;
-                        packet.eps1_output_5v_current =
-                            message.output_5v.current_ma as f32 / 1000.0;
-                        packet.eps1_output_5v_overwrote = message.output_5v.overwrote;
-                        packet.eps1_output_5v_status = message.output_5v.status;
-                        packet.eps1_output_9v_current =
-                            message.output_9v.current_ma as f32 / 1000.0;
-                        packet.eps1_output_9v_overwrote = message.output_9v.overwrote;
-                        packet.eps1_output_9v_status = message.output_9v.status;
-                    } else if node_type == PAYLOAD_EPS2_NODE_TYPE {
-                        packet.eps2_battery1_v = message.battery1_mv as f32 / 1000.0;
-                        packet.eps2_battery1_temperature = message.battery1_temperature();
-                        packet.eps2_battery2_v = message.battery2_mv as f32 / 1000.0;
-                        packet.eps2_battery2_temperature = message.battery2_temperature();
-                        packet.eps2_output_3v3_current =
-                            message.output_3v3.current_ma as f32 / 1000.0;
-                        packet.eps2_output_3v3_overwrote = message.output_3v3.overwrote;
-                        packet.eps2_output_3v3_status = message.output_3v3.status;
-                        packet.eps2_output_5v_current =
-                            message.output_5v.current_ma as f32 / 1000.0;
-                        packet.eps2_output_5v_overwrote = message.output_5v.overwrote;
-                        packet.eps2_output_5v_status = message.output_5v.status;
-                        packet.eps2_output_9v_current =
-                            message.output_9v.current_ma as f32 / 1000.0;
-                        packet.eps2_output_9v_overwrote = message.output_9v.overwrote;
-                        packet.eps2_output_9v_status = message.output_9v.status;
-                    }
+                CanBusMessageEnum::CustomPayloadStatus(message) => {
+                    // 0xFFFF means the payload could not read that rail; keep it as
+                    // None so the ground station shows "n/a" instead of a fake 0V.
+                    let rail_v = |raw_mv: u16| {
+                        CustomPayloadStatusMessage::rail_mv(raw_mv).map(|mv| mv as f32 / 1000.0)
+                    };
+                    packet.epm_batt_v = rail_v(message.epm_batt_mv);
+                    packet.epm_sys_3v3_v = rail_v(message.epm_sys_3v3_mv);
+                    packet.epm_sys_5v_v = rail_v(message.epm_sys_5v_mv);
+                    packet.epm_per_5v_v = rail_v(message.epm_per_5v_mv);
+                    packet.epm_per_9v_v = rail_v(message.epm_per_9v_mv);
                 }
                 _ => {}
             });
