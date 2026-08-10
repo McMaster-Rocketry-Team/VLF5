@@ -96,7 +96,6 @@ pub async fn receive_vlp_task(
                             ResetMessage {
                                 node_id: 0,
                                 reset_all: true,
-                                into_bootloader: false,
                             }
                             .into(),
                         );
@@ -107,7 +106,6 @@ pub async fn receive_vlp_task(
                                 ResetMessage {
                                     node_id: node.id,
                                     reset_all: false,
-                                    into_bootloader: false,
                                 }
                                 .into(),
                             );
@@ -118,7 +116,6 @@ pub async fn receive_vlp_task(
                             ResetMessage {
                                 node_id,
                                 reset_all: false,
-                                into_bootloader: false,
                             }
                             .into(),
                         );
