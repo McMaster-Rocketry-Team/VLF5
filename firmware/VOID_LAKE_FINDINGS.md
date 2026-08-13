@@ -124,13 +124,22 @@ re-converges its altitude deficit as a ~150 ms positive-acceleration burst,
 nudging the filter above threshold once per second — a strict
 consecutive-sample persistence counter could never complete during coast.
 
-**Fix** (`baro_state_estimator`): per-sample acceleration clamped to
-±100 m/s² before the low-pass (kills single-sample gap kicks), and coasting
-latches on a *leaky* counter — 1 s net below threshold, draining 1:1 while
-above — instead of a one-shot or strict-consecutive latch. The liftoff dip
-accrues ~0.5 s and is fully drained by the remaining burn (2× margin); real
-burnout accrues straight through. Validated at 427 Hz: no mid-burn latch,
-Coasting at burnout + 1 s (t=15.67, v=211 m/s).
+**Fix** (`baro_state_estimator`): coasting latches only after 1 s of
+*consecutive* low-passed acceleration below threshold. The liftoff dip holds
+only ~0.5 s — half the required persistence — so it cannot latch mid-burn;
+real burnout accrues straight through.
+
+> **2026-08-13 simplification — depends on finding 6 being fixed.** The
+> original fix also carried a ±100 m/s² pre-filter clamp and a *leaky*
+> counter (drain 1:1 instead of reset) so the detector could latch despite
+> the 1 Hz stall bursts; that variant was the one validated on the 427 Hz
+> flight replay (no mid-burn latch, Coasting at burnout + 1 s, t=15.67,
+> v=211 m/s). Both were removed in favor of fixing the stall root cause.
+> Until finding 6 is actually fixed, the strict counter is reset by the
+> re-convergence burst every 1.000 s and **can never complete** — coasting
+> would never latch and airbrakes would never start (chute deployment is
+> unaffected; it does not read the coasting flag). Do not fly this
+> estimator revision with the stalls still present.
 
 ## 6. Sensor stream stalls 104 ms every second — NOT FIXED (cause unknown)
 
@@ -140,9 +149,11 @@ No timestamps exist inside the gaps despite a 512-deep logger channel, so the
 *publisher* (sensor task) stalls — the flight estimator experienced the same
 freezes, this is not just a logging artifact. Suspects: a 1 Hz task starving
 the executor or a shared bus (GPS NMEA burst parsing, CAN status, slow-record
-heartbeat). The estimator now degrades gracefully through the stalls (findings
-4–5), but the root cause is worth hunting: it costs data and adds KF
-transients.
+heartbeat). The innovation gate (finding 4) degrades gracefully through the
+stalls, but the simplified coasting detector (finding 5) now *requires* them
+fixed: its strict persistence counter can never complete with 1 Hz
+interruptions. Fixing this is a prerequisite for flying the current
+estimator, not just a data-quality improvement.
 
 ## 7. Measurement-level observations (no code change)
 

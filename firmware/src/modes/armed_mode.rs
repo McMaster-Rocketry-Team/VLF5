@@ -32,7 +32,8 @@ use firmware_common_new::{
 
 use crate::{
     AvionicsModeWatch, AirBrakesWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
-    FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch, MACH_LOCKOUT_DURATION_US,
+    MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     ROCKET_PARAMETERS, SetTargetWatch, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
@@ -76,7 +77,7 @@ pub async fn armed_mode(
 
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
     let state_estimator = BlockingMutex::<NoopRawMutex, _>::new(RefCell::new(
-        RocketStateEstimator::new(FLIGHT_PROFILE.clone()),
+        RocketStateEstimator::new(FLIGHT_PROFILE.clone(), MACH_LOCKOUT_DURATION_US),
     ));
 
     let update_packet_sensor_fut = async {
@@ -349,7 +350,7 @@ pub async fn armed_mode(
             let reading = imu_baro_sub.next_message_pure().await;
             // Baro-only estimator: feed altitude on every IMU+baro sample (~416 Hz).
             let baro_data = reading.data.1;
-            let (pyro, state, coasting, kf_altitude_asl, kf_vertical_velocity) =
+            let (pyro, state, coasting, in_mach_lockout, kf_altitude_asl, kf_vertical_velocity) =
                 state_estimator.lock(|s| {
                     let mut estimator = s.borrow_mut();
                     let pyro = estimator.update(baro_data.altitude_asl());
@@ -358,6 +359,7 @@ pub async fn armed_mode(
                         pyro,
                         state,
                         estimator.is_coasting(),
+                        estimator.in_mach_lockout(),
                         estimator.altitude_asl(),
                         estimator.vertical_velocity(),
                     )
@@ -372,8 +374,10 @@ pub async fn armed_mode(
             }
 
             // Airbrakes only after burnout (never under thrust), ascending, and
-            // subsonic — the transonic KF velocity is not trustworthy.
+            // subsonic — the transonic KF velocity is not trustworthy. During
+            // Mach lockout the KF is frozen and all of these values are stale.
             if !airbrakes_started
+                && !in_mach_lockout
                 && coasting
                 && let RocketState::Ascent {
                     vertical_velocity,

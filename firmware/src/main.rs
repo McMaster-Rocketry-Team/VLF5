@@ -115,6 +115,17 @@ pub const FLIGHT_PROFILE: FlightProfile = FlightProfile::Dual {
     main_chute_delay_us: 0,
 };
 
+/// Baro Mach lockout: once KF speed crosses 0.75 Mach the baro KF freezes for
+/// this long (supersonic static-port readings are garbage), then re-seeds.
+/// TODO before flight: set from the flight sim — (time above Mach 0.75) x 1.4
+/// margin — and verify it still ends >5 s before the earliest simulated
+/// apogee. Disabled under HIL replay: the replay data is from the subsonic
+/// test flight, whose boost baro overshoot would spuriously trigger it.
+#[cfg(feature = "hil-replay")]
+pub const MACH_LOCKOUT_DURATION_US: Option<u32> = None;
+#[cfg(not(feature = "hil-replay"))]
+pub const MACH_LOCKOUT_DURATION_US: Option<u32> = Some(20_000_000);
+
 pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
     burnout_mass: 17.607,
     cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
