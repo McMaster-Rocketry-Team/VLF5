@@ -1,0 +1,8 @@
+fix the 1hz blocking task
+
+log predicted altitude
+test on simulated data on openrocket
+supersonic lock out?
+state estimator + kf logic
+
+port vlf5 logic to vlf6

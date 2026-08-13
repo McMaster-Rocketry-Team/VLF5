@@ -20,7 +20,7 @@ pub const FLIGHT_DATA_CHANNEL_DEPTH: usize = 512;
 pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNEL_DEPTH>;
 
 const IMU_TIMEOUT: Duration = Duration::from_millis(20);
-const SLOW_HEARTBEAT: Duration = Duration::from_secs(1);
+const SLOW_INTERVAL: Duration = Duration::from_millis(100);
 
 #[embassy_executor::task]
 pub async fn data_logger(
@@ -44,7 +44,6 @@ pub async fn data_logger(
 
     let mut sequence: u32 = 0;
     let mut backlog_warned = false;
-    let mut last_slow: Option<FlightDataSlowRecord> = None;
     let mut last_slow_emit = Instant::now();
 
     loop {
@@ -55,7 +54,6 @@ pub async fn data_logger(
         {
             avionics_mode.changed().await;
             backlog_warned = false;
-            last_slow = None;
             continue;
         }
 
@@ -187,18 +185,15 @@ pub async fn data_logger(
             valid: slow_valid,
         };
 
-        let slow_changed = last_slow.as_ref() != Some(&slow_record);
-        let slow_due = last_slow_emit.elapsed() >= SLOW_HEARTBEAT;
-        let emit_slow = slow_changed || slow_due;
+        let emit_slow = last_slow_emit.elapsed() >= SLOW_INTERVAL;
 
         let mut send_failed = false;
         if channel.try_send(imu_record).is_err() {
             send_failed = true;
         } else if emit_slow {
-            if channel.try_send(LogRecord::Slow(slow_record.clone())).is_err() {
+            if channel.try_send(LogRecord::Slow(slow_record)).is_err() {
                 send_failed = true;
             } else {
-                last_slow = Some(slow_record);
                 last_slow_emit = Instant::now();
             }
         }

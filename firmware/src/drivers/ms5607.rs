@@ -5,6 +5,20 @@ use firmware_common_new::readings::BaroData;
 use firmware_common_new::sensor_reading::SensorReading;
 use firmware_common_new::time::BootTimestamp;
 
+/// Pressure conversion at OSR=512 (1.17 ms). The whole read must fit inside one
+/// LSM6DSM data-ready period (~2.34 ms) so the IMU+baro loop publishes on every
+/// IMU sample — OSR=1024's 2.28 ms conversion overran it and halved the
+/// effective sample rate (Void Lake flight logged 213.5 Hz instead of ~416 Hz).
+const PRESSURE_CONVERT_CMD: u8 = 0x42;
+const PRESSURE_CONVERT_TIME_US: u64 = 1170;
+
+/// Temperature conversion at OSR=256 (0.60 ms), refreshed once every
+/// [`TEMP_DECIMATION`] pressure reads (~75 ms at 416 Hz). Die temperature moves
+/// far slower than that; skipping it keeps most read cycles pressure-only.
+const TEMP_CONVERT_CMD: u8 = 0x50;
+const TEMP_CONVERT_TIME_US: u64 = 600;
+const TEMP_DECIMATION: u8 = 32;
+
 #[derive(Clone, Copy)]
 struct Coefficients {
     sens_t1: u16,
@@ -19,6 +33,9 @@ pub struct MS5607<'a, B: SpiDevice> {
     spi: B,
     coefficients: Option<Coefficients>,
     buffer: &'a mut [u8],
+    /// Last raw temperature ADC value (D2); reused between temperature refreshes.
+    last_d2: Option<u32>,
+    reads_since_temp: u8,
 }
 
 macro_rules! create_buffer {
@@ -38,6 +55,8 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
             spi: spi_device,
             coefficients: None,
             buffer,
+            last_d2: None,
+            reads_since_temp: 0,
         }
     }
 
@@ -69,18 +88,20 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
             t_ref: coefficients[4],
             tempsens: coefficients[5],
         });
+        self.last_d2 = None;
+        self.reads_since_temp = 0;
 
         Ok(())
     }
 
     pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, BaroData>, B::Error> {
-        // request measurement pressure with OSR=1024
-        let timestamp = Instant::now().as_micros() + 1000; // timestamp of the pressure measurement
-        let (read_buffer, write_buffer) = create_buffer!(self, [0x44]);
+        // request pressure measurement; stamp the middle of its integration window
+        let timestamp = Instant::now().as_micros() + PRESSURE_CONVERT_TIME_US / 2;
+        let (read_buffer, write_buffer) = create_buffer!(self, [PRESSURE_CONVERT_CMD]);
         self.spi
             .transfer(read_buffer, write_buffer)
             .await?;
-        Timer::after(Duration::from_micros(2280)).await;
+        Timer::after(Duration::from_micros(PRESSURE_CONVERT_TIME_US)).await;
 
         // read pressure measurement
         let (read_buffer, write_buffer) = create_buffer!(self, [0x00, 0, 0, 0]);
@@ -91,21 +112,29 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
             | ((read_buffer[2] as u32) << 8)
             | (read_buffer[3] as u32);
 
-        // request measurement temperature with OSR=256
-        let (read_buffer, write_buffer) = create_buffer!(self, [0x50]);
-        self.spi
-            .transfer(read_buffer, write_buffer)
-            .await?;
-        Timer::after(Duration::from_micros(600)).await;
+        let d2 = if self.last_d2.is_none() || self.reads_since_temp >= TEMP_DECIMATION {
+            // request temperature measurement
+            let (read_buffer, write_buffer) = create_buffer!(self, [TEMP_CONVERT_CMD]);
+            self.spi
+                .transfer(read_buffer, write_buffer)
+                .await?;
+            Timer::after(Duration::from_micros(TEMP_CONVERT_TIME_US)).await;
 
-        // read temerature measurement
-        let (read_buffer, write_buffer) = create_buffer!(self, [0x00, 0, 0, 0]);
-        self.spi
-            .transfer(read_buffer, write_buffer)
-            .await?;
-        let d2 = ((read_buffer[1] as u32) << 16)
-            | ((read_buffer[2] as u32) << 8)
-            | (read_buffer[3] as u32);
+            // read temperature measurement
+            let (read_buffer, write_buffer) = create_buffer!(self, [0x00, 0, 0, 0]);
+            self.spi
+                .transfer(read_buffer, write_buffer)
+                .await?;
+            let d2 = ((read_buffer[1] as u32) << 16)
+                | ((read_buffer[2] as u32) << 8)
+                | (read_buffer[3] as u32);
+            self.last_d2 = Some(d2);
+            self.reads_since_temp = 0;
+            d2
+        } else {
+            self.reads_since_temp += 1;
+            self.last_d2.unwrap()
+        };
 
         let coeffs = self.coefficients.unwrap();
 
