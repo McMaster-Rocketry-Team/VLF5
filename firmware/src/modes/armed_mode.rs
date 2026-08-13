@@ -32,7 +32,7 @@ use firmware_common_new::{
 
 use crate::{
     AvionicsModeWatch, AirBrakesWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
-    FireSignal, FlightStageMutex, GPSReadingWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch, MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     ROCKET_PARAMETERS, SetTargetWatch, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
@@ -58,6 +58,7 @@ pub async fn armed_mode(
     target_agl_watch: &'static SetTargetWatch,
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static FlightStageMutex,
+    kf_state_watch: &'static KfStateWatch,
     amp_control_watch: &'static AmpControlWatch,
     air_brakes_watch: &'static AirBrakesWatch,
     unix_clock: &'static UnixClock,
@@ -342,17 +343,26 @@ pub async fn armed_mode(
         let mut airbrakes_started = false;
         let mut terminal_handled = false;
         let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
+        let kf_state_sender = kf_state_watch.sender();
 
         loop {
             let reading = imu_baro_sub.next_message_pure().await;
             // Baro-only estimator: feed altitude on every IMU+baro sample (~416 Hz).
             let baro_data = reading.data.1;
-            let (pyro, state, coasting) = state_estimator.lock(|s| {
-                let mut estimator = s.borrow_mut();
-                let pyro = estimator.update(baro_data.altitude_asl());
-                let state = estimator.state();
-                (pyro, state, estimator.is_coasting())
-            });
+            let (pyro, state, coasting, kf_altitude_asl, kf_vertical_velocity) =
+                state_estimator.lock(|s| {
+                    let mut estimator = s.borrow_mut();
+                    let pyro = estimator.update(baro_data.altitude_asl());
+                    let state = estimator.state();
+                    (
+                        pyro,
+                        state,
+                        estimator.is_coasting(),
+                        estimator.altitude_asl(),
+                        estimator.vertical_velocity(),
+                    )
+                });
+            kf_state_sender.send((kf_altitude_asl, kf_vertical_velocity));
 
             if let Some(pyro) = pyro {
                 // Channel capacity 2: drogue+main can queue for single-at-apogee.

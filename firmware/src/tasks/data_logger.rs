@@ -1,6 +1,6 @@
 use crate::{
     AirBrakesWatch, AvionicsModeWatch, ContinuityWatch, FlightStageMutex, GPSReadingWatch,
-    VLStatusMutex,
+    KfStateWatch, VLStatusMutex,
     tasks::sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
     utils::drain_latest,
 };
@@ -10,7 +10,7 @@ use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::flight_data_record::{
-    FlightDataImuRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
+    FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
     VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
     VALID_IMU, VALID_MAG,
 };
@@ -31,6 +31,7 @@ pub async fn data_logger(
     continuity_watch: &'static ContinuityWatch,
     air_brakes_watch: &'static AirBrakesWatch,
     flight_stage: &'static FlightStageMutex,
+    kf_state_watch: &'static KfStateWatch,
     avionics_mode_watch: &'static AvionicsModeWatch,
     vl_status: &'static VLStatusMutex,
     channel: &'static FlightDataChannel,
@@ -72,6 +73,9 @@ pub async fn data_logger(
         let continuity_opt = continuity_receiver.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
         let stage = flight_stage.lock(|r| *r.borrow());
+        // NaN until the armed-mode estimator has produced its first sample.
+        let (kf_altitude_asl, kf_vertical_velocity) =
+            kf_state_watch.try_get().unwrap_or((f32::NAN, f32::NAN));
 
         let mut imu_valid = 0u8;
         let (acc, gyro) = match imu_opt {
@@ -157,7 +161,7 @@ pub async fn data_logger(
             continue;
         }
 
-        let imu_record = LogRecord::Imu(FlightDataImuRecord {
+        let fast_record = LogRecord::Fast(FlightDataFastRecord {
             sequence,
             timestamp_us,
             acc,
@@ -165,6 +169,9 @@ pub async fn data_logger(
             temperature,
             pressure,
             mag,
+            kf_altitude_asl,
+            kf_vertical_velocity,
+            flight_stage: stage,
             valid: imu_valid,
         });
         sequence = sequence.wrapping_add(1);
@@ -188,7 +195,7 @@ pub async fn data_logger(
         let emit_slow = last_slow_emit.elapsed() >= SLOW_INTERVAL;
 
         let mut send_failed = false;
-        if channel.try_send(imu_record).is_err() {
+        if channel.try_send(fast_record).is_err() {
             send_failed = true;
         } else if emit_slow {
             if channel.try_send(LogRecord::Slow(slow_record)).is_err() {

@@ -23,7 +23,7 @@ use embassy_stm32::{
     sdmmc::{self, Sdmmc},
 };
 use embassy_time::{Duration, Instant, Timer};
-use firmware_common_new::flight_storage::{BLOCK_SIZE, IMU_WIRE_LEN, USABLE_PER_BLOCK};
+use firmware_common_new::flight_storage::{BLOCK_SIZE, FAST_WIRE_LEN, USABLE_PER_BLOCK};
 use heapless::Deque;
 use sd_bench::{LatencyStats, WORST_CASE_WRITE_US};
 
@@ -245,8 +245,8 @@ async fn main(_spawner: Spawner) {
     crc.feed_bytes(&block[..USABLE_PER_BLOCK]);
     block[USABLE_PER_BLOCK..BLOCK_SIZE].copy_from_slice(&crc.read().to_le_bytes());
 
-    let mut record = [0u8; IMU_WIRE_LEN];
-    record[0] = 0x01; // IMU tag
+    let mut record = [0u8; FAST_WIRE_LEN];
+    record[0] = 0x01; // FAST tag
     rng.async_fill_bytes(&mut record[1..]).await.unwrap();
 
     let mut superblock = [0u8; BLOCK_SIZE];

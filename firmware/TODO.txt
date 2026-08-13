@@ -1,8 +1,11 @@
-fix the 1hz blocking task
-
 log predicted altitude
-test on simulated data on openrocket
+port vlf5 logic to vlf6
+
 supersonic lock out?
 state estimator + kf logic
+test on simulated data on openrocket
+coast state
 
-port vlf5 logic to vlf6
+
+fix the 1hz blocking task
+vlp invalid ack

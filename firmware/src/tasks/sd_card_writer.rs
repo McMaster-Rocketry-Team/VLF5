@@ -63,7 +63,7 @@ pub type StorageRespChannel = embassy_sync::channel::Channel<NoopRawMutex, Stora
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Pending SD jobs while the card is busy. Sized for a worst-case ~40 ms stall at
-/// ~54 block commits/s plus periodic superblock updates.
+/// ~63 block commits/s (~427 Hz × 73 B fast records) plus periodic superblock updates.
 const SD_WRITE_QUEUE_DEPTH: usize = 16;
 
 /// Warn when the queue is deeper than this — sustained pressure means SDIO cannot

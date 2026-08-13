@@ -125,6 +125,9 @@ pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
 pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
+/// Latest state-estimator KF output `(altitude_asl, vertical_velocity)` for SD
+/// logging, published per estimator sample in armed mode.
+pub type KfStateWatch = Watch<NoopRawMutex, (f32, f32), 2>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
@@ -288,6 +291,7 @@ async fn low_prio_main(
             .unwrap();
     let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
     let air_brakes_watch = singleton!(: AirBrakesWatch = AirBrakesWatch::new()).unwrap();
+    let kf_state_watch = singleton!(: KfStateWatch = KfStateWatch::new()).unwrap();
 
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
@@ -408,6 +412,7 @@ async fn low_prio_main(
         continuity_watch,
         air_brakes_watch,
         flight_stage,
+        kf_state_watch,
         avionics_mode_watch,
         vl_status,
         flight_data_channel,
@@ -456,6 +461,7 @@ async fn low_prio_main(
                     target_agl_signal,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
+                    kf_state_watch,
                     amp_control_watch,
                     air_brakes_watch,
                     unix_clock,
