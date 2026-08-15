@@ -168,7 +168,7 @@ pub async fn self_test_mode(
 
         // recovery beacon is on battery 1
 
-        // test amp out 4 (was amp out 2)
+        // test amp out 4 (was amp out 2)x
         {
             amp_control_watch.sender().send(AmpControlMessage {
                 out1_enable: true,
@@ -179,7 +179,7 @@ pub async fn self_test_mode(
             let out1_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
-                amp_status_message.out3.status == PowerOutputStatus::PowerGood
+                amp_status_message.out1.status == PowerOutputStatus::PowerGood
             } else {
                 self_test_partial_failure = true;
                 false
