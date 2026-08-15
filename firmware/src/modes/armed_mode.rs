@@ -1,7 +1,9 @@
 use core::cell::RefCell;
 
 use air_brakes_controller_core::{
-    AirBrakesMPC, RocketState, RocketStateEstimator, approximate_speed_of_sound,
+    AirBrakesMPC, RocketState, RocketStateEstimator,
+    airbrakes_estimator::{AirbrakesEstimator, Measurement as EstimatorMeasurement},
+    approximate_speed_of_sound,
 };
 use defmt::info;
 use embassy_futures::{
@@ -14,6 +16,10 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
+    flight_data_record::{
+        AB_ACCEL_CLIPPED, AB_APOGEE, AB_BARO_TRUSTED, AB_VOTE_BARO_RATE, AB_VOTE_DEPLOYMENT,
+        AB_VOTE_INERTIAL,
+    },
     can_bus::{
         custom_status::payload_sdrm_custom_status::PayloadSDRMCustomStatus,
         messages::{
@@ -31,8 +37,9 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, AirBrakesWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
-    FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch, MACH_LOCKOUT_DURATION_US,
+    AIRBRAKES_CONFIG, AvionicsModeWatch, AirBrakesWatch, AirbrakesStateWatch, ContinuityWatch,
+    DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
+    FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch,
     MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     ROCKET_PARAMETERS, SetTargetWatch, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
@@ -60,6 +67,7 @@ pub async fn armed_mode(
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static FlightStageMutex,
     kf_state_watch: &'static KfStateWatch,
+    airbrakes_state_watch: &'static AirbrakesStateWatch,
     amp_control_watch: &'static AmpControlWatch,
     air_brakes_watch: &'static AirBrakesWatch,
     unix_clock: &'static UnixClock,
@@ -77,7 +85,12 @@ pub async fn armed_mode(
 
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
     let state_estimator = BlockingMutex::<NoopRawMutex, _>::new(RefCell::new(
-        RocketStateEstimator::new(FLIGHT_PROFILE.clone(), MACH_LOCKOUT_DURATION_US),
+        RocketStateEstimator::new(FLIGHT_PROFILE.clone()),
+    ));
+    // Phase B v2 airbrakes estimator: owns the MPC state (altitude, 2D
+    // velocity, tilt). Deployment and all gates stay on the slow filter.
+    let airbrakes_estimator = BlockingMutex::<NoopRawMutex, _>::new(RefCell::new(
+        AirbrakesEstimator::new(AIRBRAKES_CONFIG.clone()),
     ));
 
     let update_packet_sensor_fut = async {
@@ -185,6 +198,14 @@ pub async fn armed_mode(
                     packet.payload_stack_status = PayloadSDRMCustomStatus::new();
                 }
 
+                // Tilt is the airbrakes estimator's gyro dead reckoning —
+                // the field finally has a real source (0 before ignition
+                // and after its apogee latch).
+                let ab_tilt_deg = airbrakes_estimator
+                    .lock(|s| s.borrow().tilt())
+                    .map(|t| t.to_degrees())
+                    .unwrap_or(0.0);
+
                 state_estimator.lock(|s| {
                     let estimator = s.borrow();
                     let coasting = estimator.is_coasting();
@@ -203,7 +224,7 @@ pub async fn armed_mode(
                         } => {
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
-                            packet.tilt_deg = 0.0;
+                            packet.tilt_deg = ab_tilt_deg;
                             packet.flight_stage = if coasting {
                                 FlightStage::Coasting
                             } else {
@@ -316,18 +337,37 @@ pub async fn armed_mode(
                 (estimator.state(), estimator.is_coasting())
             });
 
-            // Vertical-only: CAN rocket-state velocity is [0, vy].
+            // Velocity/altitude from the airbrakes estimator when its
+            // vertical filter is running (2D velocity, tilt included);
+            // slow-filter vertical-only state otherwise. Coasting stays on
+            // the slow filter's burn timer either way.
+            let ab_state = airbrakes_estimator.lock(|s| {
+                let estimator = s.borrow();
+                match (estimator.altitude_asl(), estimator.velocity()) {
+                    (Some(alt), Some(velocity)) => Some((alt, velocity)),
+                    _ => None,
+                }
+            });
             let message = match state {
                 RocketState::Ascent {
                     vertical_velocity,
                     altitude_asl,
                     launch_pad_altitude_asl,
-                } => Some(RocketStateMessage::new(
-                    unix_clock.now_us_or_boot_time(),
-                    &[0.0, vertical_velocity],
-                    altitude_asl - launch_pad_altitude_asl,
-                    coasting,
-                )),
+                } => {
+                    let (velocity, altitude_agl) = match ab_state {
+                        Some((ab_alt, v)) => ([v.x, v.y], ab_alt - launch_pad_altitude_asl),
+                        None => (
+                            [0.0, vertical_velocity],
+                            altitude_asl - launch_pad_altitude_asl,
+                        ),
+                    };
+                    Some(RocketStateMessage::new(
+                        unix_clock.now_us_or_boot_time(),
+                        &velocity,
+                        altitude_agl,
+                        coasting,
+                    ))
+                }
                 _ => None,
             };
 
@@ -345,15 +385,18 @@ pub async fn armed_mode(
         let mut terminal_handled = false;
         let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
         let kf_state_sender = kf_state_watch.sender();
+        let airbrakes_state_sender = airbrakes_state_watch.sender();
 
         loop {
             let reading = imu_baro_sub.next_message_pure().await;
-            // Baro-only estimator: feed altitude on every IMU+baro sample (~416 Hz).
+            // Slow (deployment) estimator: baro-only, fed altitude on every
+            // IMU+baro sample (~416 Hz).
             let baro_data = reading.data.1;
+            let baro_altitude_asl = baro_data.altitude_asl();
             let (pyro, state, coasting, in_mach_lockout, kf_altitude_asl, kf_vertical_velocity) =
                 state_estimator.lock(|s| {
                     let mut estimator = s.borrow_mut();
-                    let pyro = estimator.update(baro_data.altitude_asl());
+                    let pyro = estimator.update(baro_altitude_asl);
                     let state = estimator.state();
                     (
                         pyro,
@@ -366,6 +409,63 @@ pub async fn armed_mode(
                 });
             kf_state_sender.send((kf_altitude_asl, kf_vertical_velocity));
 
+            // Airbrakes estimator: IMU+baro with the sample's capture
+            // timestamp (it integrates with measured dt) and the slow
+            // filter's speed as lockout-exit vote 2. Skipped on the rare
+            // sample without IMU data — its dt handling bridges the gap.
+            let ab_baro_trusted = if let Some(imu) = &reading.data.0 {
+                let z = EstimatorMeasurement::new(
+                    reading.timestamp_us,
+                    &imu.acc,
+                    // IMU logs gyro in deg/s; the estimator wants rad/s
+                    &(imu.gyro * (core::f32::consts::PI / 180.0)),
+                    baro_altitude_asl,
+                );
+                let (alt, vv, tilt_deg, flags) = airbrakes_estimator.lock(|s| {
+                    let mut estimator = s.borrow_mut();
+                    estimator.update(&z, Some(kf_vertical_velocity));
+
+                    let (v1, v2, v3) = estimator.lockout_votes().unwrap_or((false, false, false));
+                    let mut flags = 0u8;
+                    if v1 {
+                        flags |= AB_VOTE_INERTIAL;
+                    }
+                    if v2 {
+                        flags |= AB_VOTE_DEPLOYMENT;
+                    }
+                    if v3 {
+                        flags |= AB_VOTE_BARO_RATE;
+                    }
+                    if estimator.baro_trusted() {
+                        flags |= AB_BARO_TRUSTED;
+                    }
+                    if estimator.is_apogee() {
+                        flags |= AB_APOGEE;
+                    }
+                    if estimator.accel_clipped_samples() > 0 {
+                        flags |= AB_ACCEL_CLIPPED;
+                    }
+                    (
+                        estimator.altitude_asl().unwrap_or(f32::NAN),
+                        estimator.velocity().map(|v| v.y).unwrap_or(f32::NAN),
+                        estimator.tilt().map(|t| t.to_degrees()).unwrap_or(f32::NAN),
+                        flags,
+                    )
+                });
+                airbrakes_state_sender.send((alt, vv, tilt_deg, flags));
+                flags & AB_BARO_TRUSTED != 0
+            } else {
+                airbrakes_estimator.lock(|s| s.borrow().baro_trusted())
+            };
+            // HIL: the bench IMU never sees ignition, so this estimator
+            // stays OnPad — the gate runs on the slow-filter conditions
+            // alone and the MPC falls back to the slow filter's state.
+            #[cfg(feature = "hil-replay")]
+            let ab_baro_trusted = {
+                let _ = ab_baro_trusted;
+                true
+            };
+
             if let Some(pyro) = pyro {
                 // Channel capacity 2: drogue+main can queue for single-at-apogee.
                 #[cfg(feature = "hil-replay")]
@@ -373,12 +473,14 @@ pub async fn armed_mode(
                 let _ = fire_signal.try_send(pyro);
             }
 
-            // Airbrakes only after burnout (never under thrust), ascending, and
-            // subsonic — the transonic KF velocity is not trustworthy. During
-            // Mach lockout the KF is frozen and all of these values are stale.
+            // Airbrakes only after burnout (never under thrust), ascending,
+            // subsonic on the slow filter (it lags high during coast =
+            // opens late = safe), AND the airbrakes estimator trusts the
+            // baro again (its 2-of-3 lockout-exit vote passed, or T_max).
             if !airbrakes_started
                 && !in_mach_lockout
                 && coasting
+                && ab_baro_trusted
                 && let RocketState::Ascent {
                     vertical_velocity,
                     altitude_asl,
@@ -452,7 +554,7 @@ pub async fn armed_mode(
             }
         });
 
-        let mut airbrakes_mpc = AirBrakesMPC::new(
+        let airbrakes_mpc = AirBrakesMPC::new(
             ROCKET_PARAMETERS.clone(),
             launch_pad_altitude_asl
                 + target_agl_watch
@@ -471,8 +573,24 @@ pub async fn armed_mode(
             } = state
                 && vertical_velocity > 0.0
             {
+                // MPC state comes from the airbrakes estimator (altitude +
+                // 2D velocity, so the apogee simulation sees tilt). If its
+                // vertical filter is not running (HIL bench, or a degraded
+                // flight), fall back to the slow filter's vertical-only
+                // state — the same input the MPC flew on before Phase C.
+                let ab_state = airbrakes_estimator.lock(|s| {
+                    let estimator = s.borrow();
+                    match (estimator.altitude_asl(), estimator.velocity()) {
+                        (Some(alt), Some(velocity)) => Some((alt, velocity)),
+                        _ => None,
+                    }
+                });
+                let (mpc_altitude_asl, mpc_velocity) = ab_state.unwrap_or((
+                    altitude_asl,
+                    nalgebra::Vector2::new(0.0, vertical_velocity),
+                ));
                 let airbrake_extension_percentage =
-                    airbrakes_mpc.update(altitude_asl, vertical_velocity);
+                    airbrakes_mpc.update(mpc_altitude_asl, mpc_velocity);
                 publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
                 can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
                 packet_builder.update(|packet| {

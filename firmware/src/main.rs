@@ -8,7 +8,10 @@ use core::cell::RefCell;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
-use air_brakes_controller_core::{FlightProfile, RocketParameters};
+use air_brakes_controller_core::{
+    DeploymentProfile, FlightProfile, RocketParameters,
+    airbrakes_estimator::{AirbrakesConfig, MachLockoutConfig},
+};
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -101,35 +104,78 @@ pub const DROGUE_BULKHEAD_NODE_ID: u16 = 0x328;
 pub const OZYS_1_NODE_ID: u16 = 0x2B2;
 pub const OZYS_2_NODE_ID: u16 = 0x0E1;
 
+// HIL replay profiles: Void Lake test-flight data — subsonic (no Mach
+// lockout), burn ~3.5 s from liftoff (~2.2 s left after the slow filter
+// detects ignition).
 #[cfg(feature = "hil-single")]
-pub const FLIGHT_PROFILE: FlightProfile = FlightProfile::Single {
-    minimum_deployment_altitude_agl: 2000.0,
-    delay_us: 0,
+pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
+    mach_lockout_duration_us: None,
+    max_burn_time_us: 4_000_000,
+    deployment: DeploymentProfile::Single {
+        minimum_deployment_altitude_agl: 2000.0,
+        delay_us: 0,
+    },
 };
 
-#[cfg(not(feature = "hil-single"))]
-pub const FLIGHT_PROFILE: FlightProfile = FlightProfile::Dual {
-    drogue_chute_minimum_altitude_agl: 2000.0,
-    drogue_chute_delay_us: 0,
-    main_chute_altitude_agl: 457.2,
-    main_chute_delay_us: 0,
+#[cfg(all(feature = "hil-replay", not(feature = "hil-single")))]
+pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
+    mach_lockout_duration_us: None,
+    max_burn_time_us: 4_000_000,
+    deployment: DeploymentProfile::Dual {
+        drogue_chute_minimum_altitude_agl: 2000.0,
+        drogue_chute_delay_us: 0,
+        main_chute_altitude_agl: 457.2,
+        main_chute_delay_us: 0,
+    },
 };
 
-/// Baro Mach lockout: once KF speed crosses 0.75 Mach the baro KF freezes for
-/// this long (supersonic static-port readings are garbage), then re-seeds.
-/// TODO before flight: set from the flight sim — (time above Mach 0.75) x 1.4
-/// margin — and verify it still ends >5 s before the earliest simulated
-/// apogee. Disabled under HIL replay: the replay data is from the subsonic
-/// test flight, whose boost baro overshoot would spuriously trigger it.
-#[cfg(feature = "hil-replay")]
-pub const MACH_LOCKOUT_DURATION_US: Option<u32> = None;
+/// TODO before flight: both timers from the flight sim —
+/// `mach_lockout_duration_us` = (time from ignition detection until back
+/// below Mach 0.75) x 1.4, and it must end >5 s before the earliest
+/// simulated apogee; `max_burn_time_us` = burn time x ~1.3.
 #[cfg(not(feature = "hil-replay"))]
-pub const MACH_LOCKOUT_DURATION_US: Option<u32> = Some(20_000_000);
+pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
+    mach_lockout_duration_us: Some(20_000_000),
+    max_burn_time_us: 8_000_000,
+    deployment: DeploymentProfile::Dual {
+        drogue_chute_minimum_altitude_agl: 2000.0,
+        drogue_chute_delay_us: 0,
+        main_chute_altitude_agl: 457.2,
+        main_chute_delay_us: 0,
+    },
+};
 
 pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
     burnout_mass: 17.607,
     cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
     reference_area: 0.008982476,
+};
+
+/// Airbrakes (Phase B v2) estimator profile. In HIL builds the IMU is a
+/// real, stationary bench sensor, so this estimator never detects ignition
+/// and stays OnPad — HIL exercises the slow-filter path only, and the MPC
+/// falls back to the slow filter's vertical-only state.
+#[cfg(feature = "hil-replay")]
+pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
+    ignition_detection_acc_threshold: 4.0 * 9.81,
+    mach_lockout: None,
+    baro_port_coefficient: 0.0,
+};
+
+/// TODO before flight, both from the LC'26 flight sim:
+/// `t_min_us` = earliest possible time below Mach 0.75 after ignition
+/// detection; `t_max_us` = latest plausible + margin, ending >5 s before
+/// the earliest simulated apogee. `baro_port_coefficient` is the LC'25
+/// airframe's measured value — replace with LC'26's (CFD/sim or first
+/// flight of the airframe).
+#[cfg(not(feature = "hil-replay"))]
+pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
+    ignition_detection_acc_threshold: 4.0 * 9.81,
+    mach_lockout: Some(MachLockoutConfig {
+        t_min_us: 8_000_000,
+        t_max_us: 20_000_000,
+    }),
+    baro_port_coefficient: 0.7e-3,
 };
 
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
@@ -139,6 +185,12 @@ pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 /// Latest state-estimator KF output `(altitude_asl, vertical_velocity)` for SD
 /// logging, published per estimator sample in armed mode.
 pub type KfStateWatch = Watch<NoopRawMutex, (f32, f32), 2>;
+/// Latest airbrakes-estimator output for SD logging, published per sample
+/// in armed mode: `(altitude_asl, vertical_velocity, tilt_deg, ab_flags)`
+/// where `ab_flags` uses the `AB_*` bits from
+/// `firmware_common_new::flight_data_record` (lockout votes, born, apogee,
+/// accel-clip). NaN / 0 until the estimator produces each value.
+pub type AirbrakesStateWatch = Watch<NoopRawMutex, (f32, f32, f32, u8), 2>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
@@ -303,6 +355,8 @@ async fn low_prio_main(
     let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
     let air_brakes_watch = singleton!(: AirBrakesWatch = AirBrakesWatch::new()).unwrap();
     let kf_state_watch = singleton!(: KfStateWatch = KfStateWatch::new()).unwrap();
+    let airbrakes_state_watch =
+        singleton!(: AirbrakesStateWatch = AirbrakesStateWatch::new()).unwrap();
 
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
@@ -424,6 +478,7 @@ async fn low_prio_main(
         air_brakes_watch,
         flight_stage,
         kf_state_watch,
+        airbrakes_state_watch,
         avionics_mode_watch,
         vl_status,
         flight_data_channel,
@@ -473,6 +528,7 @@ async fn low_prio_main(
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
                     kf_state_watch,
+                    airbrakes_state_watch,
                     amp_control_watch,
                     air_brakes_watch,
                     unix_clock,

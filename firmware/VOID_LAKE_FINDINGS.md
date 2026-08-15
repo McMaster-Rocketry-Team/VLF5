@@ -109,6 +109,15 @@ the transient, zero false rejections in ~50 k samples; apogee velocity
 excursion −995..+300 → −124..+63 m/s; stage timing unchanged. At the fixed
 427 Hz rate (finding 7) — 22 rejections, all in-window, zero false.
 
+> **2026-08-13 (estimator rework, phase A):** gate widened 75 → 500 m for the
+> slow (~1 s bandwidth) deployment filter, whose genuine boost tracking lag
+> reaches ~330 m for a 16 g motor with no Mach lockout. The gate is now pure
+> bus input validation; sub-gate transients barely move the slow filter
+> (a 25-sample 500 m offset shifts altitude ~30 m / velocity ~15 m/s) and no
+> deployment decision reads short-term velocity anymore. Re-validated by a
+> full flight replay (`void_lake_flight_replay` test): apogee detected at
+> 1500.2 m AGL through the real blast transient.
+
 ## 5. Liftoff pressure transient false-latched Coasting at the fixed rate — FIXED
 
 **Symptom (found only in the 427 Hz interpolated replay):** a genuine baro
@@ -129,17 +138,13 @@ consecutive-sample persistence counter could never complete during coast.
 only ~0.5 s — half the required persistence — so it cannot latch mid-burn;
 real burnout accrues straight through.
 
-> **2026-08-13 simplification — depends on finding 6 being fixed.** The
-> original fix also carried a ±100 m/s² pre-filter clamp and a *leaky*
-> counter (drain 1:1 instead of reset) so the detector could latch despite
-> the 1 Hz stall bursts; that variant was the one validated on the 427 Hz
-> flight replay (no mid-burn latch, Coasting at burnout + 1 s, t=15.67,
-> v=211 m/s). Both were removed in favor of fixing the stall root cause.
-> Until finding 6 is actually fixed, the strict counter is reset by the
-> re-convergence burst every 1.000 s and **can never complete** — coasting
-> would never latch and airbrakes would never start (chute deployment is
-> unaffected; it does not read the coasting flag). Do not fly this
-> estimator revision with the stalls still present.
+> **2026-08-13 (estimator rework, phase A) — detector deleted entirely.**
+> Coasting is now a burn timer: latched `MAX_BURN_TIME_US` after ignition
+> detection, reading no KF output at all. Both failure mechanisms above are
+> structurally impossible — the liftoff pressure dip and the stall
+> re-convergence bursts have nothing to reset. (The interim accel-based
+> detector went through clamp+leaky and strict-counter variants earlier the
+> same day; see git history.)
 
 ## 6. Sensor stream stalls 104 ms every second — NOT FIXED (cause unknown)
 
@@ -149,11 +154,12 @@ No timestamps exist inside the gaps despite a 512-deep logger channel, so the
 *publisher* (sensor task) stalls — the flight estimator experienced the same
 freezes, this is not just a logging artifact. Suspects: a 1 Hz task starving
 the executor or a shared bus (GPS NMEA burst parsing, CAN status, slow-record
-heartbeat). The innovation gate (finding 4) degrades gracefully through the
-stalls, but the simplified coasting detector (finding 5) now *requires* them
-fixed: its strict persistence counter can never complete with 1 Hz
-interruptions. Fixing this is a prerequisite for flying the current
-estimator, not just a data-quality improvement.
+heartbeat). The reworked deployment estimator (slow filter + gate + timers,
+2026-08-13) degrades gracefully through the stalls — no deployment decision
+depends on a stall-free stream anymore. The root cause is still worth
+hunting: the stalls cost ~10 % of the science data, and the phase-B fusion
+estimator (IMU dead-reckoning for airbrakes) will care much more than the
+deployment path does.
 
 ## 7. Measurement-level observations (no code change)
 
@@ -176,6 +182,27 @@ estimator, not just a data-quality improvement.
   deployment. Confirm the constant matches the next flight's expected apogee.
 
 ---
+
+## 8. Accelerometer clipped at ±16 g during boost — HARDWARE CEILING
+
+The LSM6DSM's thrust-axis reading railed at exactly −16.0 g for 191 samples
+(~0.9 s cumulative) during a burn whose mean acceleration was only ~5 g:
+motor vibration spikes ride the thrust past the rail, one-sided (positive
+swings only reached +4 g). ±16 g is the LSM6DSM's hardware maximum — this is
+not a configuration fix. The clipping is asymmetric, so it rectifies into a
+bias through exactly the window that calibrates the fusion estimator's
+dead-reckoner and seeds Stage 2 (see ESTIMATOR_REWORK_PLAN.md, the tilt fix
+follow-up). For reference, the LC'25 recorder measured 23+ g peaks on that
+flight; the LC'26 vehicle is expected to accelerate well below the ±16 g
+rail (per sim), so clipping on the real flight should be limited to
+vibration spikes like Void Lake's, not sustained. Deployment is immune
+(baro-only +
+timers); the exposure is the fusion estimator's burn-phase velocity
+integration — its lockout-exit re-convergence onto clean subsonic baro is
+the recovery mechanism, and gyro (orientation) is unaffected. Options if
+more margin is wanted: a high-g accelerometer on a future board spin, or
+in-flight clip detection (raw sample at the i16 rail) to discount the accel
+channel while clipped.
 
 ## Validation methodology
 

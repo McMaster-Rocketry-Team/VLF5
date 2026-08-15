@@ -1,6 +1,6 @@
 use crate::{
-    AirBrakesWatch, AvionicsModeWatch, ContinuityWatch, FlightStageMutex, GPSReadingWatch,
-    KfStateWatch, VLStatusMutex,
+    AirBrakesWatch, AirbrakesStateWatch, AvionicsModeWatch, ContinuityWatch, FlightStageMutex,
+    GPSReadingWatch, KfStateWatch, VLStatusMutex,
     tasks::sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
     utils::drain_latest,
 };
@@ -32,6 +32,7 @@ pub async fn data_logger(
     air_brakes_watch: &'static AirBrakesWatch,
     flight_stage: &'static FlightStageMutex,
     kf_state_watch: &'static KfStateWatch,
+    airbrakes_state_watch: &'static AirbrakesStateWatch,
     avionics_mode_watch: &'static AvionicsModeWatch,
     vl_status: &'static VLStatusMutex,
     channel: &'static FlightDataChannel,
@@ -73,9 +74,12 @@ pub async fn data_logger(
         let continuity_opt = continuity_receiver.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
         let stage = flight_stage.lock(|r| *r.borrow());
-        // NaN until the armed-mode estimator has produced its first sample.
+        // NaN until the armed-mode estimators have produced their first sample.
         let (kf_altitude_asl, kf_vertical_velocity) =
             kf_state_watch.try_get().unwrap_or((f32::NAN, f32::NAN));
+        let (ab_altitude_asl, ab_vertical_velocity, ab_tilt_deg, ab_flags) = airbrakes_state_watch
+            .try_get()
+            .unwrap_or((f32::NAN, f32::NAN, f32::NAN, 0));
 
         let mut imu_valid = 0u8;
         let (acc, gyro) = match imu_opt {
@@ -171,6 +175,10 @@ pub async fn data_logger(
             mag,
             kf_altitude_asl,
             kf_vertical_velocity,
+            ab_altitude_asl,
+            ab_vertical_velocity,
+            ab_tilt_deg,
+            ab_flags,
             flight_stage: stage,
             valid: imu_valid,
         });
