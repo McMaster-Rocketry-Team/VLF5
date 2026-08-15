@@ -25,7 +25,7 @@ impl AvionicsMode {
     /// mode (SelfTest / LowPower / Demo / Landed) doesn't log, so pre-flight checks
     /// and time on the ground after landing don't fill the SD card.
     pub fn should_log(&self) -> bool {
-        // matches!(self, AvionicsMode::Armed)
-        true
+        matches!(self, AvionicsMode::Armed)
+        // true
     }
 }
