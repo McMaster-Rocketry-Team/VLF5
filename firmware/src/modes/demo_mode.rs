@@ -49,7 +49,6 @@ pub async fn demo_mode(
         out1_enable: true,
         out2_enable: false,
         out3_enable: false,
-        out4_enable: false,
     });
 
     let packet_builder = LowPowerTelemetryPacketBuilder::<NoopRawMutex>::new();

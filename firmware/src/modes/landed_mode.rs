@@ -36,7 +36,6 @@ pub async fn landed_mode(
         out1_enable: true, // leave camera on for 15 minutes for it to save its data
         out2_enable: false,
         out3_enable: false,
-        out4_enable: false,
     });
 
     let stop_camera_fut = async {
@@ -45,7 +44,6 @@ pub async fn landed_mode(
             out1_enable: false,
             out2_enable: false,
             out3_enable: false,
-            out4_enable: false,
         });
     };
 
@@ -96,8 +94,8 @@ pub async fn landed_mode(
                         packet.amp_out2_overwrote = message.out1.overwrote;
                         packet.amp_out3 = message.out1.status;
                         packet.amp_out3_overwrote = message.out1.overwrote;
-                        packet.amp_out4 = message.out1.status;
-                        packet.amp_out4_overwrote = message.out1.overwrote;
+                        // packet.amp_out4 = message.out1.status;
+                        // packet.amp_out4_overwrote = message.out1.overwrote;
                     });
                 }
                 _ => {}
