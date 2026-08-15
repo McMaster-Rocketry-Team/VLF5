@@ -167,8 +167,7 @@ pub async fn self_test_mode(
         }
 
         // recovery beacon is on battery 1
-
-        // test amp out 4 (was amp out 2)x
+        // test amp out 1
         {
             amp_control_watch.sender().send(AmpControlMessage {
                 out1_enable: true,
