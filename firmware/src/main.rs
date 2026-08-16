@@ -3,13 +3,15 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(never_type)]
 #![feature(try_blocks)]
+// `core::future::join!` — variadic, unlike `embassy_futures`' `join`..`join5`.
+#![feature(future_join)]
 
 use core::cell::RefCell;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use air_brakes_controller_core::{
-    DeploymentProfile, FlightProfile, RocketParameters,
+    DeploymentProfile, FlightEstimators, FlightProfile, RocketParameters,
     airbrakes_estimator::{AirbrakesConfig, MachLockoutConfig},
 };
 use binary_macros::base64;
@@ -187,15 +189,11 @@ pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustom
 /// The wire flight stage: mirrors the deployment estimator's `RocketState`
 /// 1:1 while armed, mode-fixed values in the other modes.
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
-/// Latest state-estimator KF output `(altitude_asl, vertical_velocity)` for SD
-/// logging, published per estimator sample in armed mode.
-pub type KfStateWatch = Watch<NoopRawMutex, (f32, f32), 2>;
-/// Latest airbrakes-estimator output for SD logging, published per sample
-/// in armed mode: `(altitude_asl, vertical_velocity, tilt_deg, ab_flags)`
-/// where `ab_flags` uses the `AB_*` bits from
-/// `firmware_common_new::flight_data_record` (lockout votes, born, apogee).
-/// NaN / 0 until the estimator produces each value.
-pub type AirbrakesStateWatch = Watch<NoopRawMutex, (f32, f32, f32, u8), 2>;
+/// Both flight estimators behind one lock, owned by [`modes::armed_mode`] and
+/// rebuilt per armed session. Armed mode's own futures and the flight-data
+/// logger share it directly, so every consumer reads the live estimator rather
+/// than a cached copy that could outlive the session that produced it.
+pub type FlightEstimatorsMutex = BlockingMutex<NoopRawMutex, RefCell<FlightEstimators>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
@@ -401,9 +399,6 @@ async fn low_prio_main(
     let amp_state_watch = singleton!(: AmpStateWatch = AmpStateWatch::new()).unwrap();
     let payload_state_watch =
         singleton!(: PayloadStateWatch = PayloadStateWatch::new()).unwrap();
-    let kf_state_watch = singleton!(: KfStateWatch = KfStateWatch::new()).unwrap();
-    let airbrakes_state_watch =
-        singleton!(: AirbrakesStateWatch = AirbrakesStateWatch::new()).unwrap();
 
     let continuity_watch = singleton!(: ContinuityWatch = ContinuityWatch::new()).unwrap();
     let fire_signal = singleton!(: FireSignal = FireSignal::new()).unwrap();
@@ -518,24 +513,10 @@ async fn low_prio_main(
         : tasks::data_logger::FlightDataChannel = tasks::data_logger::FlightDataChannel::new()
     )
     .unwrap();
-    spawner.spawn(tasks::data_logger::data_logger(
-        imu_baro_reading_pubsub,
-        mag_reading_pubsub,
-        gps_reading_watch,
-        battery_v_watch,
-        continuity_watch,
-        air_brakes_watch,
-        amp_state_watch,
-        payload_state_watch,
-        can_central,
-        unix_clock,
-        flight_stage,
-        kf_state_watch,
-        airbrakes_state_watch,
-        avionics_mode_watch,
-        vl_status,
-        flight_data_channel,
-    ).unwrap());
+    // No logger task: flight-data logging runs as one of armed mode's joined
+    // futures (`tasks::data_logger::log_flight_data`), so it exists exactly as
+    // long as an armed session. The SD writer stays a task — it owns SDMMC1 —
+    // and is fed over this channel.
     spawner.spawn(tasks::sd_card_writer::sd_card_writer(
         p.SDMMC1,
         p.PC12,
@@ -580,11 +561,14 @@ async fn low_prio_main(
                     target_agl_signal,
                     can_receiver.subscriber().unwrap(),
                     flight_stage,
-                    kf_state_watch,
-                    airbrakes_state_watch,
                     amp_control_watch,
                     air_brakes_watch,
                     unix_clock,
+                    mag_reading_pubsub,
+                    amp_state_watch,
+                    payload_state_watch,
+                    vl_status,
+                    flight_data_channel,
                 )
                 .await;
             }

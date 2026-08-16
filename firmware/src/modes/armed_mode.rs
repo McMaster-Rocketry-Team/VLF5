@@ -1,20 +1,14 @@
-use core::cell::RefCell;
+use core::{cell::RefCell, future::join};
 
 use air_brakes_controller_core::{AirBrakesMPC, FlightEstimators, ImuSample, RocketState};
 use defmt::info;
-use embassy_futures::{
-    join::{join, join5},
-    select::select,
-};
+use embassy_futures::select::select;
 use embassy_sync::{
     blocking_mutex::{Mutex as BlockingMutex, raw::NoopRawMutex},
     signal::Signal,
 };
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
-    flight_data_record::{
-        AB_APOGEE, AB_BARO_TRUSTED, AB_VOTE_BARO_RATE, AB_VOTE_DEPLOYMENT, AB_VOTE_INERTIAL,
-    },
     can_bus::{
         custom_status::payload_sdrm_custom_status::PayloadSDRMCustomStatus,
         messages::{
@@ -30,16 +24,17 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AIRBRAKES_CONFIG, AvionicsModeWatch, AirBrakesWatch, AirbrakesStateWatch, ContinuityWatch,
-    FLIGHT_PROFILE, FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch,
-    OZYS_1_NODE_ID, OZYS_2_NODE_ID,
-    ROCKET_PARAMETERS, SetTargetWatch, publish_airbrakes_commanded,
+    AIRBRAKES_CONFIG, AmpStateWatch, AvionicsModeWatch, AirBrakesWatch, ContinuityWatch,
+    FLIGHT_PROFILE, FireSignal, FlightEstimatorsMutex, FlightStageMutex, GPSReadingWatch,
+    OZYS_1_NODE_ID, OZYS_2_NODE_ID, PayloadStateWatch,
+    ROCKET_PARAMETERS, SetTargetWatch, VLStatusMutex, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
     tasks::{
         amp_control_task::AmpControlWatch,
-        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub},
+        data_logger::{FlightDataChannel, log_flight_data},
+        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
         unix_clock::UnixClock,
     },
     utils::SubscriberWithLastValue,
@@ -58,11 +53,16 @@ pub async fn armed_mode(
     target_agl_watch: &'static SetTargetWatch,
     mut can_receiver_sub: CanReceiverSub,
     flight_stage: &'static FlightStageMutex,
-    kf_state_watch: &'static KfStateWatch,
-    airbrakes_state_watch: &'static AirbrakesStateWatch,
     amp_control_watch: &'static AmpControlWatch,
     air_brakes_watch: &'static AirBrakesWatch,
     unix_clock: &'static UnixClock,
+    // Flight-data logging runs here rather than as its own task; these are its
+    // inputs, everything above is shared with the rest of armed mode.
+    mag_pubsub: &'static MagReadingPubSub,
+    amp_state_watch: &'static AmpStateWatch,
+    payload_state_watch: &'static PayloadStateWatch,
+    vl_status: &'static VLStatusMutex,
+    flight_data_channel: &'static FlightDataChannel,
 ) {
     info!("enter armed mode");
     flight_stage.lock(|r| {
@@ -78,10 +78,9 @@ pub async fn armed_mode(
     // One struct owns both estimators and the policy connecting them (the V2
     // abstain during the slow filter's Mach lockout, the airbrakes-permission
     // gate inside `airbrakes_mpc_states`) — firmware holds it behind one mutex.
-    let estimators = BlockingMutex::<NoopRawMutex, _>::new(RefCell::new(FlightEstimators::new(
-        FLIGHT_PROFILE.clone(),
-        AIRBRAKES_CONFIG.clone(),
-    )));
+    let estimators: FlightEstimatorsMutex = BlockingMutex::new(RefCell::new(
+        FlightEstimators::new(FLIGHT_PROFILE.clone(), AIRBRAKES_CONFIG.clone()),
+    ));
 
     let update_packet_sensor_fut = async {
         let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
@@ -390,8 +389,6 @@ pub async fn armed_mode(
         let mut airbrakes_started = false;
         let mut terminal_handled = false;
         let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
-        let kf_state_sender = kf_state_watch.sender();
-        let airbrakes_state_sender = airbrakes_state_watch.sender();
 
         loop {
             let reading = imu_baro_sub.next_message_pure().await;
@@ -408,50 +405,15 @@ pub async fn armed_mode(
 
             // One update per ~416 Hz sample; the deployment-speed feed to
             // vote V2 (abstaining during the slow filter's Mach lockout)
-            // happens inside.
-            let (pyro, state, mpc_states, kf_state, ab_log) = estimators.lock(|s| {
+            // happens inside. Nothing is published for the SD log here — the
+            // logger reads the estimators directly, so there is no cached copy
+            // that could outlive the session that produced it.
+            let (pyro, state, mpc_states) = estimators.lock(|s| {
                 let mut est = s.borrow_mut();
                 let pyro = est.update(reading.timestamp_us, imu.as_ref(), baro_altitude_asl);
 
-                let dep = est.deployment_estimator();
-                // Raw (possibly lockout-frozen) KF numbers — logging only.
-                let kf_state = (dep.kf_altitude_asl(), dep.kf_vertical_velocity());
-
-                let ab = est.airbrakes_estimator();
-                let (v1, v2, v3) = ab.lockout_votes().unwrap_or((false, false, false));
-                let mut flags = 0u8;
-                if v1 {
-                    flags |= AB_VOTE_INERTIAL;
-                }
-                if v2 {
-                    flags |= AB_VOTE_DEPLOYMENT;
-                }
-                if v3 {
-                    flags |= AB_VOTE_BARO_RATE;
-                }
-                if ab.baro_trusted() {
-                    flags |= AB_BARO_TRUSTED;
-                }
-                if ab.is_apogee() {
-                    flags |= AB_APOGEE;
-                }
-                let ab_log = (
-                    ab.altitude_asl().unwrap_or(f32::NAN),
-                    ab.velocity().map(|v| v.y).unwrap_or(f32::NAN),
-                    ab.tilt().map(|t| t.to_degrees()).unwrap_or(f32::NAN),
-                    flags,
-                );
-
-                (
-                    pyro,
-                    est.state(),
-                    est.airbrakes_mpc_states(),
-                    kf_state,
-                    ab_log,
-                )
+                (pyro, est.state(), est.airbrakes_mpc_states())
             });
-            kf_state_sender.send(kf_state);
-            airbrakes_state_sender.send(ab_log);
 
             if let Some(pyro) = pyro {
                 // Channel capacity 2: drogue+main can queue for single-at-apogee.
@@ -557,12 +519,31 @@ pub async fn armed_mode(
         receiver.changed_and(|m| *m != AvionicsMode::Armed).await;
     };
 
-    let fut = join5(
+    let log_flight_data_fut = log_flight_data(
+        &estimators,
+        imu_baro_pubsub,
+        mag_pubsub,
+        gps_reading_watch,
+        battery_v_watch,
+        continuity_watch,
+        air_brakes_watch,
+        amp_state_watch,
+        payload_state_watch,
+        can_central,
+        unix_clock,
+        flight_stage,
+        vl_status,
+        flight_data_channel,
+    );
+
+    let fut = join!(
         update_packet_sensor_fut,
         update_packet_can_fut,
         send_telemetry_packet_fut,
         send_rocket_state_fut,
-        join(update_estimators_fut, control_airbrakes_fut),
+        update_estimators_fut,
+        control_airbrakes_fut,
+        log_flight_data_fut,
     );
 
     select(fut, wait_armed_mode_end_fut).await;

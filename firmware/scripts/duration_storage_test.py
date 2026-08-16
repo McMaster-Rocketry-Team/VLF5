@@ -19,7 +19,18 @@ def analyze_csv(path: Path, duration_s: float, baseline_rows: int = 0) -> dict:
     counts = [int(r["record_count"]) for r in rows]
     ts = [int(r["timestamp_us"]) for r in rows]
 
-    gaps = sum(1 for i in range(1, len(counts)) if counts[i] != counts[i - 1] + 1)
+    # `record_count` restarts at 0 each armed session — the logger lives inside
+    # armed mode, so a re-arm (or a reboot) begins a new count. A step backwards
+    # is therefore a session boundary, not a dropped record; any other step that
+    # isn't +1 is a real drop on the way to the SD card. Records lost at the
+    # exact boundary hide inside it, which is the one blind spot of this rule.
+    boundaries = {i for i in range(1, len(counts)) if counts[i] < counts[i - 1]}
+    sessions = len(boundaries) + 1
+    gaps = sum(
+        1
+        for i in range(1, len(counts))
+        if i not in boundaries and counts[i] != counts[i - 1] + 1
+    )
     ts_back = sum(1 for i in range(1, len(ts)) if ts[i] < ts[i - 1])
 
     test_rows = rows[baseline_rows:] if baseline_rows < n else rows
@@ -35,8 +46,13 @@ def analyze_csv(path: Path, duration_s: float, baseline_rows: int = 0) -> dict:
     imu_valid = sum(1 for r in rows if r.get("imu_valid") == "true")
     baro_valid = sum(1 for r in rows if r.get("baro_valid") == "true")
 
+    # A dump spanning more than one armed session cannot answer this test's
+    # question: the timestamp span then includes time the board spent not
+    # logging, so the rate math below is not meaningful. Fail on it explicitly
+    # rather than let it surface as a mysteriously low Hz.
     ok = (
         gaps == 0
+        and sessions == 1
         and ts_back == 0
         and MIN_HZ <= effective_hz <= MAX_HZ
         and pct_of_expected >= 95.0
@@ -50,6 +66,7 @@ def analyze_csv(path: Path, duration_s: float, baseline_rows: int = 0) -> dict:
         "test_rows": new_records,
         "first_count": counts[0],
         "last_count": counts[-1],
+        "sessions": sessions,
         "gaps": gaps,
         "ts_backwards": ts_back,
         "span_s": span_us / 1e6,
@@ -76,9 +93,15 @@ def main() -> int:
     print(
         f"{status} {path.name}: total_rows={r['rows']} test_rows={r['test_rows']} "
         f"(expected ~{r['expected_rows']}, {r['pct_of_expected']:.1f}%), "
-        f"hz={r['effective_hz']:.1f}, gaps={r['gaps']}, "
+        f"hz={r['effective_hz']:.1f}, gaps={r['gaps']}, sessions={r['sessions']}, "
         f"span={r['span_s']:.1f}s, imu={r['imu_valid_pct']:.1f}%, baro={r['baro_valid_pct']:.1f}%"
     )
+    if r["sessions"] > 1:
+        print(
+            f"  note: dump spans {r['sessions']} armed sessions (the board was re-armed "
+            "or rebooted mid-log), so the rate figures above cover time it was not "
+            "logging — clear the log, stay armed for the whole phase, and re-run"
+        )
     return 0 if r["ok"] else 1
 
 

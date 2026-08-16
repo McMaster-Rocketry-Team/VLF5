@@ -18,14 +18,3 @@ impl From<firmware_common_new::vlp::packets::change_mode::Mode> for AvionicsMode
         }
     }
 }
-
-impl AvionicsMode {
-    /// Flight-data logging runs only while `Armed` — the mode covers the entire
-    /// ascent/coast/deploy/descent until the auto-switch to `Landed`. Every other
-    /// mode (SelfTest / LowPower / Demo / Landed) doesn't log, so pre-flight checks
-    /// and time on the ground after landing don't fill the SD card.
-    pub fn should_log(&self) -> bool {
-        matches!(self, AvionicsMode::Armed)
-        // true
-    }
-}

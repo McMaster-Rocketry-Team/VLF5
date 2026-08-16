@@ -1,6 +1,6 @@
 use crate::{
-    AirBrakesWatch, AirbrakesStateWatch, AmpStateWatch, AvionicsModeWatch, ContinuityWatch,
-    FlightStageMutex, GPSReadingWatch, KfStateWatch, PayloadStateWatch, VLStatusMutex,
+    AirBrakesWatch, AmpStateWatch, ContinuityWatch, FlightEstimatorsMutex, FlightStageMutex,
+    GPSReadingWatch, PayloadStateWatch, VLStatusMutex,
     can_central::CanCentral,
     tasks::{
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
@@ -9,6 +9,7 @@ use crate::{
     utils::drain_latest,
 };
 
+use air_brakes_controller_core::FlightEstimators;
 use defmt::warn;
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
@@ -16,6 +17,7 @@ use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::{
     can_bus::node_types::AMP_NODE_TYPE,
     flight_data_record::{
+        AB_APOGEE, AB_BARO_TRUSTED, AB_VOTE_BARO_RATE, AB_VOTE_DEPLOYMENT, AB_VOTE_INERTIAL,
         FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
         VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
         VALID_IMU, VALID_MAG,
@@ -29,8 +31,76 @@ pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNE
 const IMU_TIMEOUT: Duration = Duration::from_millis(20);
 const SLOW_INTERVAL: Duration = Duration::from_millis(100);
 
-#[embassy_executor::task]
-pub async fn data_logger(
+/// The estimator numbers a fast record carries, read straight off the live
+/// estimators rather than a cached copy:
+///
+/// * `(kf_altitude_asl, kf_vertical_velocity)` — the deployment KF's raw,
+///   possibly lockout-frozen output. Logging only.
+/// * `(ab_altitude_asl, ab_vertical_velocity, ab_tilt_deg, ab_flags)` — the
+///   airbrakes estimator, with `ab_flags` packing the `AB_*` bits (the three
+///   lockout-exit votes, baro-trusted/born, apogee latch).
+///
+/// NaN for any value this session's estimators have not produced yet.
+fn estimator_log_state(est: &FlightEstimators) -> ((f32, f32), (f32, f32, f32, u8)) {
+    let dep = est.deployment_estimator();
+    let kf = (dep.kf_altitude_asl(), dep.kf_vertical_velocity());
+
+    let ab = est.airbrakes_estimator();
+    let (v1, v2, v3) = ab.lockout_votes().unwrap_or((false, false, false));
+    let mut flags = 0u8;
+    if v1 {
+        flags |= AB_VOTE_INERTIAL;
+    }
+    if v2 {
+        flags |= AB_VOTE_DEPLOYMENT;
+    }
+    if v3 {
+        flags |= AB_VOTE_BARO_RATE;
+    }
+    if ab.baro_trusted() {
+        flags |= AB_BARO_TRUSTED;
+    }
+    if ab.is_apogee() {
+        flags |= AB_APOGEE;
+    }
+
+    (
+        kf,
+        (
+            ab.altitude_asl().unwrap_or(f32::NAN),
+            ab.velocity().map(|v| v.y).unwrap_or(f32::NAN),
+            ab.tilt().map(|t| t.to_degrees()).unwrap_or(f32::NAN),
+            flags,
+        ),
+    )
+}
+
+/// Flight-data logging, run as one of armed mode's joined futures rather than a
+/// standalone task — logging exists exactly as long as an armed session does.
+///
+/// That is also the logging policy, now expressed by construction instead of by
+/// a mode predicate: `Armed` covers the whole ascent/coast/deploy/descent until
+/// the auto-switch to `Landed`, and no other mode logs, so pre-flight checks and
+/// time on the ground after landing don't fill the SD card. To log in every mode
+/// for bench work, spawn this as its own task from `low_prio_main` instead —
+/// every input below is already `&'static` except `estimators`, which only
+/// exists while armed.
+///
+/// That containment is what makes cross-session leakage unrepresentable. Every
+/// subscriber and counter below is created on entry, and an embassy pubsub
+/// subscriber only receives messages published after its creation, so a re-arm
+/// (Armed -> LowPower -> Armed) cannot carry pre-arm samples into the new
+/// session's first records — no low-power baro backlog, and no mag readings left
+/// over from the *previous* armed session (`mag_task` is powered down outside
+/// Armed, so its queue would otherwise be minutes stale). The estimator numbers
+/// are read live off `estimators`, the same instance armed mode rebuilds per
+/// session, so a latched `AB_APOGEE` from a previous flight cannot be logged
+/// against a rocket back on the pad either.
+///
+/// Cancellation-safe: records reach the SD writer through a non-blocking
+/// `try_send`, so being dropped at a mode change cannot tear one.
+pub async fn log_flight_data(
+    estimators: &FlightEstimatorsMutex,
     imu_baro_pubsub: &'static IMUBaroReadingPubSub,
     mag_pubsub: &'static MagReadingPubSub,
     gps_watch: &'static GPSReadingWatch,
@@ -42,34 +112,17 @@ pub async fn data_logger(
     can_central: &'static CanCentral<NoopRawMutex>,
     unix_clock: &'static UnixClock,
     flight_stage: &'static FlightStageMutex,
-    kf_state_watch: &'static KfStateWatch,
-    airbrakes_state_watch: &'static AirbrakesStateWatch,
-    avionics_mode_watch: &'static AvionicsModeWatch,
     vl_status: &'static VLStatusMutex,
     channel: &'static FlightDataChannel,
 ) {
     let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
     let mut mag_sub = mag_pubsub.subscriber().unwrap();
-    let mut gps_receiver = gps_watch.receiver().unwrap();
-    let mut battery_receiver = battery_watch.receiver().unwrap();
-    let mut continuity_receiver = continuity_watch.receiver().unwrap();
-    let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
 
     let mut sequence: u32 = 0;
     let mut backlog_warned = false;
     let mut last_slow_emit = Instant::now();
 
     loop {
-        if !avionics_mode
-            .try_get()
-            .map(|m| m.should_log())
-            .unwrap_or(false)
-        {
-            avionics_mode.changed().await;
-            backlog_warned = false;
-            continue;
-        }
-
         let (timestamp_us, imu_opt, baro_opt) =
             match select(imu_baro_sub.next_message_pure(), Timer::after(IMU_TIMEOUT)).await {
                 Either::First(reading) => {
@@ -80,20 +133,25 @@ pub async fn data_logger(
             };
 
         let mag_opt = drain_latest(&mut mag_sub);
-        let gps_opt = gps_receiver.try_get();
-        let battery_opt = battery_receiver.try_get();
-        let continuity_opt = continuity_receiver.try_get();
+        // Read straight off the watches: this loop only ever samples their
+        // latest value and never awaits a change, so it needs no receiver slot
+        // (they are a scarce, `unwrap`-ed resource — `GPSReadingWatch` in
+        // particular sits at its capacity while armed).
+        let gps_opt = gps_watch.try_get();
+        let battery_opt = battery_watch.try_get();
+        let continuity_opt = continuity_watch.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
         let amp_opt = amp_state_watch.try_get();
         // Defaults to the 0xFFFF sentinel until the payload's first status message.
         let payload = payload_state_watch.try_get().unwrap_or_default();
         let stage = flight_stage.lock(|r| *r.borrow());
-        // NaN until the armed-mode estimators have produced their first sample.
-        let (kf_altitude_asl, kf_vertical_velocity) =
-            kf_state_watch.try_get().unwrap_or((f32::NAN, f32::NAN));
-        let (ab_altitude_asl, ab_vertical_velocity, ab_tilt_deg, ab_flags) = airbrakes_state_watch
-            .try_get()
-            .unwrap_or((f32::NAN, f32::NAN, f32::NAN, 0));
+        // NaN until this session's estimators have produced their first sample.
+        let ((kf_altitude_asl, kf_vertical_velocity), (
+            ab_altitude_asl,
+            ab_vertical_velocity,
+            ab_tilt_deg,
+            ab_flags,
+        )) = estimators.lock(|s| estimator_log_state(&s.borrow()));
 
         let mut fast_valid = 0u8;
         let (acc, gyro) = match imu_opt {
