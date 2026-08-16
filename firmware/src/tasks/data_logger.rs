@@ -1,6 +1,6 @@
 use crate::{
     AirBrakesWatch, AirbrakesStateWatch, AmpStateWatch, AvionicsModeWatch, ContinuityWatch,
-    FlightStageMutex, GPSReadingWatch, KfStateWatch, VLStatusMutex,
+    FlightStageMutex, GPSReadingWatch, KfStateWatch, PayloadStateWatch, VLStatusMutex,
     can_central::CanCentral,
     tasks::{
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
@@ -38,6 +38,7 @@ pub async fn data_logger(
     continuity_watch: &'static ContinuityWatch,
     air_brakes_watch: &'static AirBrakesWatch,
     amp_state_watch: &'static AmpStateWatch,
+    payload_state_watch: &'static PayloadStateWatch,
     can_central: &'static CanCentral<NoopRawMutex>,
     unix_clock: &'static UnixClock,
     flight_stage: &'static FlightStageMutex,
@@ -84,6 +85,8 @@ pub async fn data_logger(
         let continuity_opt = continuity_receiver.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
         let amp_opt = amp_state_watch.try_get();
+        // Defaults to the 0xFFFF sentinel until the payload's first status message.
+        let payload = payload_state_watch.try_get().unwrap_or_default();
         let stage = flight_stage.lock(|r| *r.borrow());
         // NaN until the armed-mode estimators have produced their first sample.
         let (kf_altitude_asl, kf_vertical_velocity) =
@@ -223,6 +226,9 @@ pub async fn data_logger(
             amp_online,
             amp_out_status,
             amp_shared_battery_v,
+            payload_epm_batt_mv: payload.epm_batt_mv,
+            payload_rail_ma: payload.rail_ma,
+            payload_actuator_steps: payload.actuator_steps,
             valid: slow_valid,
         };
 

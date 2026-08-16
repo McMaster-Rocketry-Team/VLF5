@@ -303,16 +303,14 @@ pub async fn armed_mode(
                     packet.air_brakes_servo_temp = message.servo_temperature();
                 }
                 CanBusMessageEnum::CustomPayloadStatus(message) => {
-                    // 0xFFFF means the payload could not read that rail; keep it as
-                    // None so the ground station shows "n/a" instead of a fake 0V.
-                    let rail_v = |raw_mv: u16| {
-                        CustomPayloadStatusMessage::rail_mv(raw_mv).map(|mv| mv as f32 / 1000.0)
-                    };
-                    packet.epm_batt_v = rail_v(message.epm_batt_mv);
-                    packet.epm_sys_3v3_v = rail_v(message.epm_sys_3v3_mv);
-                    packet.epm_sys_5v_v = rail_v(message.epm_sys_5v_mv);
-                    packet.epm_per_5v_v = rail_v(message.epm_per_5v_mv);
-                    packet.epm_per_9v_v = rail_v(message.epm_per_9v_mv);
+                    // 0xFFFF means the payload could not read that value; keep it as
+                    // None so the ground station shows "n/a" instead of a fake 0.
+                    packet.epm_batt_mv =
+                        CustomPayloadStatusMessage::reading(message.epm_batt_mv);
+                    packet.epm_rail_ma = message.rail_ma().map(CustomPayloadStatusMessage::reading);
+                    packet.sem_actuator_steps = message
+                        .actuator_steps()
+                        .map(CustomPayloadStatusMessage::reading);
                 }
                 _ => {}
             });

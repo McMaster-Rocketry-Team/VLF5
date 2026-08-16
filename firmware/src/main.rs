@@ -38,8 +38,10 @@ use firmware_common_new::{
     can_bus::{
         custom_status::vl_custom_status::VLCustomStatus,
         messages::{
-            baro_measurement::BaroMeasurementMessage, imu_measurement::IMUMeasurementMessage,
-            mag_measurement::MagMeasurementMessage, vl_status::FlightStage,
+            baro_measurement::BaroMeasurementMessage,
+            custom_payload_status::PAYLOAD_READING_UNAVAILABLE,
+            imu_measurement::IMUMeasurementMessage, mag_measurement::MagMeasurementMessage,
+            vl_status::FlightStage,
         },
         sender::CanSender,
     },
@@ -223,6 +225,31 @@ pub struct AmpLogState {
 
 pub type AmpStateWatch = Watch<NoopRawMutex, AmpLogState, 2>;
 
+/// Latest payload `CustomPayloadStatusMessage` for SD logging, kept in the
+/// units it arrives in. `PAYLOAD_READING_UNAVAILABLE` (0xFFFF) marks a reading
+/// the payload could not take — the same sentinel the slow record stores.
+#[derive(Clone, Copy, defmt::Format)]
+pub struct PayloadLogState {
+    pub epm_batt_mv: u16,
+    /// Rail index order: 0 `SYS_3V3`, 1 `SYS_5V`, 2 `PER_3V3`, 3 `PER_5V`,
+    /// 4 `PER_9V`, 5 `PER_12V`.
+    pub rail_ma: [u16; 6],
+    /// Experiment channels 1..3.
+    pub actuator_steps: [u16; 3],
+}
+
+impl Default for PayloadLogState {
+    fn default() -> Self {
+        Self {
+            epm_batt_mv: PAYLOAD_READING_UNAVAILABLE,
+            rail_ma: [PAYLOAD_READING_UNAVAILABLE; 6],
+            actuator_steps: [PAYLOAD_READING_UNAVAILABLE; 3],
+        }
+    }
+}
+
+pub type PayloadStateWatch = Watch<NoopRawMutex, PayloadLogState, 2>;
+
 pub fn publish_airbrakes_commanded(watch: &AirBrakesWatch, extension: f32) {
     let mut state = watch.try_get().unwrap_or_default();
     state.commanded_extension = extension;
@@ -372,6 +399,8 @@ async fn low_prio_main(
     let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
     let air_brakes_watch = singleton!(: AirBrakesWatch = AirBrakesWatch::new()).unwrap();
     let amp_state_watch = singleton!(: AmpStateWatch = AmpStateWatch::new()).unwrap();
+    let payload_state_watch =
+        singleton!(: PayloadStateWatch = PayloadStateWatch::new()).unwrap();
     let kf_state_watch = singleton!(: KfStateWatch = KfStateWatch::new()).unwrap();
     let airbrakes_state_watch =
         singleton!(: AirbrakesStateWatch = AirbrakesStateWatch::new()).unwrap();
@@ -455,6 +484,7 @@ async fn low_prio_main(
         battery_v_watch,
         air_brakes_watch,
         amp_state_watch,
+        payload_state_watch,
         vl_status,
     )
     .await;
@@ -496,6 +526,7 @@ async fn low_prio_main(
         continuity_watch,
         air_brakes_watch,
         amp_state_watch,
+        payload_state_watch,
         can_central,
         unix_clock,
         flight_stage,

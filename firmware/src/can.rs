@@ -37,7 +37,8 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    AirBrakesWatch, AmpLogState, AmpStateWatch, FlightStageMutex, VLStatusMutex,
+    AirBrakesWatch, AmpLogState, AmpStateWatch, FlightStageMutex, PayloadLogState,
+    PayloadStateWatch, VLStatusMutex,
     can_central::CanCentral,
     tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
 };
@@ -124,6 +125,7 @@ pub async fn start_can_bus_low_prio_tasks(
     battery_v_watch: &'static BatteryVWatch,
     air_brakes_watch: &'static AirBrakesWatch,
     amp_state_watch: &'static AmpStateWatch,
+    payload_state_watch: &'static PayloadStateWatch,
     vl_status: &'static VLStatusMutex,
 ) -> (
     &'static CanSender<NoopRawMutex>,
@@ -149,6 +151,7 @@ pub async fn start_can_bus_low_prio_tasks(
         can_central,
         air_brakes_watch,
         amp_state_watch,
+        payload_state_watch,
         can_receiver_sub,
     ).unwrap());
 
@@ -266,6 +269,7 @@ async fn can_message_receive_task(
     can_central: &'static CanCentral<NoopRawMutex>,
     air_brakes_watch: &'static AirBrakesWatch,
     amp_state_watch: &'static AmpStateWatch,
+    payload_state_watch: &'static PayloadStateWatch,
     mut can_receiver_sub: CanReceiverSub,
 ) {
     loop {
@@ -288,6 +292,15 @@ async fn can_message_receive_task(
                 state.servo_temp = message.servo_temperature();
                 state.actual_valid = true;
                 let _ = air_brakes_watch.sender().send(state);
+            }
+            CanBusMessageEnum::CustomPayloadStatus(message) => {
+                // Stored raw, 0xFFFF and all: the slow record keeps the payload's
+                // own "unavailable" sentinel rather than inventing a zero.
+                payload_state_watch.sender().send(PayloadLogState {
+                    epm_batt_mv: message.epm_batt_mv,
+                    rail_ma: message.rail_ma(),
+                    actuator_steps: message.actuator_steps(),
+                });
             }
             CanBusMessageEnum::AmpStatus(message) => {
                 amp_state_watch.sender().send(AmpLogState {

@@ -2,23 +2,24 @@
 
 Reference for what data leaves the flight computer, on which channel, at what
 rate, and whether a value lost from one channel can be reconstructed from
-another after the flight. Updated 2026-08-15 (storage format v7: airbrakes
-state on the downlink, UTC + pyro + extension at full rate, amp/servo temp on
-SD, bulkheads and the coasting bit off the wire).
+another after the flight. Updated 2026-08-15 (storage format v8: payload EPM
+rail currents and SEM actuator steps on both the downlink and SD; v7 put
+airbrakes state on the downlink, UTC + pyro + extension at full rate, amp/servo
+temp on SD, and took bulkheads and the coasting bit off the wire).
 
 ## SD flight log (armed mode only)
 
 Two tagged record types interleaved into 512 B blocks (508 usable + CRC32),
 superblock flushed every 250 ms. Decoding: `rocket-cli download-file <out.csv>`
 (one CSV row per fast record, latest slow snapshot merged in). Storage format
-v7 is **not** backward compatible: logs written by older firmware are reported
+v8 is **not** backward compatible: logs written by older firmware are reported
 as unsupported by rocket-cli, and the firmware starts a fresh log over them on
 the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
 | **Fast** (tag 0x01) | ~427 Hz (per IMU data-ready edge; placeholder at 50 Hz during sensor-stream stalls) | 105 B | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, 0 until the clock locks), accel ×3, gyro ×3, baro temperature + pressure, mag ×3 (100 Hz source, resampled), deployment KF altitude ASL + vertical velocity, airbrakes estimator altitude ASL + vertical velocity + tilt, ab_flags (3 lockout-exit vote bits, filter-born, apogee latch), flight stage (honest `RocketState` mirror), **pyro flags** (continuity / fire / short — fire bits double as the chutes' `deployed`, now at ±2.3 ms), **airbrakes commanded + actual extension**, valid bitmask |
-| **Slow** (tag 0x02) | 10 Hz | 73 B | timestamp_us, battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), flight stage (redundant with fast), **airbrakes servo temp**, **amp online + output statuses + shared battery voltage**, valid bitmask |
+| **Slow** (tag 0x02) | 10 Hz | 97 B | timestamp_us, battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), flight stage (redundant with fast), **airbrakes servo temp**, **amp online + output statuses + shared battery voltage**, **payload EPM battery mV + six rail currents mA + three SEM actuator step counts** (2 Hz source, `0xFFFF` = unavailable), valid bitmask |
 
 Throughput ≈ 46 kB/s ≈ 164 MB/hour; capacity is a non-issue.
 
@@ -38,7 +39,7 @@ ignition-time + `max_burn_time` from the flight profile.
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 36 B (288/288 bits — zero spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), tilt, flight stage (4-bit honest mirror), drogue/main deployed bits, **ab altitude AGL + ab vertical velocity (signed, ±400 m/s @ ~1.6 m/s) + 3 vote bits + born + apogee**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, EPM rails |
+| `TelemetryPacket` | 43 B (343/344 bits — 1 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), tilt, flight stage (4-bit honest mirror), drogue/main deployed bits, **ab altitude AGL + ab vertical velocity (signed, ±400 m/s @ ~1.6 m/s) + 3 vote bits + born + apogee**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
 | `LowPowerTelemetryPacket` | 11 B | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
 | `LandedTelemetryPacket` | 12 B | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
@@ -87,7 +88,9 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | bulkheads: online, brightness | – | – | – | – | **nowhere** — dropped from TM in v7; CAN-local only |
 | Icarus / OzYS / SDRM online, uptime | ✓ | – | – | – | **not derivable** — radio only |
 | payload stack status | ✓ (11-bit) | – | – | – | **not derivable** — radio only |
-| EPM rails (batt, 3v3, 5v, per-5v, per-9v) | ✓ | – | – | – | **not derivable** — radio only |
+| EPM battery voltage | ✓ (1+10 bit, 11–17 V) | – | – | ✓ (raw mV) | logged |
+| EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (1+10 bit each, 0–10.23 A @ 10 mA) | – | – | ✓ (raw mA) | logged |
+| SEM actuator steps ×3 | ✓ (1+10 bit each, full u16 @ ~64 steps) | – | – | ✓ (raw steps) | logged |
 | VL health flags (imu_ok, sd_ok, …) | – | – | – | – | CAN node status only; not persisted |
 
 Takeaways:
@@ -95,7 +98,16 @@ Takeaways:
 - v7 closed the two old gaps: GPS UTC time is now logged at full rate (absolute
   time for video / GCM / redundant-FC correlation), and amp state + servo temp
   survive an RF-link drop via the slow record.
-- Still radio-only: EPM rails, payload stack status, Icarus/OzYS/SDRM health.
+- v8 put the payload stack telemetry on SD as well: the slow record carries the
+  raw mV / mA / step values (with the payload's own `0xFFFF` = unavailable
+  sentinel), so an RF-link drop no longer loses EPM rails or actuator positions.
+  The downlink copies are quantized; the SD copies are exact.
+- The downlink packet grew 36 B -> 43 B (55 B on air after the type byte and
+  reed-solomon ecc), which costs one extra symbol block: 1774 ms time-on-air
+  instead of 1642 ms at SF12 / 250 kHz / CR 4:8, still inside the 2 s period.
+  Time-on-air only steps at 50 / 55 / 60 bytes on air, so trimming the packet
+  back to 39 B would recover the old 1642 ms.
+- Still radio-only: payload stack status, Icarus/OzYS/SDRM health.
   A 1 Hz CAN-health snapshot record on SD would close the remainder.
 - Bulkhead status is now on no channel at all (deliberate v7 drop) — it exists
   only as live CAN traffic.
