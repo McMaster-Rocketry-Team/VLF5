@@ -37,10 +37,15 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    AirBrakesWatch, AmpLogState, AmpStateWatch, FlightStageMutex, PayloadLogState,
-    PayloadStateWatch, VLStatusMutex,
+    FlightStageMutex, VLStatusMutex,
     can_central::CanCentral,
-    tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
+    tasks::{
+        data_logger::{
+            AirBrakesWatch, AmpLogState, AmpStateWatch, PayloadLogState, PayloadStateWatch,
+        },
+        sensor_tasks::BatteryVWatch,
+        unix_clock::UnixClock,
+    },
 };
 
 pub type CanReceiverSub = pubsub::Subscriber<
@@ -288,9 +293,9 @@ async fn can_message_receive_task(
             }
             CanBusMessageEnum::IcarusStatus(message) => {
                 let mut state = air_brakes_watch.try_get().unwrap_or_default();
+                // Both leave NaN behind only until Icarus first reports.
                 state.actual_extension = message.actual_extension_percentage();
                 state.servo_temp = message.servo_temperature();
-                state.actual_valid = true;
                 let _ = air_brakes_watch.sender().send(state);
             }
             CanBusMessageEnum::CustomPayloadStatus(message) => {

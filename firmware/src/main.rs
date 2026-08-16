@@ -42,7 +42,6 @@ use firmware_common_new::{
         custom_status::vl_custom_status::VLCustomStatus,
         messages::{
             baro_measurement::BaroMeasurementMessage,
-            custom_payload_status::PAYLOAD_READING_UNAVAILABLE,
             imu_measurement::IMUMeasurementMessage, mag_measurement::MagMeasurementMessage,
             vl_status::FlightStage,
         },
@@ -67,6 +66,7 @@ use crate::{
     tasks::{
         amp_control_task::{AmpControlWatch, amp_control_task},
         buzzer_task::{BuzzerPubSub, BuzzerTone, DISABLE_BUZZER, buzzer_task},
+        data_logger::{AirBrakesWatch, AmpStateWatch, PayloadStateWatch},
         pyro_task::ContinuityUpdate,
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub, adc_task, mag_task},
         unix_clock::{UnixClock, unix_clock_task},
@@ -101,8 +101,6 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
     cr: 8,
     power: 22,
 };
-pub const MAIN_BULKHEAD_NODE_ID: u16 = 0x4FC;
-pub const DROGUE_BULKHEAD_NODE_ID: u16 = 0x328;
 pub const OZYS_1_NODE_ID: u16 = 0x2B2;
 pub const OZYS_2_NODE_ID: u16 = 0x0E1;
 
@@ -181,63 +179,6 @@ pub type FlightEstimatorsMutex = BlockingMutex<NoopRawMutex, RefCell<FlightEstim
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
-
-/// Latest airbrakes state for SD logging: commanded extension,
-/// Icarus-reported actual extension, and Icarus-reported servo temperature.
-#[derive(Clone, Copy, Default, defmt::Format)]
-pub struct AirBrakesLogState {
-    pub commanded_extension: f32,
-    pub actual_extension: f32,
-    pub servo_temp: f32,
-    pub commanded_valid: bool,
-    pub actual_valid: bool,
-}
-
-pub type AirBrakesWatch = Watch<NoopRawMutex, AirBrakesLogState, 2>;
-
-/// Latest AMP status heartbeat for SD logging: shared battery rail voltage
-/// and the three output statuses packed 2 bits per output
-/// (`PowerOutputStatus` discriminants, out1 in the LSBs) — the same encoding
-/// the slow record stores.
-#[derive(Clone, Copy, Default, defmt::Format)]
-pub struct AmpLogState {
-    pub shared_battery_v: f32,
-    pub out_status: u8,
-}
-
-pub type AmpStateWatch = Watch<NoopRawMutex, AmpLogState, 2>;
-
-/// Latest payload `CustomPayloadStatusMessage` for SD logging, kept in the
-/// units it arrives in. `PAYLOAD_READING_UNAVAILABLE` (0xFFFF) marks a reading
-/// the payload could not take — the same sentinel the slow record stores.
-#[derive(Clone, Copy, defmt::Format)]
-pub struct PayloadLogState {
-    pub epm_batt_mv: u16,
-    /// Rail index order: 0 `SYS_3V3`, 1 `SYS_5V`, 2 `PER_3V3`, 3 `PER_5V`,
-    /// 4 `PER_9V`, 5 `PER_12V`.
-    pub rail_ma: [u16; 6],
-    /// Experiment channels 1..3.
-    pub actuator_steps: [u16; 3],
-}
-
-impl Default for PayloadLogState {
-    fn default() -> Self {
-        Self {
-            epm_batt_mv: PAYLOAD_READING_UNAVAILABLE,
-            rail_ma: [PAYLOAD_READING_UNAVAILABLE; 6],
-            actuator_steps: [PAYLOAD_READING_UNAVAILABLE; 3],
-        }
-    }
-}
-
-pub type PayloadStateWatch = Watch<NoopRawMutex, PayloadLogState, 2>;
-
-pub fn publish_airbrakes_commanded(watch: &AirBrakesWatch, extension: f32) {
-    let mut state = watch.try_get().unwrap_or_default();
-    state.commanded_extension = extension;
-    state.commanded_valid = true;
-    let _ = watch.sender().send(state);
-}
 
 #[entry]
 fn main() -> ! {

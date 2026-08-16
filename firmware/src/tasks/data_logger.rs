@@ -1,6 +1,5 @@
 use crate::{
-    AirBrakesWatch, AmpStateWatch, ContinuityWatch, FlightEstimatorsMutex, FlightStageMutex,
-    GPSReadingWatch, PayloadStateWatch, VLStatusMutex,
+    ContinuityWatch, FlightEstimatorsMutex, FlightStageMutex, GPSReadingWatch, VLStatusMutex,
     can_central::CanCentral,
     tasks::{
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
@@ -12,14 +11,15 @@ use crate::{
 use air_brakes_controller_core::FlightEstimators;
 use defmt::warn;
 use embassy_futures::select::{Either, select};
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, watch::Watch};
 use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::{
-    can_bus::node_types::AMP_NODE_TYPE,
+    can_bus::{
+        messages::custom_payload_status::PAYLOAD_READING_UNAVAILABLE, node_types::AMP_NODE_TYPE,
+    },
     flight_data_record::{
-        AB_APOGEE, AB_BARO_TRUSTED, AB_BURNOUT, AB_VOTE_DRAG,
-        FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
-        VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
+        AB_APOGEE, AB_BARO_TRUSTED, AB_BURNOUT, AB_VOTE_DRAG, FlightDataFastRecord,
+        FlightDataSlowRecord, LogRecord, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
         VALID_IMU, VALID_MAG,
     },
 };
@@ -27,6 +27,78 @@ use firmware_common_new::{
 /// Queue between the IMU-clocked logger and the SD writer.
 pub const FLIGHT_DATA_CHANNEL_DEPTH: usize = 512;
 pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNEL_DEPTH>;
+
+/// Latest airbrakes state for SD logging: commanded extension,
+/// Icarus-reported actual extension, and Icarus-reported servo temperature.
+///
+/// Every field is NaN until its source has spoken — the firmware for
+/// `commanded_extension`, an `IcarusStatus` CAN message for the other two.
+/// That is the whole "is this present?" story: there are no validity flags,
+/// because a NaN says it and a 0.0 would not. An Icarus that is offline or
+/// silent must not read as one reporting fully-stowed brakes at 0 C.
+#[derive(Clone, Copy, defmt::Format)]
+pub struct AirBrakesLogState {
+    pub commanded_extension: f32,
+    pub actual_extension: f32,
+    pub servo_temp: f32,
+}
+
+impl Default for AirBrakesLogState {
+    fn default() -> Self {
+        Self {
+            commanded_extension: f32::NAN,
+            actual_extension: f32::NAN,
+            servo_temp: f32::NAN,
+        }
+    }
+}
+
+pub type AirBrakesWatch = Watch<NoopRawMutex, AirBrakesLogState, 2>;
+
+/// Publish a commanded extension, leaving the Icarus-sourced fields alone.
+pub fn publish_airbrakes_commanded(watch: &AirBrakesWatch, extension: f32) {
+    let mut state = watch.try_get().unwrap_or_default();
+    state.commanded_extension = extension;
+    let _ = watch.sender().send(state);
+}
+
+/// Latest AMP status heartbeat for SD logging: shared battery rail voltage
+/// and the three output statuses packed 2 bits per output
+/// (`PowerOutputStatus` discriminants, out1 in the LSBs) — the same encoding
+/// the slow record stores.
+#[derive(Clone, Copy, Default, defmt::Format)]
+pub struct AmpLogState {
+    pub shared_battery_v: f32,
+    pub out_status: u8,
+}
+
+pub type AmpStateWatch = Watch<NoopRawMutex, AmpLogState, 2>;
+
+/// Latest payload `CustomPayloadStatusMessage` for SD logging, kept in the
+/// units it arrives in. `PAYLOAD_READING_UNAVAILABLE` (0xFFFF) marks a reading
+/// the payload could not take — the same sentinel the slow record stores, and
+/// the integer equivalent of the NaNs above.
+#[derive(Clone, Copy, defmt::Format)]
+pub struct PayloadLogState {
+    pub epm_batt_mv: u16,
+    /// Rail index order: 0 `SYS_3V3`, 1 `SYS_5V`, 2 `PER_3V3`, 3 `PER_5V`,
+    /// 4 `PER_9V`, 5 `PER_12V`.
+    pub rail_ma: [u16; 6],
+    /// Experiment channels 1..3.
+    pub actuator_steps: [u16; 3],
+}
+
+impl Default for PayloadLogState {
+    fn default() -> Self {
+        Self {
+            epm_batt_mv: PAYLOAD_READING_UNAVAILABLE,
+            rail_ma: [PAYLOAD_READING_UNAVAILABLE; 6],
+            actuator_steps: [PAYLOAD_READING_UNAVAILABLE; 3],
+        }
+    }
+}
+
+pub type PayloadStateWatch = Watch<NoopRawMutex, PayloadLogState, 2>;
 
 const IMU_TIMEOUT: Duration = Duration::from_millis(20);
 const SLOW_INTERVAL: Duration = Duration::from_millis(100);
@@ -215,18 +287,13 @@ pub async fn log_flight_data(
             }
             None => 0,
         };
+        // NaN carries "not present" for all three (see `AirBrakesLogState`),
+        // so nothing here needs a valid bit — an empty watch and an
+        // all-NaN state log identically, which is the truth in both cases.
         let (air_brakes_commanded_extension, air_brakes_actual_extension, air_brakes_servo_temp) =
             match airbrakes_opt {
-                Some(ab) => {
-                    if ab.commanded_valid {
-                        fast_valid |= VALID_AIRBRAKES_COMMANDED;
-                    }
-                    if ab.actual_valid {
-                        fast_valid |= VALID_AIRBRAKES_ACTUAL;
-                    }
-                    (ab.commanded_extension, ab.actual_extension, ab.servo_temp)
-                }
-                None => (0.0, 0.0, 0.0),
+                Some(ab) => (ab.commanded_extension, ab.actual_extension, ab.servo_temp),
+                None => (f32::NAN, f32::NAN, f32::NAN),
             };
         let (amp_shared_battery_v, amp_out_status) = match amp_opt {
             Some(a) => (a.shared_battery_v, a.out_status),

@@ -24,10 +24,13 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AmpStateWatch, AvionicsModeWatch, AirBrakesWatch, ContinuityWatch,
+    AvionicsModeWatch, ContinuityWatch,
     FLIGHT_CONFIG, FireSignal, FlightEstimatorsMutex, FlightStageMutex, GPSReadingWatch,
-    OZYS_1_NODE_ID, OZYS_2_NODE_ID, PayloadStateWatch,
-    SetTargetWatch, VLStatusMutex, publish_airbrakes_commanded,
+    OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    SetTargetWatch, VLStatusMutex,
+    tasks::data_logger::{
+        AirBrakesWatch, AmpStateWatch, PayloadStateWatch, publish_airbrakes_commanded,
+    },
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,

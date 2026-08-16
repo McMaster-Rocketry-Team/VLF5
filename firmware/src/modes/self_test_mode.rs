@@ -11,8 +11,7 @@ use firmware_common_new::{
             vl_status::FlightStage,
         },
         node_types::{
-            AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
-            PAYLOAD_SDRM_NODE_TYPE,
+            AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
         },
     },
     vlp::{
@@ -25,8 +24,8 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, ContinuityWatch, DROGUE_BULKHEAD_NODE_ID, FlightStageMutex,
-    MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID, VLStatusMutex,
+    AvionicsModeWatch, ContinuityWatch, FlightStageMutex, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    VLStatusMutex,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
@@ -102,37 +101,6 @@ pub async fn self_test_mode(
                 self_test_partial_failure = true;
             }
         });
-
-        // test bulkhead pcbs
-        {
-            packet_builder.update(|packet| {
-                if let Some(main_bulkhead) = can_central
-                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == MAIN_BULKHEAD_NODE_ID)
-                {
-                    packet.main_bulkhead_pcb = NodeStatus::from_message(&main_bulkhead.status);
-                } else {
-                    packet.main_bulkhead_pcb = NodeStatus::offline();
-                }
-                if !packet.main_bulkhead_pcb.healthy() {
-                    self_test_partial_failure = true;
-                }
-
-                if let Some(drogue_bulkhead) = can_central
-                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == DROGUE_BULKHEAD_NODE_ID)
-                {
-                    packet.drogue_bulkhead_pcb = NodeStatus::from_message(&drogue_bulkhead.status);
-                } else {
-                    packet.drogue_bulkhead_pcb = NodeStatus::offline();
-                }
-                if !packet.drogue_bulkhead_pcb.healthy() {
-                    self_test_partial_failure = true;
-                }
-            });
-        }
 
         // test amp out 1
         {

@@ -132,7 +132,7 @@ def main():
     # 3. Self test (optional)
     if not args.no_selftest:
         op.send("mode self-test")
-        # Self-test waits out CAN-node response timeouts; on the bench (AMP/Icarus/bulkheads
+        # Self-test waits out CAN-node response timeouts; on the bench (AMP/Icarus
         # offline) that takes ~35s, so allow generous time.
         if op.wait(lambda: op.self_test is not None, 60, "self-test result"):
             st = op.self_test

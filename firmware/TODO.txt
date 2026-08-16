@@ -11,3 +11,4 @@ sensor error?
 datapath between sensors, can bus, airbrakes, sd card, and telemetry
 
 joined fut jitter
+Some vs None instead of NaN

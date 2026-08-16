@@ -1,7 +1,8 @@
 use core::f32::consts::PI;
 
 use crate::{
-    AvionicsModeWatch, AirBrakesWatch, FlightStageMutex, GPSReadingWatch, publish_airbrakes_commanded,
+    AvionicsModeWatch, FlightStageMutex, GPSReadingWatch,
+    tasks::data_logger::{AirBrakesWatch, publish_airbrakes_commanded},
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,

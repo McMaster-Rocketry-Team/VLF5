@@ -23,10 +23,16 @@ the next arm.
 
 Throughput ≈ 46 kB/s ≈ 164 MB/hour; capacity is a non-issue.
 
-The KF fields are NaN until the armed-mode estimator produces its first sample
-(a few ms after arming); the ab fields are NaN until their piece of the
-airbrakes estimator is alive (tilt from ignition, altitude/velocity from the
-vertical filter's birth). `flight_stage` gives stage transitions at ~2.3 ms
+NaN means "no source has produced this yet", uniformly: the KF fields until the
+armed-mode estimator produces its first sample (a few ms after arming); the ab
+fields until their piece of the airbrakes estimator is alive (tilt from
+ignition, altitude/velocity from the vertical filter's birth); the airbrakes
+commanded extension until the firmware commands one; and the airbrakes actual
+extension and servo temp until Icarus first reports. The last of those is the
+one worth remembering when reading a log: a silent or offline Icarus shows as
+NaN, never as 0.0, so it cannot be mistaken for stowed brakes at 0 C. There are
+no per-field validity bits for any of this — the value says it.
+`flight_stage` gives stage transitions at ~2.3 ms
 resolution, and the per-sample drag-vote and burnout bits reconstruct the lockout-exit
 table post-flight; since v7 the pyro fire bits get the same resolution
 (previously ±100 ms via the slow record). The deployment KF columns are frozen
@@ -85,11 +91,11 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | VL battery voltage | ✓ | ✓ | – | ✓ | logged |
 | pyro continuity (main/drogue) | ✓ | – | ✓ | – | logged |
 | pyro fire outputs, short-circuit | – | – | ✓ (±2.3 ms) | – | logged |
-| airbrakes commanded/actual ext. | ✓ (5-bit) | – | ✓ full rate | – | logged |
-| airbrakes servo temp | ✓ | – | – | ✓ | logged |
+| airbrakes commanded/actual ext. | ✓ (5-bit) | – | ✓ full rate (NaN until commanded / until Icarus reports) | – | logged |
+| airbrakes servo temp | ✓ | – | – | ✓ (NaN until Icarus reports) | logged |
 | MPC predicted apogee | – | – | – | – | approx — re-run MPC on logged ab state |
 | amp: online, outputs ×3, shared battery | ✓ | ✓/LD | – | ✓ | logged |
-| bulkheads: online, brightness | – | – | – | – | **nowhere** — dropped from TM in v7; CAN-local only |
+| bulkheads: online, brightness | – | – | – | – | **not on the rocket** — no bulkhead PCBs this year; all handling removed, only the CAN message definitions and `BULKHEAD_NODE_TYPE` remain |
 | Icarus / OzYS / SDRM online, uptime | ✓ | – | – | – | **not derivable** — radio only |
 | payload stack status | ✓ (11-bit) | – | – | – | **not derivable** — radio only |
 | EPM battery voltage | ✓ (1+10 bit, 11–17 V) | – | – | ✓ (raw mV) | logged |
@@ -113,8 +119,12 @@ Takeaways:
   back to 39 B would recover the old 1642 ms.
 - Still radio-only: payload stack status, Icarus/OzYS/SDRM health.
   A 1 Hz CAN-health snapshot record on SD would close the remainder.
-- Bulkhead status is now on no channel at all (deliberate v7 drop) — it exists
-  only as live CAN traffic.
+- Bulkhead status is on no channel at all, and there is no longer any firmware
+  that would produce it: the PCBs are not on this year's rocket, so the
+  self-test, telemetry, and reset paths were removed outright, along with the
+  two node-ID constants. What survives is protocol-level only — the CAN message
+  definitions and `BULKHEAD_NODE_TYPE` — so a bulkhead on the bench still shows
+  up in the CAN monitor as raw traffic under its node type.
 - `calibration_complete()` (airbrakes pad calibration, a launch-readiness
   condition) is visible only on RTT — it has no CAN/telemetry slot. The
   natural home is a VLCustomStatus bit on the CAN heartbeat, relayed by the

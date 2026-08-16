@@ -20,7 +20,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, DROGUE_BULKHEAD_NODE_ID, FireSignal, MAIN_BULKHEAD_NODE_ID, SetTargetWatch,
+    AvionicsModeWatch, FireSignal, SetTargetWatch,
     avionics_mode::AvionicsMode,
     can_central::CanCentral,
     tasks::{
@@ -49,11 +49,13 @@ pub async fn receive_vlp_task(
                 avionics_mode.send(packet.mode.into());
             }
             VLPUplinkPacket::Reset(packet) => {
+                // No `NodeId` arm: every remaining reset target is a whole
+                // node type. The bulkheads were the only devices that shared
+                // a type and so had to be addressed individually.
                 #[derive(defmt::Format)]
                 enum NodeSelection {
                     All,
                     NodeType(u8),
-                    NodeId(u16),
                     None,
                 }
 
@@ -84,8 +86,6 @@ pub async fn receive_vlp_task(
                         NodeSelection::NodeType(PAYLOAD_SDRM_NODE_TYPE)
                     }
                     DeviceToReset::OzysAll => NodeSelection::NodeType(OZYS_NODE_TYPE),
-                    DeviceToReset::MainBulkhead => NodeSelection::NodeId(MAIN_BULKHEAD_NODE_ID),
-                    DeviceToReset::DrogueBulkhead => NodeSelection::NodeId(DROGUE_BULKHEAD_NODE_ID),
                     DeviceToReset::AeroRust => NodeSelection::NodeType(AERO_RUST_NODE_TYPE),
                 };
                 info!("node selection: {}", node_selection);
@@ -110,15 +110,6 @@ pub async fn receive_vlp_task(
                                 .into(),
                             );
                         }
-                    }
-                    NodeSelection::NodeId(node_id) => {
-                        can_sender.send(
-                            ResetMessage {
-                                node_id,
-                                reset_all: false,
-                            }
-                            .into(),
-                        );
                     }
                     NodeSelection::None => {}
                 }
