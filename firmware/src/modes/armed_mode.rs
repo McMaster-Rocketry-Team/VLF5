@@ -16,14 +16,16 @@ use firmware_common_new::{
         custom_status::payload_sdrm_custom_status::PayloadSDRMCustomStatus,
         messages::{
             CanBusMessageEnum, airbrakes_control::AirBrakesControlMessage,
-            amp_control::AmpControlMessage, custom_payload_status::CustomPayloadStatusMessage,
-            vl_status::FlightStage,
+            amp_control::AmpControlMessage, vl_status::FlightStage,
         },
         node_types::{AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE},
         sender::CanSender,
     },
     flight_storage::DEFAULT_TARGET_APOGEE_AGL,
-    vlp::{client::VLPAvionics, packets::telemetry::TelemetryPacketBuilder},
+    vlp::{
+        client::VLPAvionics,
+        packets::telemetry::{DeploymentKfState, IcarusAirBrakesState, TelemetryPacketBuilder},
+    },
 };
 
 use crate::{
@@ -45,6 +47,27 @@ use crate::{
     },
     utils::SubscriberWithLastValue,
 };
+
+/// The stage that goes on the downlink and into the SD log for a deployment
+/// estimator state. Mirrors `RocketState` 1:1 apart from `MachLockout`, which
+/// folds into `Ascent` (see `FlightStage`): the rocket is ascending, and the
+/// lockout is an internal detail of the baro filter that the ground has no
+/// stage to show it in. Whether the filter has numbers during that window is a
+/// separate question, answered by `deployment_kf` being absent.
+///
+/// One function so the two consumers — the telemetry packet and the
+/// `FlightStageMutex` the logger reads — cannot drift apart on what a state
+/// looks like from outside.
+fn wire_flight_stage(state: RocketState) -> FlightStage {
+    match state {
+        RocketState::OnPad => FlightStage::Armed,
+        RocketState::Ascent { .. } | RocketState::MachLockout { .. } => FlightStage::Ascent,
+        RocketState::DrogueChute { .. } => FlightStage::DrogueChute,
+        RocketState::MainChute { .. } => FlightStage::MainChute,
+        RocketState::Landed => FlightStage::Landed,
+        RocketState::FailedToReachMinApogee => FlightStage::FailedToReachMinApogee,
+    }
+}
 
 pub async fn armed_mode(
     vlp_avionics_client: &'static VLPAvionics<NoopRawMutex>,
@@ -161,90 +184,51 @@ pub async fn armed_mode(
 
                 estimators.lock(|s| {
                     let est = s.borrow();
-                    // All zero once the estimator is retired at apogee, same
-                    // as before it is born. The packet has no absence
-                    // encoding for these, so `flight_stage` is what tells
-                    // the ground which side of the flight a zero is from.
                     let ab = est.airbrakes_estimator();
 
                     // Airbrakes estimator health: whether the vertical filter
                     // is born. The rest of its state is SD-only.
                     packet.airbrakes_born = ab.is_some_and(|ab| ab.baro_trusted());
 
-                    // Tilt is the airbrakes estimator's gyro dead reckoning
-                    // (0 before ignition and after retirement).
-                    let airbrakes_kf_tilt_deg = ab
-                        .and_then(|ab| ab.tilt())
-                        .map(|t| t.to_degrees())
-                        .unwrap_or(0.0);
+                    // Tilt is the airbrakes estimator's gyro dead reckoning:
+                    // absent before ignition and again once the estimator is
+                    // retired at apogee. Passed through as the `Option` it
+                    // already is — a zero here would read as "pointing
+                    // straight up", which is a claim, not silence.
+                    packet.airbrakes_kf_tilt_deg =
+                        ab.and_then(|ab| ab.tilt()).map(|t| t.to_degrees());
 
-                    // The flight part of the stage mirrors `RocketState` 1:1.
-                    match est.state() {
-                        RocketState::OnPad => {
-                            packet.deployment_kf_altitude_agl = 0.0;
-                            packet.deployment_kf_vertical_velocity = 0.0;
-                            packet.airbrakes_kf_tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::Armed;
-                        }
-                        RocketState::Ascent {
+                    // The downlink and the SD log read the deployment KF
+                    // through the SAME two accessors, so the two channels
+                    // cannot disagree about whether a sample exists — they
+                    // agree by construction rather than by two pieces of code
+                    // happening to make the same call. Both are `Some` in every
+                    // stage where the filter is live and fusing baro (`OnPad`
+                    // included, where a near-zero AGL is real evidence the baro
+                    // and the filter are alive before launch), and both are
+                    // `None` through the Mach lockout, where the filter is
+                    // frozen and holds a stale pre-ignition reading. `None` on
+                    // the ground display and an empty column in the log now
+                    // describe the same window.
+                    let deployment = est.deployment_estimator();
+                    let launch_pad_altitude_asl = deployment.launch_pad_altitude_asl();
+                    packet.deployment_kf = match (
+                        deployment.kf_altitude_asl(),
+                        deployment.kf_vertical_velocity(),
+                    ) {
+                        (Some(altitude_asl), Some(vertical_velocity)) => Some(DeploymentKfState {
+                            altitude_agl: altitude_asl - launch_pad_altitude_asl,
                             vertical_velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
-                        } => {
-                            packet.deployment_kf_altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.deployment_kf_vertical_velocity = vertical_velocity;
-                            packet.airbrakes_kf_tilt_deg = airbrakes_kf_tilt_deg;
-                            packet.flight_stage = FlightStage::Ascent;
-                        }
-                        RocketState::MachLockout { .. } => {
-                            // Folded into `Ascent` on the wire: the rocket is
-                            // ascending, and the lockout is an internal detail
-                            // of the baro filter. The slow KF is frozen and the
-                            // state carries no altitude/velocity, so these
-                            // report zeros rather than stale numbers. Tilt is
-                            // the only live number on the downlink through this
-                            // window; the SD log's `airbrakes_kf_*` columns are
-                            // what to read for the rest.
-                            packet.deployment_kf_altitude_agl = 0.0;
-                            packet.deployment_kf_vertical_velocity = 0.0;
-                            packet.airbrakes_kf_tilt_deg = airbrakes_kf_tilt_deg;
-                            packet.flight_stage = FlightStage::Ascent;
-                        }
-                        RocketState::DrogueChute {
-                            vertical_velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
-                            ..
-                        } => {
-                            packet.deployment_kf_altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.deployment_kf_vertical_velocity = vertical_velocity;
-                            packet.airbrakes_kf_tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::DrogueChute;
-                        }
-                        RocketState::MainChute {
-                            vertical_velocity,
-                            altitude_asl,
-                            launch_pad_altitude_asl,
-                            ..
-                        } => {
-                            packet.deployment_kf_altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.deployment_kf_vertical_velocity = vertical_velocity;
-                            packet.airbrakes_kf_tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::MainChute;
-                        }
-                        RocketState::Landed => {
-                            packet.deployment_kf_altitude_agl = 0.0;
-                            packet.deployment_kf_vertical_velocity = 0.0;
-                            packet.airbrakes_kf_tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::Landed;
-                        }
-                        RocketState::FailedToReachMinApogee => {
-                            packet.deployment_kf_altitude_agl = 0.0;
-                            packet.deployment_kf_vertical_velocity = 0.0;
-                            packet.airbrakes_kf_tilt_deg = 0.0;
-                            packet.flight_stage = FlightStage::FailedToReachMinApogee;
-                        }
-                    }
+                        }),
+                        _ => None,
+                    };
+
+                    // `state()` is read for the one thing only it can answer:
+                    // which flight phase the deployment state machine is in.
+                    // The numbers it also carries are deliberately not used
+                    // here — they are the second code path that used to make
+                    // the packet and the log disagree.
+                    packet.flight_stage = wire_flight_stage(est.state());
                 });
             });
 
@@ -266,19 +250,21 @@ pub async fn armed_mode(
                     packet.amp_out3 = message.out3.status;
                 }
                 CanBusMessageEnum::IcarusStatus(message) => {
-                    packet.air_brakes_actual_extension_percentage =
-                        message.actual_extension_percentage();
-                    packet.air_brakes_servo_temp = message.servo_temperature();
+                    // Both numbers arrive in this one message, so they become
+                    // present together and stay absent together until it does.
+                    packet.icarus_air_brakes = Some(IcarusAirBrakesState {
+                        actual_extension_percentage: message.actual_extension_percentage(),
+                        servo_temp: message.servo_temperature(),
+                    });
                 }
                 CanBusMessageEnum::CustomPayloadStatus(message) => {
-                    // 0xFFFF means the payload could not read that value; keep it as
-                    // None so the ground station shows "n/a" instead of a fake 0.
-                    packet.epm_batt_mv =
-                        CustomPayloadStatusMessage::reading(message.epm_batt_mv);
-                    packet.epm_rail_ma = message.rail_ma().map(CustomPayloadStatusMessage::reading);
-                    packet.sem_actuator_steps = message
-                        .actuator_steps()
-                        .map(CustomPayloadStatusMessage::reading);
+                    // The accessors decode the payload's 0xFFFF "could not read
+                    // this" sentinel — which exists only because the CAN frame
+                    // cannot carry an `Option` — back into `None`, so the ground
+                    // station shows "n/a" instead of a fake 0.
+                    packet.epm_batt_mv = message.epm_batt_mv();
+                    packet.epm_rail_ma = message.rail_ma();
+                    packet.sem_actuator_steps = message.actuator_steps();
                 }
                 _ => {}
             });
@@ -398,16 +384,7 @@ pub async fn armed_mode(
                 avionics_mode_watch.sender().send(AvionicsMode::Landed);
             }
 
-            // Mirror of `RocketState`, with the Mach lockout folded into
-            // `Ascent` (see `FlightStage`) — the only stage that is not 1:1.
-            let new_stage = match state {
-                RocketState::OnPad => FlightStage::Armed,
-                RocketState::Ascent { .. } | RocketState::MachLockout { .. } => FlightStage::Ascent,
-                RocketState::DrogueChute { .. } => FlightStage::DrogueChute,
-                RocketState::MainChute { .. } => FlightStage::MainChute,
-                RocketState::Landed => FlightStage::Landed,
-                RocketState::FailedToReachMinApogee => FlightStage::FailedToReachMinApogee,
-            };
+            let new_stage = wire_flight_stage(state);
             #[cfg(feature = "hil-replay")]
             {
                 let prev = flight_stage.lock(|r| *r.borrow());
@@ -422,7 +399,10 @@ pub async fn armed_mode(
     };
 
     let control_airbrakes_fut = async {
-        publish_airbrakes_commanded(air_brakes_watch, 0.0, f32::NAN, false);
+        // A real command of fully-retracted, not an absence: the CAN message
+        // below carries it to Icarus. The prediction is absent because the MPC
+        // has not run yet.
+        publish_airbrakes_commanded(air_brakes_watch, Some(0.0), None, false);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;
@@ -483,38 +463,41 @@ pub async fn armed_mode(
             // The prediction belongs to the MPC's own command. While the
             // validation deploy overrides it, there is no prediction for what
             // is actually being commanded, so report absence rather than a
-            // number about a different extension.
+            // number about a different extension. A solve that comes back NaN
+            // is absent for the same reason — it is not a prediction either,
+            // and the packet's fixed-point encoding has nothing to make of it.
             let predicted_apogee_agl = if validating {
-                f32::NAN
+                None
             } else {
-                mpc.predicted_apogee_asl - launch_pad_altitude_asl
+                let predicted_apogee_agl = mpc.predicted_apogee_asl - launch_pad_altitude_asl;
+                (!predicted_apogee_agl.is_nan()).then_some(predicted_apogee_agl)
             };
             publish_airbrakes_commanded(
                 air_brakes_watch,
-                airbrake_extension_percentage,
+                Some(airbrake_extension_percentage),
                 predicted_apogee_agl,
                 validating,
             );
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
             packet_builder.update(|packet| {
                 packet.air_brakes_commanded_extension_percentage = airbrake_extension_percentage;
-                // The packet has no absence encoding here; 0 while the MPC is
-                // not running reads the same as before it started.
-                packet.mpc_predicted_apogee_agl = if predicted_apogee_agl.is_nan() {
-                    0.0
-                } else {
-                    predicted_apogee_agl
-                };
+                // The same `Option` the SD log gets: the packet has its own
+                // validity bit for this now, so "the MPC is not running" is
+                // distinguishable on the downlink from "it predicts 0 m".
+                packet.mpc_predicted_apogee_agl = predicted_apogee_agl;
             });
 
             ticker.next().await;
         }
 
-        publish_airbrakes_commanded(air_brakes_watch, 0.0, f32::NAN, false);
+        // Permission has lapsed, so the brakes are commanded shut — a real 0.0
+        // — and the MPC has stopped, so there is no longer a prediction to go
+        // with it.
+        publish_airbrakes_commanded(air_brakes_watch, Some(0.0), None, false);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;
-            packet.mpc_predicted_apogee_agl = 0.0;
+            packet.mpc_predicted_apogee_agl = None;
         });
     };
 

@@ -63,9 +63,10 @@ pub async fn landed_mode(
 
             packet_builder.update(|packet| {
                 packet.num_of_fix_satellites = gps_data.num_of_fix_satellites;
-                let (lat, lon) = gps_data.lat_lon.unwrap_or((0.0, 0.0));
-                packet.lat = lat;
-                packet.lon = lon;
+                // Passed through as the `Option` it already is: this is the
+                // packet a search party navigates to, so "no fix yet" must not
+                // arrive as a coordinate in the Gulf of Guinea.
+                packet.lat_lon = gps_data.lat_lon;
                 packet.battery_v = battery_v;
 
                 if let Some(node) = can_central.get_nodes::<1>(AMP_NODE_TYPE).first() {

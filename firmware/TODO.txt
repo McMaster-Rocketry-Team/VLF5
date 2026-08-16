@@ -1,9 +1,17 @@
 test on simulated data on openrocket
-Some vs None instead of NaN
-mach lockout absence is inconsistent between channels: the packet reports
-  deployment_kf_altitude_agl as 0, while the SD deployment_kf_altitude_asl /
-  deployment_kf_vertical_velocity columns carry the frozen (stale) values. a
-  ground display and a post-flight plot disagree about that window. pick one
+hardware can bus filter on all pcbs
+
+airbrakes_flags is a u8 bitmask, so subsonic_by_drag None (no drag measurement
+  taken yet) and Some(false) (measured, not subsonic) both log as a clear
+  AIRBRAKES_SUBSONIC_DRAG bit. the estimator has the distinction, the storage
+  format throws it away. the one place absence is still lossy in the fast record
+UnixClock's Clock impl and the three CAN measurement broadcasts fall back to the
+  boot-time microsecond count when the GPS has not disciplined the clock yet, so
+  a receiver cannot tell an undisciplined uptime from a real unix time. same
+  fake-value-where-absence-belongs pattern, on the CAN boundary
+TelemetryPacket is at 38 bytes / 48 on air, the last size that fits the current
+  lora symbol count. anything new on the downlink costs air time inside the 2s
+  period
 
 need hardware:
 joined fut jitter

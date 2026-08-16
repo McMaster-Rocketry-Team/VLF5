@@ -15,36 +15,34 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant};
 use firmware_common_new::{
-    can_bus::{
-        messages::custom_payload_status::PAYLOAD_READING_UNAVAILABLE,
-        node_types::{
-            AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
-        },
+    can_bus::node_types::{
+        AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
     },
     flight_data_record::{
         AIRBRAKES_APOGEE, AIRBRAKES_BARO_GATE_REJECT,
         AIRBRAKES_BARO_RESYNC, AIRBRAKES_BARO_TRUSTED, AIRBRAKES_BURNOUT,
-        AIRBRAKES_SUBSONIC_DRAG, DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC,
+        AIRBRAKES_SUBSONIC_DRAG, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
+        DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
         FlightDataFastRecord,
-        FlightDataSlowRecord, LogRecord, NodeStatusRecord, VALID_BATTERY, VALID_GPS_ALT,
-        VALID_GPS_FIX, VALID_IMU, VALID_MAG,
+        FlightDataSlowRecord, ImuRecord, LogRecord, NodeStatusRecord, PayloadRecord,
     },
 };
 
-/// The last heartbeat from the single node of `node_type`, or `offline()` when
-/// the node has never been heard from.
+/// The last heartbeat from the single node of `node_type`, or `None` when the
+/// node has never been heard from.
 ///
-/// `online` is a 5 s timeout, so a node that has just gone quiet still reports
-/// its last-known health here — that is what the flag is for.
+/// The two absences are different and the record keeps them apart: `None` is a
+/// node that has never spoken at all, while a record with `online: false` is
+/// one that spoke and then went quiet — `online` is a 5 s timeout, so that
+/// record still carries its last-known health, which is what the flag is for.
 fn node_status_record(
     can_central: &CanCentral<NoopRawMutex>,
     node_type: u8,
-) -> NodeStatusRecord {
+) -> Option<NodeStatusRecord> {
     can_central
         .get_nodes::<1>(node_type)
         .first()
         .map(|node| NodeStatusRecord::from_message(node.is_online(), &node.status))
-        .unwrap_or_else(NodeStatusRecord::offline)
 }
 
 /// Queue between the IMU-clocked logger and the SD writer.
@@ -54,51 +52,43 @@ pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNE
 /// Latest airbrakes state for SD logging: commanded extension, the apogee the
 /// MPC predicts at it, and Icarus's reported extension and servo temperature.
 ///
-/// Every field is NaN until its source has spoken — the firmware for
+/// Every field is `None` until its source has spoken — the firmware for
 /// `commanded_extension` and `predicted_apogee_agl`, an `IcarusStatus` CAN
 /// message for the other two.
 /// That is the whole "is this present?" story: there are no validity flags,
-/// because a NaN says it and a 0.0 would not. An Icarus that is offline or
-/// silent must not read as one reporting fully-stowed brakes at 0 C.
-#[derive(Clone, Copy, defmt::Format)]
+/// because the `Option` says it and a 0.0 would not. An Icarus that is offline
+/// or silent must not read as one reporting fully-stowed brakes at 0 C.
+///
+/// The default is therefore all-absent, which is exactly what an empty watch
+/// means as well — nothing commanded and nothing heard — so the two are
+/// interchangeable at the point of use.
+#[derive(Clone, Copy, Default, defmt::Format)]
 pub struct AirBrakesLogState {
-    pub commanded_extension: f32,
-    /// Apogee AGL the MPC predicts at `commanded_extension`. NaN whenever the
-    /// MPC is not running, which includes the forced validation deploy — there
-    /// the commanded extension is not the MPC's output, so pairing it with a
-    /// prediction would be a lie.
-    pub predicted_apogee_agl: f32,
+    pub commanded_extension: Option<f32>,
+    /// Apogee AGL the MPC predicts at `commanded_extension`. `None` whenever
+    /// the MPC is not running, which includes the forced validation deploy —
+    /// there the commanded extension is not the MPC's output, so pairing it
+    /// with a prediction would be a lie.
+    pub predicted_apogee_agl: Option<f32>,
     /// `commanded_extension` is the forced validation deploy rather than the
-    /// MPC's output. The one thing about the command that a NaN cannot say,
-    /// so it gets its own flag: 1.0 from the MPC and 1.0 from the validation
-    /// deploy are otherwise the same number.
+    /// MPC's output. The one thing about the command that an absent prediction
+    /// cannot say, so it gets its own flag: 1.0 from the MPC and 1.0 from the
+    /// validation deploy are otherwise the same number.
     pub validation_deploy: bool,
-    pub actual_extension: f32,
-    pub servo_temp: f32,
-}
-
-impl Default for AirBrakesLogState {
-    fn default() -> Self {
-        Self {
-            commanded_extension: f32::NAN,
-            predicted_apogee_agl: f32::NAN,
-            validation_deploy: false,
-            actual_extension: f32::NAN,
-            servo_temp: f32::NAN,
-        }
-    }
+    pub actual_extension: Option<f32>,
+    pub servo_temp: Option<f32>,
 }
 
 pub type AirBrakesWatch = Watch<NoopRawMutex, AirBrakesLogState, 2>;
 
 /// Publish a commanded extension and the MPC's prediction for it, leaving the
-/// Icarus-sourced fields alone. Pass NaN for the prediction when the command
+/// Icarus-sourced fields alone. Pass `None` for the prediction when the command
 /// did not come from the MPC, and set `validation_deploy` when the reason is
 /// the forced validation deploy.
 pub fn publish_airbrakes_commanded(
     watch: &AirBrakesWatch,
-    extension: f32,
-    predicted_apogee_agl: f32,
+    extension: Option<f32>,
+    predicted_apogee_agl: Option<f32>,
     validation_deploy: bool,
 ) {
     let mut state = watch.try_get().unwrap_or_default();
@@ -112,7 +102,14 @@ pub fn publish_airbrakes_commanded(
 /// and the three output statuses packed 2 bits per output
 /// (`PowerOutputStatus` discriminants, out1 in the LSBs) — the same encoding
 /// the slow record stores.
-#[derive(Clone, Copy, Default, defmt::Format)]
+///
+/// Deliberately not `Default`: both fields are always present in an
+/// `AmpStatusMessage`, so there is no such thing as a partly-absent one, and a
+/// zeroed stand-in for "the AMP has never spoken" would be a lie that decodes
+/// cleanly — `out_status` 0 is three real `PowerOutputStatus` values. An AMP
+/// that has said nothing is an absent watch, and the slow record's `amp` is
+/// `None` there.
+#[derive(Clone, Copy, defmt::Format)]
 pub struct AmpLogState {
     pub shared_battery_v: f32,
     pub out_status: u8,
@@ -121,27 +118,22 @@ pub struct AmpLogState {
 pub type AmpStateWatch = Watch<NoopRawMutex, AmpLogState, 2>;
 
 /// Latest payload `CustomPayloadStatusMessage` for SD logging, kept in the
-/// units it arrives in. `PAYLOAD_READING_UNAVAILABLE` (0xFFFF) marks a reading
-/// the payload could not take — the same sentinel the slow record stores, and
-/// the integer equivalent of the NaNs above.
-#[derive(Clone, Copy, defmt::Format)]
+/// units it arrives in. The CAN message marks a reading the payload could not
+/// take with a 0xFFFF sentinel — the bus cannot carry an `Option` — and its
+/// accessors decode that back to `None`, so the sentinel never gets past the
+/// receive handler and into firmware state.
+///
+/// Each reading is separately optional, which is what keeps a live EPM with one
+/// dead rail sensor distinguishable from a payload that has said nothing at all
+/// (the default: every field `None`).
+#[derive(Clone, Copy, Default, defmt::Format)]
 pub struct PayloadLogState {
-    pub epm_batt_mv: u16,
+    pub epm_batt_mv: Option<u16>,
     /// Rail index order: 0 `SYS_3V3`, 1 `SYS_5V`, 2 `PER_3V3`, 3 `PER_5V`,
     /// 4 `PER_9V`, 5 `PER_12V`.
-    pub rail_ma: [u16; 6],
+    pub rail_ma: [Option<u16>; 6],
     /// Experiment channels 1..3.
-    pub actuator_steps: [u16; 3],
-}
-
-impl Default for PayloadLogState {
-    fn default() -> Self {
-        Self {
-            epm_batt_mv: PAYLOAD_READING_UNAVAILABLE,
-            rail_ma: [PAYLOAD_READING_UNAVAILABLE; 6],
-            actuator_steps: [PAYLOAD_READING_UNAVAILABLE; 3],
-        }
-    }
+    pub actuator_steps: [Option<u16>; 3],
 }
 
 pub type PayloadStateWatch = Watch<NoopRawMutex, PayloadLogState, 2>;
@@ -167,10 +159,17 @@ const SLOW_INTERVAL: Duration = Duration::from_millis(100);
 /// The packing lives here rather than in the core crate because the `AIRBRAKES_*`
 /// / `DEPLOYMENT_*` bit layout is a storage-format detail, not estimator logic.
 ///
-/// NaN for any value the estimators have not produced yet, and for the whole
-/// airbrakes group once it is retired at apogee — absent reads the same as
+/// The estimators' own `Option`s are passed through untouched: a value they
+/// have not produced yet stays absent in the record, and the whole airbrakes
+/// group goes absent once it is retired at apogee — absent reads the same as
 /// not-yet-born, with `flight_stage` dating the transition.
-fn pack_estimator_sample(sample: &EstimatorLogSample) -> ((f32, f32, u8), (f32, f32, f32, u8)) {
+///
+/// The deployment half always exists (that estimator is never retired), so it
+/// is returned unwrapped; only its two numbers can be absent, and only for the
+/// reasons `RocketStateEstimator::kf_altitude_asl` documents.
+fn pack_estimator_sample(
+    sample: &EstimatorLogSample,
+) -> (DeploymentEstimatorRecord, Option<AirbrakesEstimatorRecord>) {
     let mut deployment_flags = 0u8;
     if sample.deployment_baro_gate.rejected() {
         deployment_flags |= DEPLOYMENT_BARO_GATE_REJECT;
@@ -178,14 +177,14 @@ fn pack_estimator_sample(sample: &EstimatorLogSample) -> ((f32, f32, u8), (f32, 
     if sample.deployment_baro_gate.resynced() {
         deployment_flags |= DEPLOYMENT_BARO_RESYNC;
     }
-    let deployment = (
-        sample.deployment_altitude_asl,
-        sample.deployment_vertical_velocity,
-        deployment_flags,
-    );
+    let deployment = DeploymentEstimatorRecord {
+        kf_altitude_asl: sample.deployment_altitude_asl,
+        kf_vertical_velocity: sample.deployment_vertical_velocity,
+        flags: deployment_flags,
+    };
 
     let Some(ab) = sample.airbrakes.as_ref() else {
-        return (deployment, (f32::NAN, f32::NAN, f32::NAN, 0));
+        return (deployment, None);
     };
 
     let mut flags = 0u8;
@@ -210,12 +209,12 @@ fn pack_estimator_sample(sample: &EstimatorLogSample) -> ((f32, f32, u8), (f32, 
 
     (
         deployment,
-        (
-            ab.altitude_asl.unwrap_or(f32::NAN),
-            ab.vertical_velocity.unwrap_or(f32::NAN),
-            ab.tilt_rad.map(|t| t.to_degrees()).unwrap_or(f32::NAN),
+        Some(AirbrakesEstimatorRecord {
+            kf_altitude_asl: ab.altitude_asl,
+            kf_vertical_velocity: ab.vertical_velocity,
+            kf_tilt_deg: ab.tilt_rad.map(|t| t.to_degrees()),
             flags,
-        ),
+        }),
     )
 }
 
@@ -306,7 +305,9 @@ pub async fn log_flight_data(
         let continuity_opt = continuity_watch.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
         let amp_opt = amp_state_watch.try_get();
-        // Defaults to the 0xFFFF sentinel until the payload's first status message.
+        // An empty watch and the all-absent default say the same thing — the
+        // payload has reported nothing — so the default stands in for a watch
+        // the payload has not written yet.
         let payload = payload_state_watch.try_get().unwrap_or_default();
         let stage = flight_stage.lock(|r| *r.borrow());
         // The estimator loop publishes this from inside the same critical
@@ -315,115 +316,84 @@ pub async fn log_flight_data(
         // check below is what makes that a guarantee rather than an ordering
         // assumption — a mismatch means the two loops have drifted apart and
         // the gate bits would be attributed to the wrong row.
-        let (
-            (deployment_kf_altitude_asl, deployment_kf_vertical_velocity, deployment_flags),
-            (
-                airbrakes_kf_altitude_asl,
-                airbrakes_kf_vertical_velocity,
-                airbrakes_kf_tilt_deg,
-                airbrakes_flags,
-            ),
-        ) = match estimator_log_watch.try_get() {
+        let (deployment, airbrakes) = match estimator_log_watch.try_get() {
             Some((sample_timestamp_us, sample)) if sample_timestamp_us == timestamp_us => {
-                pack_estimator_sample(&sample)
+                let (deployment, airbrakes) = pack_estimator_sample(&sample);
+                (Some(deployment), airbrakes)
             }
             // Before the estimator's first sample there is no matching
             // estimator tick — log absence rather than a neighbouring tick's
-            // numbers.
+            // numbers. Both groups go absent together: the gate bits belong to
+            // the sample that produced them, so half a group would be a claim
+            // about this tick that nothing measured.
             other => {
                 if other.is_some() && imu_opt.is_some() && !estimator_skew_warned {
                     warn!("data_logger: estimator sample is not for this tick");
                     estimator_skew_warned = true;
                 }
-                ((f32::NAN, f32::NAN, 0), (f32::NAN, f32::NAN, f32::NAN, 0))
+                (None, None)
             }
         };
 
-        let mut fast_valid = 0u8;
-        let mut slow_valid = 0u8;
-        let (acc, gyro) = match imu_opt {
-            Some(imu) => {
-                fast_valid |= VALID_IMU;
-                (
-                    [imu.acc.x, imu.acc.y, imu.acc.z],
-                    [imu.gyro.x, imu.gyro.y, imu.gyro.z],
-                )
-            }
-            None => ([0.0; 3], [0.0; 3]),
-        };
-        // No validity bit: every published sample carries a baro reading, so
+        let imu = imu_opt.map(|imu| ImuRecord {
+            acc: [imu.acc.x, imu.acc.y, imu.acc.z],
+            gyro: [imu.gyro.x, imu.gyro.y, imu.gyro.z],
+        });
+        // Not optional: every published sample carries a baro reading, so
         // pressure (fast) and temperature (slow) are always present.
         let (temperature, pressure) = (baro_data.temperature, baro_data.pressure);
-        let mag = match mag_opt {
-            Some(r) => {
-                fast_valid |= VALID_MAG;
-                let m = r.data.mag;
-                [m.x, m.y, m.z]
-            }
-            None => [0.0; 3],
-        };
+        let mag = mag_opt.map(|r| {
+            let m = r.data.mag;
+            [m.x, m.y, m.z]
+        });
 
-        let battery_voltage = match battery_opt {
-            Some(r) => {
-                slow_valid |= VALID_BATTERY;
-                r.data
-            }
-            None => 0.0,
-        };
+        let battery_voltage = battery_opt.map(|r| r.data);
+        // The GPS reading is already all-`Option` where it can be absent, so it
+        // passes straight through; an empty watch is the same absence one field
+        // at a time. The satellite count is not optional — 0 satellites is a
+        // real reading, "no fix", and that is also the right answer for a GPS
+        // that has not reported.
         let (lat_lon, gps_altitude_asl, num_sats, hdop, vdop, pdop) = match gps_opt {
             Some(r) => {
                 let g = r.data;
-                if g.lat_lon.is_some() {
-                    slow_valid |= VALID_GPS_FIX;
-                }
-                if g.gps_altitude_asl.is_some() {
-                    slow_valid |= VALID_GPS_ALT;
-                }
                 (
-                    g.lat_lon.unwrap_or((0.0, 0.0)),
-                    g.gps_altitude_asl.unwrap_or(0.0),
+                    g.lat_lon,
+                    g.gps_altitude_asl,
                     g.num_of_fix_satellites,
-                    g.hdop.unwrap_or(0.0),
-                    g.vdop.unwrap_or(0.0),
-                    g.pdop.unwrap_or(0.0),
+                    g.hdop,
+                    g.vdop,
+                    g.pdop,
                 )
             }
-            None => ((0.0, 0.0), 0.0, 0, 0.0, 0.0, 0.0),
+            None => (None, None, 0, None, None, None),
         };
-        let pyro_flags = match continuity_opt {
-            Some(c) => {
-                (c.pyro_main_continuity as u8)
-                    | ((c.pyro_main_fire as u8) << 1)
-                    | ((c.pyro_drogue_continuity as u8) << 2)
-                    | ((c.pyro_drogue_fire as u8) << 3)
-                    | ((c.short_circuit as u8) << 4)
-            }
-            None => 0,
+        let pyro_flags = continuity_opt.map(|c| {
+            (c.pyro_main_continuity as u8)
+                | ((c.pyro_main_fire as u8) << 1)
+                | ((c.pyro_drogue_continuity as u8) << 2)
+                | ((c.pyro_drogue_fire as u8) << 3)
+                | ((c.short_circuit as u8) << 4)
+        });
+        // Every field of `AirBrakesLogState` carries its own absence, and the
+        // default is all-absent, so a watch nobody has written to logs exactly
+        // like a state where nothing has been commanded and Icarus has not
+        // reported — which is the truth in both cases.
+        let airbrakes_state = airbrakes_opt.unwrap_or_default();
+        let air_brakes = AirBrakesRecord {
+            commanded_extension: airbrakes_state.commanded_extension,
+            predicted_apogee_agl: airbrakes_state.predicted_apogee_agl,
+            validation_deploy: airbrakes_state.validation_deploy,
+            actual_extension: airbrakes_state.actual_extension,
+            servo_temp: airbrakes_state.servo_temp,
         };
-        // NaN carries "not present" for all four floats (see
-        // `AirBrakesLogState`), so nothing here needs a valid bit — an empty
-        // watch and an all-NaN state log identically, which is the truth in
-        // both cases.
-        let (
-            air_brakes_commanded_extension,
-            air_brakes_actual_extension,
-            air_brakes_servo_temp,
-            air_brakes_validation_deploy,
-            mpc_predicted_apogee_agl,
-        ) = match airbrakes_opt {
-            Some(ab) => (
-                ab.commanded_extension,
-                ab.actual_extension,
-                ab.servo_temp,
-                ab.validation_deploy,
-                ab.predicted_apogee_agl,
-            ),
-            None => (f32::NAN, f32::NAN, f32::NAN, false, f32::NAN),
-        };
-        let (amp_shared_battery_v, amp_out_status) = match amp_opt {
-            Some(a) => (a.shared_battery_v, a.out_status),
-            None => (0.0, 0),
-        };
+        // No default to fall back on here: `out_status` packs `PowerOutputStatus`
+        // discriminants two bits at a time and 0 is one of them, so an AMP that
+        // has never spoken would otherwise decode as a genuine set of output
+        // statuses. The whole record is absent instead.
+        let amp = amp_opt.map(|a| AmpRecord {
+            shared_battery_v: a.shared_battery_v,
+            out_status: a.out_status,
+        });
         // The whole heartbeat, not just liveness: the downlink can only afford
         // two bits per node, so the log is the only place a mid-flight reboot
         // or a health change is recoverable.
@@ -444,22 +414,15 @@ pub async fn log_flight_data(
         let fast_record = LogRecord::Fast(FlightDataFastRecord {
             sequence,
             timestamp_us,
-            // 0 until the GPS PPS has disciplined the unix clock.
-            unix_time_us: unix_clock.convert_to_unix_us(timestamp_us).unwrap_or(0),
-            acc,
-            gyro,
+            // Absent until the GPS PPS has disciplined the unix clock.
+            unix_time_us: unix_clock.convert_to_unix_us(timestamp_us),
+            imu,
             pressure,
             mag,
-            deployment_kf_altitude_asl,
-            deployment_kf_vertical_velocity,
-            deployment_flags,
-            airbrakes_kf_altitude_asl,
-            airbrakes_kf_vertical_velocity,
-            airbrakes_kf_tilt_deg,
-            airbrakes_flags,
+            deployment,
+            airbrakes,
             pyro_flags,
             flight_stage: stage,
-            valid: fast_valid,
         });
         sequence = sequence.wrapping_add(1);
 
@@ -469,25 +432,21 @@ pub async fn log_flight_data(
             battery_voltage,
             lat_lon,
             gps_altitude_asl,
-            num_of_fixed_satalites: num_sats,
+            num_of_fix_satellites: num_sats,
             hdop,
             vdop,
             pdop,
-            air_brakes_commanded_extension,
-            air_brakes_actual_extension,
-            air_brakes_servo_temp,
-            air_brakes_validation_deploy,
-            mpc_predicted_apogee_agl,
+            air_brakes,
+            amp,
+            payload: PayloadRecord {
+                epm_batt_mv: payload.epm_batt_mv,
+                rail_ma: payload.rail_ma,
+                actuator_steps: payload.actuator_steps,
+            },
             amp_node,
             icarus_node,
             ozys_node,
             payload_sdrm_node,
-            amp_out_status,
-            amp_shared_battery_v,
-            payload_epm_batt_mv: payload.epm_batt_mv,
-            payload_rail_ma: payload.rail_ma,
-            payload_actuator_steps: payload.actuator_steps,
-            valid: slow_valid,
         };
 
         let emit_slow = last_slow_emit.elapsed() >= SLOW_INTERVAL;

@@ -77,6 +77,21 @@ rocket-cli ground-station
 2. On the right, expect **Telemetry** updating.
 3. Keep ground-station open and watch **Telemetry** through the flight.
 
+Reading the panel: a dimmed **`n/a`** means the rocket did not report that
+number, not that it is zero. It is normal, not a fault. Two places you will see
+it on a good flight:
+
+- **altitude agl** and **vertical velocity** go `n/a` for a few seconds around
+  Mach 1 while **state** still says `Ascent`. The altitude filter is locked out
+  there and has nothing honest to report. **max altitude agl** keeps working
+  straight through, so that is the number to read.
+- **actual extension** and **servo temp** are `n/a` until Icarus sends its
+  first report, even while **icarus online** is already true. That means "not
+  reported yet", not "brakes stowed at 0 C".
+
+On the pad, **altitude agl** should sit near 0 m rather than blank — that is
+the barometer and the filter confirming they are alive before launch.
+
 **Armed means the rocket can fire parachute charges on its own.** Only arm when you intend to fly.
 
 **Fire Main Pyro** and **Fire Drogue Pyro** are emergency / manual only — they ask for confirm and only work while Armed.

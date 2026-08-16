@@ -293,16 +293,19 @@ async fn can_message_receive_task(
             }
             CanBusMessageEnum::IcarusStatus(message) => {
                 let mut state = air_brakes_watch.try_get().unwrap_or_default();
-                // Both leave NaN behind only until Icarus first reports.
-                state.actual_extension = message.actual_extension_percentage();
-                state.servo_temp = message.servo_temperature();
+                // Both are absent only until Icarus first reports.
+                state.actual_extension = Some(message.actual_extension_percentage());
+                state.servo_temp = Some(message.servo_temperature());
                 let _ = air_brakes_watch.sender().send(state);
             }
             CanBusMessageEnum::CustomPayloadStatus(message) => {
-                // Stored raw, 0xFFFF and all: the slow record keeps the payload's
-                // own "unavailable" sentinel rather than inventing a zero.
+                // Decoded through the message's accessors, which turn the
+                // payload's own 0xFFFF "could not read this" sentinel into
+                // `None`. The sentinel exists because the CAN frame cannot
+                // carry an `Option`; it stops here, at the bus boundary, so
+                // nothing downstream has to know about it.
                 payload_state_watch.sender().send(PayloadLogState {
-                    epm_batt_mv: message.epm_batt_mv,
+                    epm_batt_mv: message.epm_batt_mv(),
                     rail_ma: message.rail_ma(),
                     actuator_steps: message.actuator_steps(),
                 });

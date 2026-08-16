@@ -119,8 +119,8 @@ pub async fn demo_mode(
             // nothing to validate.
             publish_airbrakes_commanded(
                 air_brakes_watch,
-                airbrake_extension_percentage,
-                f32::NAN,
+                Some(airbrake_extension_percentage),
+                None,
                 false,
             );
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
