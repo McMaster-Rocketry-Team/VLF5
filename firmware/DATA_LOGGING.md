@@ -36,7 +36,7 @@ the firmware starts a fresh log over them on the next arm.
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
 | **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 145 B (144 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, apogee latch, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms) |
-| **Slow** (tag 0x02) | 10 Hz | 241 B (240 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), `air_brakes` (**commanded + actual extension**, **validation-deploy flag**, **servo temp**, **MPC predicted apogee AGL**), **full `NodeStatus` for AMP / Icarus / OzYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
+| **Slow** (tag 0x02) | 10 Hz | 241 B (240 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), `air_brakes` (**commanded + actual extension**, **validation-deploy flag**, **servo temp**, **MPC predicted apogee AGL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
 
 Throughput ≈ 64 kB/s of record payload (427 Hz × 145 B + 10 Hz × 241 B),
 ≈ 70 kB/s of actual block writes once block padding is counted, ≈ 250 MB/hour.
@@ -89,7 +89,7 @@ are live throughout and are what to read there.
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 38 B (299/304 bits — 5 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes born**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
+| `TelemetryPacket` | 38 B (299/304 bits — 5 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes born**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
 | `LowPowerTelemetryPacket` | 11 B (87 bits — 1 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
 | `LandedTelemetryPacket` | 11 B (88 bits — 0 spare) | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
@@ -183,10 +183,10 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | Icarus servo current | – | – | – | – | **nowhere** — the field was dropped from `IcarusStatusMessage`; the servo does not measure current |
 | MPC predicted apogee | ✓ (14-bit AGL, `mpc_predicted_apogee_valid`) | – | – | ✓ (absent while the MPC is not running) | logged |
 | amp: online, outputs ×3, shared battery | ✓ | ✓/LD | – | ✓ (whole `amp` group absent until the first `AmpStatusMessage`) | logged |
-| Icarus / OzYS / SDRM online + rebooted | ✓ (2 bits each) | – | – | ✓ (full `NodeStatus`; absent = never heard from) | logged |
+| Icarus / OZYS / SDRM online + rebooted | ✓ (2 bits each) | – | – | ✓ (full `NodeStatus`; absent = never heard from) | logged |
 | node uptime, health, mode (all four) | – | – | – | ✓ | logged |
-| OzYS disk usage, gauge-connected, `sd_ok` | – | – | – | ✓ (`ozys_custom_status`, decode with `OzysCustomStatus`) | logged |
-| OzYS strain measurements | – | – | – | – | **nowhere** — OzYS logs to its own SD |
+| OZYS disk usage, gauge-connected, `sd_ok` | – | – | – | ✓ (`ozys_custom_status`, decode with `OzysCustomStatus`) | logged |
+| OZYS strain measurements | – | – | – | – | **nowhere** — OZYS logs to its own SD |
 | payload stack flags ×8 (`payload_epm_alive` etc.) | ✓ (1 bit each) | – | – | – | **not derivable** — radio only |
 | EPM battery voltage | ✓ (11-bit, 0–17 V @ 8.3 mV; **all-ones code = unavailable**) | – | – | ✓ (raw mV, absent = unavailable) | logged |
 | EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (7-bit each, 0–5 A @ 39.4 mA; **all-ones code = unavailable**) | – | – | ✓ (raw mA, absent = unavailable) | logged |
@@ -213,7 +213,7 @@ Takeaways:
   11 for the EPM battery, 42 for the six rails, 30 for the three actuators,
   2 for SDRM liveness. Every other CAN node together costs 40 — AMP 21, Icarus
   17 (two liveness bits, `icarus_status_valid`, extension and servo temp),
-  OzYS 2.
+  OZYS 2.
 - Payload readings still have **no validity bit on the downlink**, but they no
   longer read as zero: `epm_batt_v`, the six rail currents and the three
   actuator step counts each spend their **all-ones code** on "the payload could
@@ -229,12 +229,12 @@ Takeaways:
   is also why the EPM battery factory starts at 0 V rather than 11 V — an 11 V
   floor would have decoded a collapsed bus as a plausible low pack.
 - Every CAN node's heartbeat is now on SD in full: uptime, health, mode and
-  the 11-bit custom status, at 10 Hz, for AMP / Icarus / OzYS / payload SDRM.
+  the 11-bit custom status, at 10 Hz, for AMP / Icarus / OZYS / payload SDRM.
   The downlink still compresses each to two bits because it has no room, so
   the log is the only place a mid-flight reboot or health change is
   recoverable — a reboot is `uptime_s` stepping backwards, which the packet's
   derived `uptime_s < 5` bit misses entirely if it lands between two 2 s
-  packets. There is one OzYS on the rocket this year, so it is addressed by
+  packets. There is one OZYS on the rocket this year, so it is addressed by
   node type like every other node rather than by a hardcoded node ID.
   A 1 Hz CAN-health snapshot record on SD would close the remainder.
 - The commanded extension is not always the MPC's output: if the MPC never
