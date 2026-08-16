@@ -1,13 +1,16 @@
 # VLF5 In-Process HIL Plots
 
-Desk-test the **entire** avionics flow on real hardware by faking **only the barometer
-reading**. IMU, GPS, magnetometer, pyro GPIO, CAN, SD, USB, and the LoRa radio all run
-for real — the board boots into **SelfTest** exactly like a flight build, and you fly the
-plot from **rocket-cli** over the real radio just like a real flight ([OPERATOR.md](OPERATOR.md)).
-Because the barometer is the one sensor a static bench can't exercise (it can't feel
-altitude), its value is replaced by a scripted single-deploy vertical trajectory; every
-other decision, task, and GPIO exercises the production path. Monitor with **defmt RTT**
-and/or the rocket-cli telemetry stream; dump the flight log afterward with rocket-cli.
+Desk-test the **entire** avionics flow on real hardware by faking **only the sensor
+values a static bench can't produce**: the barometer reading and the IMU's accel/gyro
+values, both synthesized at the sensor boundary from one scripted single-deploy vertical
+trajectory. GPS, magnetometer, pyro GPIO, CAN, SD, USB, and the LoRa radio all run for
+real, and the IMU chip itself is still read on its real data-ready interrupt — genuine
+pacing and timestamps, only the values are swapped. The board boots into **SelfTest**
+exactly like a flight build, and you fly the plot from **rocket-cli** over the real radio
+just like a real flight ([OPERATOR.md](OPERATOR.md)). Everything downstream of the two
+sensor seams exercises the production path — armed mode is identical to flight, with no
+HIL overrides anywhere above the seams. Monitor with **defmt RTT** and/or the rocket-cli
+telemetry stream; dump the flight log afterward with rocket-cli.
 
 > **The real pyro task drives real pyro GPIO in HIL.** At apogee the drogue/main FETs are
 > energized for real. **Never flash a HIL build with live e-matches connected.**
@@ -22,10 +25,13 @@ and/or the rocket-cli telemetry stream; dump the flight log afterward with rocke
 Enable **exactly one** of `hil-dual` / `hil-single` (both pull in base `hil-replay`). Bare
 `hil-replay` alone does not compile.
 
-Flight builds (no HIL feature) are unchanged. The **only** difference in a HIL build is the
-barometer: instead of reading the MS5607 over SPI, `imu_baro_task` synthesizes the pressure
-from the scripted trajectory. The boot mode, mode machine, estimator, airbrakes MPC, pyro
-queue, GPS, mag, CAN, SD logger, telemetry, and radio config are all identical to flight.
+Flight builds (no HIL feature) are unchanged. The **only** difference in a HIL build is at
+the sensor boundary in `imu_baro_task`: instead of reading the MS5607 over SPI, the baro
+pressure is synthesized from the scripted trajectory, and the LSM6DSM's just-read
+accel/gyro values are swapped for the scripted specific force and angular rate (same
+script clock, so the two sensors tell one consistent story). The boot mode, mode machine,
+estimators, airbrakes MPC, pyro queue, GPS, mag, CAN, SD logger, telemetry, and radio
+config are all identical to flight.
 
 ## Run
 
@@ -52,9 +58,9 @@ rocket-cli control --frequency 920000000 --vlp-key <base64 vlp.key>
 ```
 
 The board boots straight into **SelfTest** (self-test result telemetry every 2 s). Send
-`arm` — the baro flight clock latches on entry to Armed and plays the trajectory (pad → burn
-→ coast → apogee → deploy → descent → landed). Pyro fires drive **real GPIO** (safe only with
-no e-matches connected).
+`arm` — the script clock latches on entry to Armed and plays the trajectory through both
+synthesized sensors (pad → burn → coast → apogee → deploy → descent → landed). Pyro fires
+drive **real GPIO** (safe only with no e-matches connected).
 
 Optional: clear the SD log before a clean run (USB-C to the board):
 
@@ -64,11 +70,9 @@ rocket-cli clear-flight-log
 
 ## What is simulated
 
-### Barometer only (`baro_sim::generate_baro`)
-
-Vertical 1D rocket (always upright). Baro pressure is ISA from the scripted altitude plus
-measured per-sample sensor noise (sigma ~0.36 m). The flight clock is **relative to entering
-Armed** (t below is time since `arm`); pre-arm modes read the noisy pad altitude.
+Vertical 1D rocket (always upright). One scripted trajectory, one **Arm-relative flight
+clock** shared by both synthesized sensors (t below is time since `arm`); pre-arm modes
+read the stationary pad, and leaving Armed resets the clock so a re-arm replays cleanly.
 
 | Phase | Time since Arm | Physics |
 |-------|-----------|---------|
@@ -79,20 +83,61 @@ Armed** (t below is time since `arm`); pre-arm modes read the noisy pad altitude
 
 Rough outcome: apogee ~3.3 km AGL; full flight ~3–4 minutes wall time.
 
+### Barometer (`baro_sim::generate_baro`)
+
+Baro pressure is ISA from the scripted altitude plus measured per-sample sensor noise
+(sigma ~0.36 m, measured on this VLF5's MS5607). The real baro is never touched in HIL,
+so a bench baro fault can't abort the simulated flight.
+
+### IMU values (`imu_sim::generate_imu`)
+
+The LSM6DSM is still **read for real** on its real data-ready interrupt — that read paces
+the 416 Hz loop and stamps the samples, so the estimators' measured-dt integration sees
+genuine timing, jitter and all. Only the *values* are replaced. The trajectory is
+analytic, so the specific force (what an accelerometer measures) is exact per phase, on
+device +Z — the scripted "up" (the estimator self-calibrates its mounting from pad
+gravity + thrust direction, so the axis choice is arbitrary; what matters is that pad
+gravity and burn thrust agree on one axis, i.e. a vertical rail):
+
+| Phase | Time since Arm | Specific force (m/s²) | Gyro (deg/s) |
+|-------|-----------|---------|---------|
+| Pad | 0–15 s | [0, 0, +9.81] | bias + noise |
+| Burn | 15–18 s | [0, 0, 80 + 9.81] | bias + noise |
+| Ballistic coast | 18–45 s | [0, 0, 0] | bias + noise |
+| Terminal descent / ground | after ~45 s | [0, 0, +9.81] | bias + noise |
+
+Units match the real driver output at the seam: accel in m/s², gyro in deg/s. Noise is
+the same deterministic hash-noise the baro uses, with per-axis sigmas measured from the
+Void Lake pad data (accel 0.07 m/s², gyro 0.1 deg/s), plus a **constant injected gyro
+bias of 0.1 deg/s about X** so the pad bias calibration is exercised for real — a broken
+calibration shows up as phantom tilt, not as nothing.
+
+With the IMU synthesized, the **whole airbrakes estimator** flies on the bench: pad
+gyro-bias calibration (the 15 s pad hold completes ~7 of its 2 s bias windows before
+ignition) → ignition detection → Stage1 thrust-vector alignment → dead reckoning →
+vertical-filter birth → Tracking → apogee latch. The MPC runs on that estimator's own
+state, and `armed_mode` carries no HIL overrides — it is identical to flight.
+
+Future work: a supersonic script variant (Mach ~1.5 profile, synthetic static-port error
+`c·v²` plus shock garbage on the baro, Mach lockout configured) would exercise the 2-of-3
+lockout-exit vote and the born-subsonic birth on the bench, not just in desktop replays.
+
 ### Everything else is real
 
 | Subsystem | HIL behavior |
 |-----------|--------------|
-| IMU (`imu_baro_task`) | **Real** LSM6DSM read, real data-ready interrupt clocks the loop |
+| IMU chip (`imu_baro_task`) | **Real** LSM6DSM read, real data-ready interrupt clocks the loop — only the just-read values are swapped |
 | GPS (`gps_task`) | **Real** (no fix indoors is expected; the module still reports) |
 | Pyro (`pyro_task`) | **Real GPIO** — drogue/main FETs fire for real (no e-matches!) |
 | Mag / CAN / SD / USB | **Real** |
 | LoRa radio + VLP | **Real** — the operator drives every uplink from rocket-cli |
 | Boot mode | **SelfTest** (same as flight) |
 
-The barometer is the single seam: in flight `read_baro_or_sim` reads the MS5607; in HIL it
-returns `HilBaroState::next(mode)`. The real baro is never touched in HIL, so a bench baro
-fault can't abort the simulated flight.
+The sensor boundary is the only seam — two functions in `sensor_tasks.rs`, sharing one
+`HilSimState` script clock. In flight builds `read_baro_or_sim` reads the MS5607 and
+`imu_values_or_sim` passes the real IMU reading through untouched; in HIL the former
+returns the scripted baro and the latter keeps the real reading's DRDY timestamp while
+swapping in the scripted accel/gyro values.
 
 ## Flight-log gating
 
@@ -109,24 +154,31 @@ Watch for panics (`[ERROR]`, `panicked`, `Firmware exited`) while the plot runs.
    `Barometer initialized`; `LoRa initialized`.
 2. Operator preflight over the radio: `target-apogee` → `SetTargetApogee … persisting to SD`;
    optional `mode low-power` → `enter low power mode`.
-3. Operator `arm` → `enter armed mode`; baro flight clock starts.
-4. ~15 s after arm: ascent / `HIL: starting airbrakes` / `Armed -> PoweredAscent`.
+3. Operator `arm` → `enter armed mode`; the script clock starts.
+4. ~15 s after arm, ignition: the airbrakes estimator's own path lights up —
+   `ignition detected, rewinding pad buffer`, `gyro bias: screened over 7 windows`,
+   `launch angle: ~0 deg`, then `vertical filter born` — followed by the slow filter's
+   `Armed -> PoweredAscent`.
 5. Telemetry `alt_agl` climbs (not stuck near 0); `air_speed` tracks vertical speed.
-6. Pyro at apogee (`HIL: estimator requested pyro PyroDrogue` / `PyroMain`) — the real
-   `pyro_task` then drives the FETs (SD log `pyro_*_fire` edges confirm).
+   Airbrakes start ~20 s (the slow filter's burn timer declares coasting; the airbrakes
+   filter has been alive since ~16 s).
+6. Pyro at apogee (`apogee latched at …`, then drogue/main) — the real `pyro_task` drives
+   the FETs (SD log `pyro_*_fire` edges confirm).
 7. `terminal state Landed` → `enter landed mode` after ~30 s settle.
 
-### Expected timings (time since Arm)
+### Expected timings (time since Arm, analytic approximations)
 
 | Event | Dual | Single |
 |-------|------|--------|
-| Airbrakes start | ~15.6 s, ~215 m ASL, vy ~38 m/s | same |
-| Drogue | ~36 s, ~3295 m AGL | ~36 s, ~3295 m AGL |
-| Main | ~150 s, ~457 m AGL | back-to-back at apogee |
-| Landed | ~173 s still + 30 s → mode switch | similar |
+| AB vertical filter born | ~16 s (ignition + Stage1 + baro ring) | same |
+| Airbrakes start | ~20 s (burn-timer coasting), vy ~220 m/s | same |
+| Drogue | ~43 s, ~3.3 km AGL | ~43 s, ~3.3 km AGL |
+| Main | ~157 s, ~457 m AGL | back-to-back at apogee |
+| Landed | ~176 s still + 30 s → mode switch | similar |
 
-Airbrakes: HIL exercises the real start gate and MPC; the replayed trajectory is open-loop, so
-the brakes are commanded but do not change the baro profile.
+Airbrakes: HIL exercises the real start gate and the MPC on the airbrakes estimator's own
+KF state (no fallback — the flight path exactly); the scripted trajectory is open-loop, so
+the brakes are commanded but do not change the baro/IMU profile.
 
 ## SD dump with rocket-cli
 
@@ -151,10 +203,13 @@ slower than the warn budget under high-rate logging.
 
 | Path | Role |
 |------|------|
-| `src/hil/mod.rs` | Feature gates + overview |
-| `src/hil/baro_sim.rs` | `trajectory_altitude_asl` + noise + `generate_baro` + `HilBaroState` (Arm-relative clock) |
-| `src/tasks/sensor_tasks.rs` | `read_baro_or_sim` seam (real MS5607 vs simulated) inside `imu_baro_task` |
+| `src/hil/mod.rs` | Feature gates + overview + `HilSimState` (shared Arm-relative script clock, per-sensor sample counters) |
+| `src/hil/baro_sim.rs` | `trajectory_altitude_asl` (the shared phase constants) + `generate_baro` |
+| `src/hil/imu_sim.rs` | Per-phase specific force + `generate_imu` (accel m/s², gyro deg/s, injected gyro bias) |
+| `src/hil/noise.rs` | Deterministic hash-noise shared by both sims |
+| `src/tasks/sensor_tasks.rs` | The two seams inside `imu_baro_task`: `read_baro_or_sim`, `imu_values_or_sim` |
 | `Cargo.toml` | `hil-replay` / `hil-dual` / `hil-single` |
 
-Related monorepo pieces: baro-only `RocketStateEstimator`, vertical `AirBrakesMPC`, the real
-`VLPAvionics` daemon over LoRa, SD config block for target apogee.
+Related monorepo pieces: baro-only `RocketStateEstimator` (deployment), the
+`AirbrakesEstimator` (runs its full pad-to-apogee path on the bench), vertical
+`AirBrakesMPC`, the real `VLPAvionics` daemon over LoRa, SD config block for target apogee.

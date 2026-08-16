@@ -27,7 +27,7 @@ pub async fn low_power_mode(
 ) {
     info!("enter low power mode");
     flight_stage.lock(|r| {
-        *r.borrow_mut() = FlightStage::LowPower;
+        *r.borrow_mut() = (FlightStage::LowPower, false);
     });
     amp_control_watch.sender().send(AmpControlMessage {
         out1_enable: false,

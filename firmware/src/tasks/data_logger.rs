@@ -73,7 +73,7 @@ pub async fn data_logger(
         let battery_opt = battery_receiver.try_get();
         let continuity_opt = continuity_receiver.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
-        let stage = flight_stage.lock(|r| *r.borrow());
+        let (stage, coasting) = flight_stage.lock(|r| *r.borrow());
         // NaN until the armed-mode estimators have produced their first sample.
         let (kf_altitude_asl, kf_vertical_velocity) =
             kf_state_watch.try_get().unwrap_or((f32::NAN, f32::NAN));
@@ -180,6 +180,7 @@ pub async fn data_logger(
             ab_tilt_deg,
             ab_flags,
             flight_stage: stage,
+            coasting,
             valid: imu_valid,
         });
         sequence = sequence.wrapping_add(1);

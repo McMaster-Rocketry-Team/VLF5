@@ -50,7 +50,7 @@ pub async fn self_test_mode(
 ) {
     info!("enter self test mode");
     flight_stage.lock(|r| {
-        *r.borrow_mut() = FlightStage::SelfTest;
+        *r.borrow_mut() = (FlightStage::SelfTest, false);
     });
 
     let self_test_fut = async {

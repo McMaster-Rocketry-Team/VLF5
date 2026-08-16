@@ -245,7 +245,9 @@ async fn node_status_task(
         );
         can_sender.send(
             VLStatusMessage {
-                flight_stage: flight_stage.borrow().clone().into_inner(),
+                // Coasting travels separately (`RocketStateMessage::is_coasting`),
+                // not in the status heartbeat.
+                flight_stage: flight_stage.lock(|r| r.borrow().0),
                 battery_mv: (battery_v_reading.try_get().unwrap().data * 1000.0) as u16,
             }
             .into(),

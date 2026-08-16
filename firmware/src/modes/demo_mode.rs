@@ -43,7 +43,7 @@ pub async fn demo_mode(
 ) {
     info!("enter demo mode");
     flight_stage.lock(|r| {
-        *r.borrow_mut() = FlightStage::LowPower;
+        *r.borrow_mut() = (FlightStage::LowPower, false);
     });
     amp_control_watch.sender().send(AmpControlMessage {
         out1_enable: true,

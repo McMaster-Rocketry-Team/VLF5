@@ -68,8 +68,9 @@ use crate::{
     },
 };
 // Every task runs on real hardware in both flight and HIL builds — IMU, GPS, pyro
-// GPIO, mag, CAN, SD, and the LoRa radio. HIL only synthesizes the barometer reading
-// (inside `imu_baro_task`) and boots into SelfTest exactly like a flight build.
+// GPIO, mag, CAN, SD, and the LoRa radio. HIL only synthesizes the barometer and
+// IMU values at the sensor boundary (inside `imu_baro_task`, real DRDY pacing)
+// and boots into SelfTest exactly like a flight build.
 use crate::tasks::{
     gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
     vlp_avionics_daemon_task::vlp_avionics_daemon_task,
@@ -151,10 +152,10 @@ pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
     reference_area: 0.008982476,
 };
 
-/// Airbrakes (Phase B v2) estimator profile. In HIL builds the IMU is a
-/// real, stationary bench sensor, so this estimator never detects ignition
-/// and stays OnPad — HIL exercises the slow-filter path only, and the MPC
-/// falls back to the slow filter's vertical-only state.
+/// Airbrakes (Phase B v2) estimator profile. HIL synthesizes the IMU values
+/// (accel/gyro from the same script clock as the baro, real DRDY pacing), so
+/// the whole estimator runs on the bench — pad calibration through apogee —
+/// with no application-layer overrides.
 #[cfg(feature = "hil-replay")]
 pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
     ignition_detection_acc_threshold: 4.0 * 9.81,
@@ -181,15 +182,18 @@ pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
 pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
-pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
+/// `(flight_stage, coasting)`: the wire stage mirrors the deployment
+/// estimator's `RocketState` 1:1; coasting is its burn-timer flag, orthogonal
+/// to the stage and reported alongside it, never folded in.
+pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<(FlightStage, bool)>>;
 /// Latest state-estimator KF output `(altitude_asl, vertical_velocity)` for SD
 /// logging, published per estimator sample in armed mode.
 pub type KfStateWatch = Watch<NoopRawMutex, (f32, f32), 2>;
 /// Latest airbrakes-estimator output for SD logging, published per sample
 /// in armed mode: `(altitude_asl, vertical_velocity, tilt_deg, ab_flags)`
 /// where `ab_flags` uses the `AB_*` bits from
-/// `firmware_common_new::flight_data_record` (lockout votes, born, apogee,
-/// accel-clip). NaN / 0 until the estimator produces each value.
+/// `firmware_common_new::flight_data_record` (lockout votes, born, apogee).
+/// NaN / 0 until the estimator produces each value.
 pub type AirbrakesStateWatch = Watch<NoopRawMutex, (f32, f32, f32, u8), 2>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
@@ -350,7 +354,7 @@ async fn low_prio_main(
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let flight_stage =
-        singleton!(: FlightStageMutex = BlockingMutex::new(RefCell::new(FlightStage::Armed)))
+        singleton!(: FlightStageMutex = BlockingMutex::new(RefCell::new((FlightStage::Armed, false))))
             .unwrap();
     let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
     let air_brakes_watch = singleton!(: AirBrakesWatch = AirBrakesWatch::new()).unwrap();

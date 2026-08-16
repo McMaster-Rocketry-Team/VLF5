@@ -71,21 +71,28 @@ pub type IMUBaroReadingPubSub = PubSubChannel<
     1,
 >;
 
-// --- HIL baro injection -----------------------------------------------------
-// The barometer is the one sensor a static bench can't exercise (it can't feel
-// altitude), so HIL builds synthesize its reading from a scripted flight while the
-// IMU, its data-ready interrupt timing, the SPI buses, and every other task/GPIO
-// stay real — HIL affects only the baro reading. `read_baro_or_sim` is the single
-// seam: the real MS5607 read in flight builds, the trajectory generator in HIL.
+// --- HIL sensor injection ----------------------------------------------------
+// HIL's rule: substitute at the sensor boundary only. A static bench can't
+// produce flight sensor values, so HIL builds synthesize the baro reading AND
+// the IMU's accel/gyro values from one scripted flight (one shared script
+// clock — the two sensors must tell one consistent story), while the SPI
+// buses, the IMU's data-ready interrupt timing, and every other task/GPIO
+// stay real. Two seams, both in this file, everything downstream of them is
+// the production path:
+//   * `read_baro_or_sim` — the real MS5607 read in flight builds, the
+//     trajectory generator in HIL (the real baro is never touched).
+//   * `imu_values_or_sim` — the LSM6DSM is ALWAYS read for real, so DRDY
+//     pacing and sample timestamps stay genuine (the estimators' measured-dt
+//     paths see real timing); HIL swaps only the values.
 #[cfg(feature = "hil-replay")]
-use crate::hil::baro_sim::HilBaroState;
+use crate::hil::HilSimState;
 
 /// Flight-build stand-in so the read loops carry an identical signature in both
-/// builds; the real state lives in [`crate::hil::baro_sim::HilBaroState`].
+/// builds; the real state lives in [`crate::hil::HilSimState`].
 #[cfg(not(feature = "hil-replay"))]
-struct HilBaroState;
+struct HilSimState;
 #[cfg(not(feature = "hil-replay"))]
-impl HilBaroState {
+impl HilSimState {
     const fn new() -> Self {
         Self
     }
@@ -96,7 +103,7 @@ impl HilBaroState {
 #[inline]
 async fn read_baro_or_sim<B: SpiDevice>(
     baro: &mut MS5607<'static, B>,
-    _hil: &mut HilBaroState,
+    _hil: &mut HilSimState,
     _mode_watch: &AvionicsModeWatch,
 ) -> Result<BaroData, B::Error> {
     Ok(baro.read().await?.data)
@@ -108,10 +115,40 @@ async fn read_baro_or_sim<B: SpiDevice>(
 #[inline]
 async fn read_baro_or_sim<B: SpiDevice>(
     _baro: &mut MS5607<'static, B>,
-    hil: &mut HilBaroState,
+    hil: &mut HilSimState,
     mode_watch: &AvionicsModeWatch,
 ) -> Result<BaroData, B::Error> {
-    Ok(hil.next(mode_watch.try_get().unwrap_or(AvionicsMode::SelfTest)))
+    Ok(hil.next_baro(mode_watch.try_get().unwrap_or(AvionicsMode::SelfTest)))
+}
+
+/// Flight build: the real IMU reading passes through untouched.
+#[cfg(not(feature = "hil-replay"))]
+#[inline]
+fn imu_values_or_sim(
+    reading: SensorReading<BootTimestamp, IMUData>,
+    _hil: &mut HilSimState,
+    _mode_watch: &AvionicsModeWatch,
+) -> SensorReading<BootTimestamp, IMUData> {
+    reading
+}
+
+/// HIL build: keep the real reading's timestamp — the LSM6DSM was genuinely
+/// read on its data-ready interrupt — and replace only the values with the
+/// scripted specific force / angular rate, on the same script clock as the
+/// baro. This is what lets the whole airbrakes estimator (pad calibration →
+/// ignition → dead reckoning → birth → apogee) fly on the bench with zero
+/// application-layer overrides.
+#[cfg(feature = "hil-replay")]
+#[inline]
+fn imu_values_or_sim(
+    reading: SensorReading<BootTimestamp, IMUData>,
+    hil: &mut HilSimState,
+    mode_watch: &AvionicsModeWatch,
+) -> SensorReading<BootTimestamp, IMUData> {
+    SensorReading::new(
+        reading.timestamp_us,
+        hil.next_imu(mode_watch.try_get().unwrap_or(AvionicsMode::SelfTest)),
+    )
 }
 
 #[embassy_executor::task]
@@ -194,9 +231,10 @@ pub async fn imu_baro_task(
         info!("Barometer initialized");
 
         let publisher = pubsub.dyn_publisher().unwrap();
-        // In flight builds this is a zero-sized stand-in; in HIL it holds the baro
-        // flight clock + sample counter across mode changes (so a re-arm replays).
-        let mut hil = HilBaroState::new();
+        // In flight builds this is a zero-sized stand-in; in HIL it holds the
+        // shared script clock + per-sensor sample counters across mode changes
+        // (so a re-arm replays).
+        let mut hil = HilSimState::new();
         loop {
             match avionics_mode.get().await {
                 AvionicsMode::Armed | AvionicsMode::SelfTest => {
@@ -275,7 +313,7 @@ enum IMUOrBaroError<I: SpiDevice, B: SpiDevice> {
 async fn read_baro_low_power_loop<B: SpiDevice>(
     baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
-    hil: &mut HilBaroState,
+    hil: &mut HilSimState,
     mode_watch: &AvionicsModeWatch,
 ) -> Result<!, B::Error> {
     let mut ticker = Ticker::every(Duration::from_hz(5));
@@ -295,16 +333,21 @@ async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
     imu: &mut LSM6DSM<I>,
     baro: &mut MS5607<'static, B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
-    hil: &mut HilBaroState,
+    hil: &mut HilSimState,
     mode_watch: &AvionicsModeWatch,
 ) -> Result<!, IMUOrBaroError<I, B>> {
     loop {
         imu_int1.wait_for_rising_edge().await;
         match join(imu.read(), read_baro_or_sim(baro, hil, mode_watch)).await {
-            (Ok(imu_reading), Ok(baro_data)) => publisher.publish_immediate(SensorReading::new(
-                imu_reading.timestamp_us,
-                (Some(imu_reading.data), baro_data),
-            )),
+            (Ok(imu_reading), Ok(baro_data)) => {
+                // HIL: swap the just-read IMU's values for the scripted ones,
+                // keeping its genuine DRDY timestamp. Flight: pass-through.
+                let imu_reading = imu_values_or_sim(imu_reading, hil, mode_watch);
+                publisher.publish_immediate(SensorReading::new(
+                    imu_reading.timestamp_us,
+                    (Some(imu_reading.data), baro_data),
+                ))
+            }
             (Ok(_), Err(baro_error)) => Err(IMUOrBaroError::Baro(baro_error))?,
             (Err(imu_error), Ok(_)) => Err(IMUOrBaroError::IMU(imu_error))?,
             (Err(imu_error), Err(baro_error)) => {

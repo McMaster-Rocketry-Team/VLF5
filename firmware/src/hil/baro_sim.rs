@@ -1,41 +1,45 @@
-//! HIL barometer simulation.
+//! HIL barometer simulation — the baro half of the scripted flight.
 //!
-//! The barometer is the one sensor that cannot be exercised on a static bench — it
-//! can't feel altitude — so in HIL builds its *value* is replaced by a scripted
-//! single-deploy vertical trajectory plus measured sensor noise. Every other sensor,
-//! task, and GPIO stays real (IMU, GPS, pyro, mag, CAN, SD, LoRa): HIL affects only
-//! the baro reading. The flight clock is relative to **entering Armed**, not boot —
-//! the operator arms over the radio and the flight plays out from that instant, and
-//! leaving Armed resets the clock so a re-arm replays cleanly from the pad.
+//! A static bench can't feel altitude, so in HIL builds the barometer's
+//! *value* is replaced by a scripted single-deploy vertical trajectory plus
+//! measured sensor noise. The trajectory constants below are the single
+//! source of truth for the whole script: [`super::imu_sim`] derives its
+//! per-phase specific force from these same numbers, and both sensors run off
+//! the same arm-relative flight clock ([`super::HilSimState`]), so the baro
+//! and the IMU always tell one consistent story.
 
-use embassy_time::Instant;
 use firmware_common_new::readings::BaroData;
 use icao_isa::calculate_isa_pressure;
 use icao_units::si::Metres;
 
-use crate::avionics_mode::AvionicsMode;
+use super::noise::hash_noise;
 
 /// Pad altitude ASL used by the scripted flight profile (m).
 pub const PAD_ALTITUDE_ASL: f32 = 200.0;
 /// Pad-sit duration after Arm before ignition (s).
 ///
 /// Must exceed the baro estimator's pad-altitude reference settle window (~10 s
-/// low-pass). Too short → wrong pad reference → wrong AGL → wrong deploy altitude
-/// or a spurious `FailedToReachMinApogee`. Prime adversarial-loop tuning target.
-const PAD_DURATION_S: f32 = 15.0;
-/// Constant body-frame acceleration during motor burn (m/s^2).
-const BURN_ACCEL_MS2: f32 = 80.0;
+/// low-pass). Too short → wrong pad reference → wrong AGL → wrong deploy
+/// altitude or a spurious `FailedToReachMinApogee`. Also sized for the
+/// airbrakes estimator's pad gyro-bias calibration: 15 s of pad hold completes
+/// ~7 of its 2 s bias windows before ignition (bump this if
+/// calibration-complete ever requires more). Prime adversarial-loop tuning
+/// target.
+pub(crate) const PAD_DURATION_S: f32 = 15.0;
+/// Constant net upward acceleration during motor burn (m/s^2).
+pub(crate) const BURN_ACCEL_MS2: f32 = 80.0;
 /// Motor burn duration (s).
-const BURN_TIME_S: f32 = 3.0;
-const GRAVITY: f32 = 9.81;
+pub(crate) const BURN_TIME_S: f32 = 3.0;
+pub(crate) const GRAVITY: f32 = 9.81;
 /// Terminal (clamped) descent velocity (m/s, negative = down).
-const DESCENT_TERMINAL_MS: f32 = -25.0;
+pub(crate) const DESCENT_TERMINAL_MS: f32 = -25.0;
 const ISA_TEMP_C: f32 = 15.0;
 
-/// 1-sigma barometric-altitude sensor noise (m). `baro_noise` has unit variance, so
-/// per-sample altitude error has std `BARO_NOISE_M`. Measured on the real MS5607 on
-/// this VLF5 (stationary, drift-removed first-difference): sigma ~= 0.36 m, peaks
-/// ~+/-1.25 m over 10k samples. Crank up to stress the KF.
+/// 1-sigma barometric-altitude sensor noise (m). `hash_noise` has unit
+/// variance, so per-sample altitude error has std `BARO_NOISE_M`. Measured on
+/// the real MS5607 on this VLF5 (stationary, drift-removed first-difference):
+/// sigma ~= 0.36 m, peaks ~+/-1.25 m over 10k samples. Crank up to stress the
+/// KF.
 const BARO_NOISE_M: f32 = 0.36;
 /// 1-sigma temperature sensor noise (deg C). Measured MS5607 per-sample temp noise is
 /// tiny (~0.02 C, quantization-limited); temperature is decision-irrelevant regardless.
@@ -75,76 +79,13 @@ pub fn trajectory_altitude_asl(t_s: f32) -> f32 {
     altitude.max(PAD_ALTITUDE_ASL)
 }
 
-/// Deterministic per-sample pseudo-noise with ~unit variance, roughly Gaussian in
-/// [-3, 3].
-///
-/// Pure function of the sample index — no RNG state, no `rand` crate — so a given
-/// build replays the exact same noise sequence, keeping HIL runs reproducible. Sums
-/// three decorrelated uniform[-1,1] hashed draws: by the CLT this is Gaussian-ish
-/// with std = sqrt(3) * (1/sqrt(3)) = 1.0, so `BARO_NOISE_M` reads directly as sigma.
-pub fn baro_noise(seed: u32) -> f32 {
-    let a = hash_unit(seed.wrapping_mul(0x9E37_79B1));
-    let b = hash_unit(seed.wrapping_mul(0x85EB_CA77).wrapping_add(0x1656_67B1));
-    let c = hash_unit(seed.wrapping_mul(0xC2B2_AE3D).wrapping_add(0x27D4_EB2F));
-    a + b + c
-}
-
-/// Integer avalanche hash → f32 in [-1, 1].
-fn hash_unit(mut x: u32) -> f32 {
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x7FEB_352D);
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x846C_A68B);
-    x ^= x >> 16;
-    (x as f32 / u32::MAX as f32) * 2.0 - 1.0
-}
-
 /// Generate a noisy barometer reading for flight time `t_s`, sample `sample_idx`.
 pub fn generate_baro(t_s: f32, sample_idx: u32) -> BaroData {
-    let altitude_asl = trajectory_altitude_asl(t_s) + BARO_NOISE_M * baro_noise(sample_idx);
+    let altitude_asl = trajectory_altitude_asl(t_s) + BARO_NOISE_M * hash_noise(sample_idx);
     let pressure = calculate_isa_pressure(Metres(altitude_asl as f64)).0 as f32;
-    let temperature = ISA_TEMP_C + TEMP_NOISE_C * baro_noise(!sample_idx);
+    let temperature = ISA_TEMP_C + TEMP_NOISE_C * hash_noise(!sample_idx);
     BaroData {
         temperature,
         pressure,
-    }
-}
-
-/// Per-task HIL baro state: a monotonic sample counter plus the Arm-relative
-/// flight-clock origin.
-pub struct HilBaroState {
-    idx: u32,
-    armed_t0: Option<Instant>,
-}
-
-impl HilBaroState {
-    pub const fn new() -> Self {
-        Self {
-            idx: 0,
-            armed_t0: None,
-        }
-    }
-
-    /// Next synthetic baro sample for the current avionics `mode`.
-    ///
-    /// The flight clock latches on the first `Armed` sample and resets whenever the
-    /// mode leaves `Armed`, so pre-arm modes (SelfTest / LowPower / Demo) always read
-    /// the noisy pad altitude and re-arming replays the flight cleanly from the pad.
-    pub fn next(&mut self, mode: AvionicsMode) -> BaroData {
-        let now = Instant::now();
-        if mode == AvionicsMode::Armed {
-            if self.armed_t0.is_none() {
-                self.armed_t0 = Some(now);
-            }
-        } else {
-            self.armed_t0 = None;
-        }
-        let t_s = match self.armed_t0 {
-            Some(t0) => (now - t0).as_micros() as f32 / 1_000_000.0,
-            None => 0.0,
-        };
-        let baro = generate_baro(t_s, self.idx);
-        self.idx = self.idx.wrapping_add(1);
-        baro
     }
 }

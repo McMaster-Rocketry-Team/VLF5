@@ -30,7 +30,7 @@ pub async fn landed_mode(
 ) {
     info!("enter landed mode");
     flight_stage.lock(|r| {
-        *r.borrow_mut() = FlightStage::Landed;
+        *r.borrow_mut() = (FlightStage::Landed, false);
     });
     amp_control_watch.sender().send(AmpControlMessage {
         out1_enable: true, // leave camera on for 15 minutes for it to save its data
