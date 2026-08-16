@@ -75,9 +75,9 @@ pub async fn armed_mode(
     });
 
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
-    // One struct owns both estimators and the policy connecting them (the V2
-    // abstain during the slow filter's Mach lockout, the airbrakes-permission
-    // gate inside `airbrakes_mpc_states`) — firmware holds it behind one mutex.
+    // One struct owns both estimators and the policy connecting them (the
+    // airbrakes-permission gate inside `airbrakes_mpc_states`) — firmware
+    // holds it behind one mutex.
     let estimators: FlightEstimatorsMutex = BlockingMutex::new(RefCell::new(
         FlightEstimators::new(FLIGHT_PROFILE.clone(), AIRBRAKES_CONFIG.clone()),
     ));
@@ -173,13 +173,10 @@ pub async fn armed_mode(
                     let est = s.borrow();
                     let ab = est.airbrakes_estimator();
 
-                    // Airbrakes estimator health: the three lockout-exit
-                    // votes (all false outside the dead-reckoning phase),
+                    // Airbrakes estimator health: the lockout-exit drag
+                    // vote (false outside the dead-reckoning phase),
                     // whether the vertical filter is born, apogee latch.
-                    let (v1, v2, v3) = ab.lockout_votes().unwrap_or((false, false, false));
-                    packet.ab_vote_inertial = v1;
-                    packet.ab_vote_deployment = v2;
-                    packet.ab_vote_baro_rate = v3;
+                    packet.ab_vote_drag = ab.lockout_vote().unwrap_or(false);
                     packet.ab_born = ab.baro_trusted();
                     packet.ab_apogee = ab.is_apogee();
                     // Airbrakes-estimator altitude/velocity; 0 while the

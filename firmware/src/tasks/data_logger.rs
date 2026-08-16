@@ -17,7 +17,7 @@ use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::{
     can_bus::node_types::AMP_NODE_TYPE,
     flight_data_record::{
-        AB_APOGEE, AB_BARO_TRUSTED, AB_VOTE_BARO_RATE, AB_VOTE_DEPLOYMENT, AB_VOTE_INERTIAL,
+        AB_APOGEE, AB_BARO_TRUSTED, AB_VOTE_DRAG,
         FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
         VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
         VALID_IMU, VALID_MAG,
@@ -37,8 +37,8 @@ const SLOW_INTERVAL: Duration = Duration::from_millis(100);
 /// * `(kf_altitude_asl, kf_vertical_velocity)` — the deployment KF's raw,
 ///   possibly lockout-frozen output. Logging only.
 /// * `(ab_altitude_asl, ab_vertical_velocity, ab_tilt_deg, ab_flags)` — the
-///   airbrakes estimator, with `ab_flags` packing the `AB_*` bits (the three
-///   lockout-exit votes, baro-trusted/born, apogee latch).
+///   airbrakes estimator, with `ab_flags` packing the `AB_*` bits (the
+///   lockout-exit drag vote, baro-trusted/born, apogee latch).
 ///
 /// NaN for any value this session's estimators have not produced yet.
 fn estimator_log_state(est: &FlightEstimators) -> ((f32, f32), (f32, f32, f32, u8)) {
@@ -46,16 +46,9 @@ fn estimator_log_state(est: &FlightEstimators) -> ((f32, f32), (f32, f32, f32, u
     let kf = (dep.kf_altitude_asl(), dep.kf_vertical_velocity());
 
     let ab = est.airbrakes_estimator();
-    let (v1, v2, v3) = ab.lockout_votes().unwrap_or((false, false, false));
     let mut flags = 0u8;
-    if v1 {
-        flags |= AB_VOTE_INERTIAL;
-    }
-    if v2 {
-        flags |= AB_VOTE_DEPLOYMENT;
-    }
-    if v3 {
-        flags |= AB_VOTE_BARO_RATE;
+    if ab.lockout_vote().unwrap_or(false) {
+        flags |= AB_VOTE_DRAG;
     }
     if ab.baro_trusted() {
         flags |= AB_BARO_TRUSTED;

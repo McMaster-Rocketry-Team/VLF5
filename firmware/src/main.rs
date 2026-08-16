@@ -3,7 +3,6 @@
 #![feature(impl_trait_in_assoc_type)]
 #![feature(never_type)]
 #![feature(try_blocks)]
-// `core::future::join!` — variadic, unlike `embassy_futures`' `join`..`join5`.
 #![feature(future_join)]
 
 use core::cell::RefCell;
@@ -71,10 +70,6 @@ use crate::{
         unix_clock::{UnixClock, unix_clock_task},
     },
 };
-// Every task runs on real hardware in both flight and HIL builds — IMU, GPS, pyro
-// GPIO, mag, CAN, SD, and the LoRa radio. HIL only synthesizes the barometer and
-// IMU values at the sensor boundary (inside `imu_baro_task`, real DRDY pacing)
-// and boots into SelfTest exactly like a flight build.
 use crate::tasks::{
     gps_task::gps_task, pyro_task::pyro_task, sensor_tasks::imu_baro_task,
     vlp_avionics_daemon_task::vlp_avionics_daemon_task,
@@ -164,15 +159,19 @@ pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
 pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
     ignition_detection_acc_threshold: 4.0 * 9.81,
     mach_lockout: None,
-    baro_port_coefficient: 0.0,
+    subsonic_cda_over_mass: ROCKET_PARAMETERS.subsonic_cda_over_mass(),
 };
 
-/// TODO before flight, both from the LC'26 flight sim:
-/// `t_min_us` = earliest possible time below Mach 0.75 after ignition
-/// detection; `t_max_us` = latest plausible + margin, ending >5 s before
-/// the earliest simulated apogee. `baro_port_coefficient` is the LC'25
-/// airframe's measured value — replace with LC'26's (CFD/sim or first
-/// flight of the airframe).
+/// TODO before flight, both from the LC'26 flight sim: `t_min_us` =
+/// earliest possible time below Mach 0.8 after ignition detection, which
+/// must ALSO be after the motor is out (the drag vote assumes free
+/// flight); `t_max_us` = latest plausible + margin, ending >5 s before the
+/// earliest simulated apogee.
+///
+/// There is no static-port coefficient to fill in any more, and the
+/// lockout's drag parameter is derived from [`ROCKET_PARAMETERS`] rather
+/// than configured, so the only airframe numbers to get right are the ones
+/// the MPC already needed.
 #[cfg(not(feature = "hil-replay"))]
 pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
     ignition_detection_acc_threshold: 4.0 * 9.81,
@@ -180,7 +179,7 @@ pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
         t_min_us: 8_000_000,
         t_max_us: 20_000_000,
     }),
-    baro_port_coefficient: 0.7e-3,
+    subsonic_cda_over_mass: ROCKET_PARAMETERS.subsonic_cda_over_mass(),
 };
 
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
