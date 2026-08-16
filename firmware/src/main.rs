@@ -101,27 +101,53 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
     cr: 8,
     power: 22,
 };
+/// Osiris on the CTI O3400, from `2026_06_26 - Osiris LC FDR.ork` (all 12
+/// simulations in that file re-run headlessly on OpenRocket 24.12, so the
+/// numbers below are spreads over launch conditions, not one sim) and the
+/// airbrakes CFD table in the Osiris FDR.
+///
+/// Motor-config sims (burnout 6.322 s, liftoff 29.968 kg): apogee 9347–9489 m
+/// AGL at 39.29–39.70 s, peak Mach 1.91–1.92, back below Mach 0.8 at
+/// 17.52–17.57 s and below Mach 0.75 at 18.62–18.67 s. The N3301/N2900 backup
+/// motors go subsonic earlier (15.7–16.1 s) and apogee earlier (37.7–38.2 s),
+/// which only costs control window here — every bound below is set from the
+/// O3400 and stays safe on the backups.
 #[cfg(not(feature = "hil-replay"))]
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     profile: FlightProfile {
-        mach_lockout_duration_us: Some(20_000_000),
+        // Mach 0.75 at 18.67 s worst case, x1.4; ends 13 s before the
+        // earliest simulated apogee.
+        mach_lockout_duration_us: Some(26_000_000),
         deployment: DeploymentProfile::Dual {
             drogue_chute_minimum_altitude_agl: 2000.0,
-            drogue_chute_delay_us: 0,
+            drogue_chute_delay_us: 1_000_000,
+            // 1500 ft AGL, FDR R4.3.1 / CONOPS.
             main_chute_altitude_agl: 457.2,
             main_chute_delay_us: 0,
         },
     },
     airbrakes: AirbrakesConfig {
+        // Boost holds 14 g for the whole 6.3 s burn, so 4 g clears easily.
         ignition_detection_acc_threshold: 4.0 * 9.81,
         mach_lockout: Some(MachLockoutConfig {
-            earliest_subsonic_after_ignition_us: 8_000_000,
-            force_birth_after_ignition_us: 20_000_000,
+            // Earliest simulated time below Mach 0.8: 17.52 s.
+            earliest_subsonic_after_ignition_us: 17_500_000,
+            // Latest (17.57 s) x1.4; still 14 s before the earliest apogee.
+            force_birth_after_ignition_us: 25_000_000,
         }),
         rocket: RocketParameters {
-            burnout_mass: 17.607,
-            cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
-            reference_area: 0.008982476,
+            burnout_mass: 18.696,
+            // FDR Table 10 — STAR-CCM+ drag at Mach 0.8 and 4000 m for 0/25/
+            // 50/75/100% flap extension (167/190/220/263/306 N), divided by
+            // `q * reference_area` at ISA 4000 m (rho 0.8191, a 324.6 m/s,
+            // q 27615 Pa). The stowed 0.614 sits 3.6% above OpenRocket's own
+            // Mach-0.8 Cd of 0.592, which is the cross-check that the CFD
+            // numbers are whole-body and share this reference area.
+            cd: [0.61365, 0.69816, 0.8084, 0.96641, 1.12441],
+            // pi/4 * (0.112017 m)^2 — OpenRocket's reference area for this
+            // airframe, taken from the widest transition, not the 105.7 mm
+            // body tube.
+            reference_area: 0.009854945,
         },
     },
 };
