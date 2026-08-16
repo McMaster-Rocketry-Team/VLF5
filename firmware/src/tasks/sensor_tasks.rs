@@ -2,9 +2,10 @@ use crate::{
     AvionicsModeWatch, VLStatusMutex,
     avionics_mode::AvionicsMode,
     drivers::{lis2mdl::LIS2MDL, lsm6dsm::LSM6DSM, ms5607::MS5607},
+    utils::run_with_timeout,
 };
 use cortex_m::singleton;
-use defmt::{error, info};
+use defmt::{error, info, warn};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 use embassy_futures::{
     join::join,
@@ -151,6 +152,99 @@ fn imu_values_or_sim(
     )
 }
 
+// --- Bus error tolerance ------------------------------------------------------
+// A transfer on any of these buses can glitch (SPI overrun, an I2C NACK) or,
+// worse, never complete at all. Neither may cost the sensor for the rest of the
+// flight: losing `imu_baro_task` means no estimator input, so no apogee
+// detection and no deploy. So every transfer below is bounded in time and a
+// sensor is only declared dead after it fails repeatedly in a row — the same
+// shape as the SD path in `sd_card_writer`.
+
+/// Consecutive failed reads before a sensor is treated as dead rather than
+/// glitching. Higher than the SD path's `SD_IO_ERROR_LIMIT` of 3 because these
+/// run at ~416 Hz, where five in a row is still only ~12 ms of data.
+const SENSOR_IO_ERROR_LIMIT: u8 = 5;
+
+/// Attempts for a one-shot init / power-mode transfer before giving up.
+const SENSOR_INIT_ATTEMPTS: u8 = 3;
+
+/// A read that has not completed in this long is abandoned and counted as a
+/// failure. Nominal reads are ~0.15 ms (IMU: 13 B at 1 MHz) and ~1.8 ms (baro,
+/// including its ADC conversion waits), so this cannot fire in normal
+/// operation. It exists so a stalled DMA transfer cannot park the task forever
+/// — nothing else would notice, since `watchdog_task` pets unconditionally and
+/// has no liveness input from here.
+const SENSOR_IO_TIMEOUT_MS: u64 = 20;
+
+/// The same bound for init / power-mode transfers, which is necessarily far
+/// looser: those carry deliberate settling delays that dwarf the transfers
+/// themselves — 40 ms inside `LSM6DSM::reset`, 30 ms inside `LIS2MDL::reset`,
+/// 20 ms plus six coefficient reads inside `MS5607::reset`. Anything near
+/// [`SENSOR_IO_TIMEOUT_MS`] would time out every single attempt and take the
+/// sensor down at boot.
+const SENSOR_INIT_TIMEOUT_MS: u64 = 500;
+
+/// Why a sensor transfer failed.
+#[derive(defmt::Format)]
+enum SensorFault<E> {
+    /// The driver reported an error.
+    Io(E),
+    /// The transfer did not finish within [`SENSOR_IO_TIMEOUT_MS`].
+    Timeout,
+}
+
+/// Flatten a [`run_with_timeout`] result into one `Result`.
+fn sensor_result<T, E>(result: Result<Result<T, E>, u64>) -> Result<T, SensorFault<E>> {
+    match result {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(e)) => Err(SensorFault::Io(e)),
+        Err(_) => Err(SensorFault::Timeout),
+    }
+}
+
+/// Spend or restore a sensor's consecutive-failure budget.
+///
+/// * `Ok(Some(v))` — the read succeeded; the budget is restored in full.
+/// * `Ok(None)` — it failed, but the budget is not spent: carry on without
+///   this sample.
+/// * `Err(fault)` — the budget is exhausted; the sensor is dead.
+fn tolerate<T, E>(
+    result: Result<T, SensorFault<E>>,
+    failures: &mut u8,
+) -> Result<Option<T>, SensorFault<E>> {
+    match result {
+        Ok(value) => {
+            *failures = 0;
+            Ok(Some(value))
+        }
+        Err(fault) => {
+            *failures = failures.saturating_add(1);
+            if *failures >= SENSOR_IO_ERROR_LIMIT {
+                Err(fault)
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Run a one-shot sensor transfer with a timeout, retrying transients up to
+/// [`SENSOR_INIT_ATTEMPTS`] times. `$op` is re-evaluated per attempt, so it may
+/// borrow the driver mutably. Evaluates to `Result<T, SensorFault<E>>`.
+macro_rules! init_io {
+    ($op:expr, $retry_msg:literal) => {{
+        let mut outcome = Err(SensorFault::Timeout);
+        for _ in 0..SENSOR_INIT_ATTEMPTS {
+            outcome = sensor_result(run_with_timeout(SENSOR_INIT_TIMEOUT_MS, $op).await);
+            if outcome.is_ok() {
+                break;
+            }
+            warn!($retry_msg);
+        }
+        outcome
+    }};
+}
+
 #[embassy_executor::task]
 pub async fn imu_baro_task(
     imu_spi4: Peri<'static, SPI4>,
@@ -204,7 +298,7 @@ pub async fn imu_baro_task(
             spi_config,
         );
         let mut imu = LSM6DSM::new(imu_spi_device);
-        imu.reset().await.map_err(IMUOrBaroError::IMU)?;
+        init_io!(imu.reset(), "IMU reset failed, retrying").map_err(IMUOrBaroError::IMU)?;
         let mut imu_int1 = ExtiInput::new(imu_int1, imu_int1_exti, Pull::None, ExtI15_10Irqs);
         info!("IMU initialized");
 
@@ -227,7 +321,7 @@ pub async fn imu_baro_task(
         );
         let baro_buffer = singleton!(: [u8; 8] = [0; 8]).unwrap();
         let mut baro = MS5607::new(baro_spi_device, baro_buffer);
-        baro.reset().await.map_err(IMUOrBaroError::Baro)?;
+        init_io!(baro.reset(), "baro reset failed, retrying").map_err(IMUOrBaroError::Baro)?;
         info!("Barometer initialized");
 
         let publisher = pubsub.dyn_publisher().unwrap();
@@ -238,7 +332,8 @@ pub async fn imu_baro_task(
         loop {
             match avionics_mode.get().await {
                 AvionicsMode::Armed | AvionicsMode::SelfTest => {
-                    imu.power_up().await.map_err(IMUOrBaroError::IMU)?;
+                    init_io!(imu.power_up(), "IMU power-up failed, retrying")
+                        .map_err(IMUOrBaroError::IMU)?;
                     match select(
                         read_imu_baro_loop(
                             &mut imu_int1,
@@ -257,7 +352,12 @@ pub async fn imu_baro_task(
                         Either::First(Err(e)) => Err(e)?,
                         Either::Second(_) => {}
                     };
-                    imu.power_down().await.map_err(IMUOrBaroError::IMU)?;
+                    // A failed power-down only leaves the IMU drawing current.
+                    // Never a reason to end the task and lose both sensors for
+                    // the rest of the flight — log it and carry on.
+                    if init_io!(imu.power_down(), "IMU power-down failed, retrying").is_err() {
+                        warn!("IMU left powered up");
+                    }
                 }
                 AvionicsMode::LowPower | AvionicsMode::Demo => {
                     match select(
@@ -305,9 +405,9 @@ pub async fn imu_baro_task(
 }
 
 enum IMUOrBaroError<I: SpiDevice, B: SpiDevice> {
-    IMU(I::Error),
-    Baro(B::Error),
-    IMUAndBaro(I::Error, B::Error),
+    IMU(SensorFault<I::Error>),
+    Baro(SensorFault<B::Error>),
+    IMUAndBaro(SensorFault<I::Error>, SensorFault<B::Error>),
 }
 
 async fn read_baro_low_power_loop<B: SpiDevice>(
@@ -315,15 +415,21 @@ async fn read_baro_low_power_loop<B: SpiDevice>(
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>>,
     hil: &mut HilSimState,
     mode_watch: &AvionicsModeWatch,
-) -> Result<!, B::Error> {
+) -> Result<!, SensorFault<B::Error>> {
     let mut ticker = Ticker::every(Duration::from_hz(5));
+    let mut baro_failures = 0u8;
 
     loop {
-        let baro_data = read_baro_or_sim(baro, hil, mode_watch).await?;
-        publisher.publish_immediate(SensorReading::new(
-            Instant::now().as_micros(),
-            (None, baro_data),
-        ));
+        let read =
+            run_with_timeout(SENSOR_IO_TIMEOUT_MS, read_baro_or_sim(baro, hil, mode_watch)).await;
+        match tolerate(sensor_result(read), &mut baro_failures)? {
+            Some(baro_data) => publisher.publish_immediate(SensorReading::new(
+                Instant::now().as_micros(),
+                (None, baro_data),
+            )),
+            // Tolerated: skip this tick rather than publish a stale reading.
+            None => warn!("baro read failed ({} consecutive)", baro_failures),
+        }
         ticker.next().await;
     }
 }
@@ -336,23 +442,58 @@ async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
     hil: &mut HilSimState,
     mode_watch: &AvionicsModeWatch,
 ) -> Result<!, IMUOrBaroError<I, B>> {
+    // Per-sensor failure budgets. Local, so each entry into armed / self-test
+    // starts with a full one.
+    let mut imu_failures = 0u8;
+    let mut baro_failures = 0u8;
+
     loop {
         imu_int1.wait_for_rising_edge().await;
-        match join(imu.read(), read_baro_or_sim(baro, hil, mode_watch)).await {
-            (Ok(imu_reading), Ok(baro_data)) => {
+
+        let (imu_read, baro_read) = join(
+            run_with_timeout(SENSOR_IO_TIMEOUT_MS, imu.read()),
+            run_with_timeout(SENSOR_IO_TIMEOUT_MS, read_baro_or_sim(baro, hil, mode_watch)),
+        )
+        .await;
+
+        let imu_outcome = tolerate(sensor_result(imu_read), &mut imu_failures);
+        if matches!(imu_outcome, Ok(None)) {
+            warn!("IMU read failed ({} consecutive)", imu_failures);
+        }
+        let baro_outcome = tolerate(sensor_result(baro_read), &mut baro_failures);
+        if matches!(baro_outcome, Ok(None)) {
+            warn!("baro read failed ({} consecutive)", baro_failures);
+        }
+
+        match (imu_outcome, baro_outcome) {
+            (Err(imu_fault), Err(baro_fault)) => {
+                Err(IMUOrBaroError::IMUAndBaro(imu_fault, baro_fault))?
+            }
+            (Err(imu_fault), Ok(_)) => Err(IMUOrBaroError::IMU(imu_fault))?,
+            (Ok(_), Err(baro_fault)) => Err(IMUOrBaroError::Baro(baro_fault))?,
+            // The baro is what makes a sample: the deployment estimator is
+            // sample-clocked and baro-only. The IMU half is already `Option` on
+            // the wire and the estimators handle its absence (the airbrakes
+            // half skips that sample, its measured-dt path bridges the gap), so
+            // a lone IMU glitch still publishes the baro reading, and only a
+            // baro glitch costs the whole sample.
+            (Ok(imu_reading), Ok(Some(baro_data))) => {
                 // HIL: swap the just-read IMU's values for the scripted ones,
                 // keeping its genuine DRDY timestamp. Flight: pass-through.
-                let imu_reading = imu_values_or_sim(imu_reading, hil, mode_watch);
+                let imu_reading =
+                    imu_reading.map(|reading| imu_values_or_sim(reading, hil, mode_watch));
+                // Without an IMU reading there is no DRDY timestamp to carry;
+                // the edge fired moments ago, so `now` is the honest stand-in.
+                let timestamp_us = imu_reading
+                    .as_ref()
+                    .map(|reading| reading.timestamp_us)
+                    .unwrap_or_else(|| Instant::now().as_micros());
                 publisher.publish_immediate(SensorReading::new(
-                    imu_reading.timestamp_us,
-                    (Some(imu_reading.data), baro_data),
+                    timestamp_us,
+                    (imu_reading.map(|reading| reading.data), baro_data),
                 ))
             }
-            (Ok(_), Err(baro_error)) => Err(IMUOrBaroError::Baro(baro_error))?,
-            (Err(imu_error), Ok(_)) => Err(IMUOrBaroError::IMU(imu_error))?,
-            (Err(imu_error), Err(baro_error)) => {
-                Err(IMUOrBaroError::IMUAndBaro(imu_error, baro_error))?
-            }
+            (Ok(_), Ok(None)) => {}
         };
     }
 }
@@ -380,7 +521,7 @@ pub async fn mag_task(
 
     let mut avionics_mode = avionics_mode_watch.receiver().unwrap();
 
-    let result: Result<!, I2cError> = try {
+    let result: Result<!, SensorFault<I2cError>> = try {
         let mut config = I2cConfig::default();
         config.sda_pullup = true;
         config.scl_pullup = true;
@@ -388,14 +529,14 @@ pub async fn mag_task(
         let i2c: I2c<'_, embassy_stm32::mode::Async, i2c::Master> =
             I2c::new(i2c, scl, sda, tx_dma, rx_dma, I2c2Irqs, config);
         let mut mag = LIS2MDL::new(i2c);
-        mag.reset().await?;
+        init_io!(mag.reset(), "mag reset failed, retrying")?;
         info!("Magnetometer initialized");
 
         let publisher = pubsub.dyn_publisher().unwrap();
         loop {
             match avionics_mode.get().await {
                 AvionicsMode::Armed | AvionicsMode::SelfTest => {
-                    mag.power_up().await?;
+                    init_io!(mag.power_up(), "mag power-up failed, retrying")?;
                     match select(
                         read_mag_loop(&mut mag, &publisher),
                         avionics_mode.changed_and(|m| {
@@ -407,7 +548,11 @@ pub async fn mag_task(
                         Either::First(Err(e)) => Err(e)?,
                         Either::Second(_) => {}
                     };
-                    mag.power_down().await?;
+                    // As with the IMU: a failed power-down costs current, not
+                    // the sensor.
+                    if init_io!(mag.power_down(), "mag power-down failed, retrying").is_err() {
+                        warn!("mag left powered up");
+                    }
                 }
                 AvionicsMode::LowPower | AvionicsMode::Demo | AvionicsMode::Landed => {
                     avionics_mode.changed().await;
@@ -428,12 +573,18 @@ pub async fn mag_task(
 async fn read_mag_loop<B: HalI2c>(
     mag: &mut LIS2MDL<B>,
     publisher: &DynPublisher<'static, SensorReading<BootTimestamp, MagData>>,
-) -> Result<!, B::Error> {
+) -> Result<!, SensorFault<B::Error>> {
     let mut ticker = Ticker::every(Duration::from_hz(100));
+    let mut mag_failures = 0u8;
 
     loop {
-        let reading = mag.read().await?;
-        publisher.publish_immediate(reading);
+        let read = run_with_timeout(SENSOR_IO_TIMEOUT_MS, mag.read()).await;
+        match tolerate(sensor_result(read), &mut mag_failures)? {
+            Some(reading) => publisher.publish_immediate(reading),
+            // Tolerated: skip this tick. Nothing consumes mag for control, so a
+            // gap only costs a logged sample.
+            None => warn!("mag read failed ({} consecutive)", mag_failures),
+        }
         ticker.next().await;
     }
 }
