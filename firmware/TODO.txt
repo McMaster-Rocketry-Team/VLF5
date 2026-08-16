@@ -5,3 +5,8 @@ test on simulated data on openrocket
 repeated arm -> lowpower mode switch corrupt data?
 
 measure sensor noise
+
+AGL vs ASL correctly labeled?
+all quaternion operations correct?
+
+can bus backwards compatibility?

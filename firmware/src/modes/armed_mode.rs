@@ -22,20 +22,17 @@ use firmware_common_new::{
             amp_control::AmpControlMessage, custom_payload_status::CustomPayloadStatusMessage,
             rocket_state::RocketStateMessage, vl_status::FlightStage,
         },
-        node_types::{
-            AMP_NODE_TYPE, BULKHEAD_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE,
-            PAYLOAD_SDRM_NODE_TYPE,
-        },
+        node_types::{AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE},
         sender::CanSender,
     },
+    flight_storage::DEFAULT_TARGET_APOGEE_AGL,
     vlp::{client::VLPAvionics, packets::telemetry::TelemetryPacketBuilder},
 };
 
 use crate::{
     AIRBRAKES_CONFIG, AvionicsModeWatch, AirBrakesWatch, AirbrakesStateWatch, ContinuityWatch,
-    DROGUE_BULKHEAD_NODE_ID, FLIGHT_PROFILE,
-    FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch,
-    MAIN_BULKHEAD_NODE_ID, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    FLIGHT_PROFILE, FireSignal, FlightStageMutex, GPSReadingWatch, KfStateWatch,
+    OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     ROCKET_PARAMETERS, SetTargetWatch, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
@@ -69,7 +66,7 @@ pub async fn armed_mode(
 ) {
     info!("enter armed mode");
     flight_stage.lock(|r| {
-        *r.borrow_mut() = (FlightStage::Armed, false);
+        *r.borrow_mut() = FlightStage::Armed;
     });
     amp_control_watch.sender().send(AmpControlMessage {
         out1_enable: true,
@@ -111,36 +108,18 @@ pub async fn armed_mode(
                 packet.pyro_main_continuity = continuity.pyro_main_continuity;
                 packet.pyro_drogue_continuity = continuity.pyro_drogue_continuity;
 
+                // The same config value the MPC targets (operator-set, with
+                // the stored default as fallback).
+                packet.target_apogee_agl = target_agl_watch
+                    .try_get()
+                    .unwrap_or(DEFAULT_TARGET_APOGEE_AGL);
+
                 if let Some(amp) = can_central.get_nodes::<1>(AMP_NODE_TYPE).first() {
                     packet.amp_online = amp.is_online();
                     packet.amp_uptime_s = amp.status.uptime_s;
                 } else {
                     packet.amp_online = false;
                     packet.amp_uptime_s = 0;
-                }
-
-                if let Some(main_bulkhead) = can_central
-                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == MAIN_BULKHEAD_NODE_ID)
-                {
-                    packet.main_bulkhead_online = main_bulkhead.is_online();
-                    packet.main_bulkhead_uptime_s = main_bulkhead.status.uptime_s;
-                } else {
-                    packet.main_bulkhead_online = false;
-                    packet.main_bulkhead_uptime_s = 0;
-                }
-
-                if let Some(drogue_bulkhead) = can_central
-                    .get_nodes::<4>(BULKHEAD_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == DROGUE_BULKHEAD_NODE_ID)
-                {
-                    packet.drogue_bulkhead_online = drogue_bulkhead.is_online();
-                    packet.drogue_bulkhead_uptime_s = drogue_bulkhead.status.uptime_s;
-                } else {
-                    packet.drogue_bulkhead_online = false;
-                    packet.drogue_bulkhead_uptime_s = 0;
                 }
 
                 if let Some(icarus) = can_central.get_nodes::<1>(ICARUS_NODE_TYPE).first() {
@@ -193,17 +172,32 @@ pub async fn armed_mode(
 
                 estimators.lock(|s| {
                     let est = s.borrow();
-                    // Coasting is the deployment estimator's burn-timer flag,
-                    // orthogonal to the stage — never folded into it.
-                    packet.coasting = est.deployment_estimator().is_coasting();
-                    // Tilt is the airbrakes estimator's gyro dead reckoning —
-                    // the field finally has a real source (0 before ignition
-                    // and after its apogee latch).
-                    let ab_tilt_deg = est
-                        .airbrakes_estimator()
-                        .tilt()
-                        .map(|t| t.to_degrees())
-                        .unwrap_or(0.0);
+                    let ab = est.airbrakes_estimator();
+
+                    // Airbrakes estimator health: the three lockout-exit
+                    // votes (all false outside the dead-reckoning phase),
+                    // whether the vertical filter is born, apogee latch.
+                    let (v1, v2, v3) = ab.lockout_votes().unwrap_or((false, false, false));
+                    packet.ab_vote_inertial = v1;
+                    packet.ab_vote_deployment = v2;
+                    packet.ab_vote_baro_rate = v3;
+                    packet.ab_born = ab.baro_trusted();
+                    packet.ab_apogee = ab.is_apogee();
+                    // Airbrakes-estimator altitude/velocity; 0 while the
+                    // estimator has no output (on the pad, so no pad
+                    // reference exists yet either).
+                    packet.ab_altitude_agl =
+                        match (ab.altitude_asl(), ab.launch_pad_altitude_asl()) {
+                            (Some(altitude_asl), Some(launch_pad_altitude_asl)) => {
+                                altitude_asl - launch_pad_altitude_asl
+                            }
+                            _ => 0.0,
+                        };
+                    packet.ab_vertical_velocity = ab.velocity().map(|v| v.y).unwrap_or(0.0);
+
+                    // Tilt is the airbrakes estimator's gyro dead reckoning
+                    // (0 before ignition and after its apogee latch).
+                    let ab_tilt_deg = ab.tilt().map(|t| t.to_degrees()).unwrap_or(0.0);
 
                     // The flight part of the stage mirrors `RocketState` 1:1.
                     match est.state() {
@@ -276,9 +270,8 @@ pub async fn armed_mode(
 
     let update_packet_can_fut = async {
         loop {
-            let message = can_receiver_sub.next_message_pure().await.data;
-            let node_id = message.id.node_id;
-            packet_builder.update(|packet| match message.message {
+            let message = can_receiver_sub.next_message_pure().await.data.message;
+            packet_builder.update(|packet| match message {
                 CanBusMessageEnum::AmpStatus(message) => {
                     packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
                     packet.amp_out1_overwrote = message.out1.overwrote;
@@ -287,13 +280,6 @@ pub async fn armed_mode(
                     packet.amp_out2 = message.out2.status;
                     packet.amp_out3_overwrote = message.out3.overwrote;
                     packet.amp_out3 = message.out3.status;
-                }
-                CanBusMessageEnum::BrightnessMeasurement(message) => {
-                    if node_id == MAIN_BULKHEAD_NODE_ID {
-                        packet.main_bulkhead_brightness = message.brightness_lux();
-                    } else if node_id == DROGUE_BULKHEAD_NODE_ID {
-                        packet.drogue_bulkhead_brightness = message.brightness_lux();
-                    }
                 }
                 CanBusMessageEnum::IcarusStatus(message) => {
                     packet.air_brakes_actual_extension_percentage =
@@ -333,20 +319,15 @@ pub async fn armed_mode(
         loop {
             // Velocity/altitude from the airbrakes estimator whenever its
             // vertical filter is running (2D velocity, tilt included) — gate
-            // or not; slow-filter vertical-only state otherwise. Coasting
-            // stays on the slow filter's burn timer either way.
-            let (state, coasting, ab_state) = estimators.lock(|s| {
+            // or not; slow-filter vertical-only state otherwise.
+            let (state, ab_state) = estimators.lock(|s| {
                 let est = s.borrow();
                 let ab = est.airbrakes_estimator();
                 let ab_state = match (ab.altitude_asl(), ab.velocity()) {
                     (Some(alt), Some(velocity)) => Some((alt, velocity)),
                     _ => None,
                 };
-                (
-                    est.state(),
-                    est.deployment_estimator().is_coasting(),
-                    ab_state,
-                )
+                (est.state(), ab_state)
             });
             let message = match state {
                 RocketState::Ascent {
@@ -365,7 +346,6 @@ pub async fn armed_mode(
                         unix_clock.now_us_or_boot_time(),
                         &velocity,
                         altitude_agl,
-                        coasting,
                     ))
                 }
                 // The slow KF is frozen (no numbers to report), but the
@@ -378,7 +358,6 @@ pub async fn armed_mode(
                         unix_clock.now_us_or_boot_time(),
                         &[v.x, v.y],
                         ab_alt - launch_pad_altitude_asl,
-                        coasting,
                     )
                 }),
                 _ => None,
@@ -416,14 +395,13 @@ pub async fn armed_mode(
             // One update per ~416 Hz sample; the deployment-speed feed to
             // vote V2 (abstaining during the slow filter's Mach lockout)
             // happens inside.
-            let (pyro, state, coasting, mpc_states, kf_state, ab_log) = estimators.lock(|s| {
+            let (pyro, state, mpc_states, kf_state, ab_log) = estimators.lock(|s| {
                 let mut est = s.borrow_mut();
                 let pyro = est.update(reading.timestamp_us, imu.as_ref(), baro_altitude_asl);
 
                 let dep = est.deployment_estimator();
                 // Raw (possibly lockout-frozen) KF numbers — logging only.
                 let kf_state = (dep.kf_altitude_asl(), dep.kf_vertical_velocity());
-                let coasting = dep.is_coasting();
 
                 let ab = est.airbrakes_estimator();
                 let (v1, v2, v3) = ab.lockout_votes().unwrap_or((false, false, false));
@@ -453,7 +431,6 @@ pub async fn armed_mode(
                 (
                     pyro,
                     est.state(),
-                    coasting,
                     est.airbrakes_mpc_states(),
                     kf_state,
                     ab_log,
@@ -492,8 +469,7 @@ pub async fn armed_mode(
                 avionics_mode_watch.sender().send(AvionicsMode::Landed);
             }
 
-            // Honest 1:1 mirror of `RocketState`; coasting rides alongside
-            // as its own flag, never folded into the stage.
+            // Honest 1:1 mirror of `RocketState`.
             let new_stage = match state {
                 RocketState::OnPad => FlightStage::Armed,
                 RocketState::Ascent { .. } => FlightStage::Ascent,
@@ -505,13 +481,13 @@ pub async fn armed_mode(
             };
             #[cfg(feature = "hil-replay")]
             {
-                let (prev, _) = flight_stage.lock(|r| *r.borrow());
+                let prev = flight_stage.lock(|r| *r.borrow());
                 if prev != new_stage {
                     info!("HIL: flight_stage {} -> {}", prev, new_stage);
                 }
             }
             flight_stage.lock(|r| {
-                *r.borrow_mut() = (new_stage, coasting);
+                *r.borrow_mut() = new_stage;
             });
         }
     };
@@ -532,7 +508,7 @@ pub async fn armed_mode(
             launch_pad_altitude_asl
                 + target_agl_watch
                     .try_get()
-                    .unwrap_or(firmware_common_new::flight_storage::DEFAULT_TARGET_APOGEE_AGL),
+                    .unwrap_or(DEFAULT_TARGET_APOGEE_AGL),
         );
 
         let mut ticker = Ticker::every(Duration::from_hz(10));

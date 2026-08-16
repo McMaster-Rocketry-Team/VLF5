@@ -27,7 +27,7 @@ pub async fn low_power_mode(
 ) {
     info!("enter low power mode");
     flight_stage.lock(|r| {
-        *r.borrow_mut() = (FlightStage::LowPower, false);
+        *r.borrow_mut() = FlightStage::LowPower;
     });
     amp_control_watch.sender().send(AmpControlMessage {
         out1_enable: false,
@@ -53,6 +53,7 @@ pub async fn low_power_mode(
             packet_builder.update(|packet| {
                 packet.num_of_fix_satellites = gps_data.num_of_fix_satellites;
                 packet.gps_fixed = gps_data.lat_lon.is_some();
+                packet.lat_lon = gps_data.lat_lon;
                 packet.vl_battery_v = battery_v;
                 packet.air_temperature = baro_data.temperature;
                 packet.amp_online = can_central

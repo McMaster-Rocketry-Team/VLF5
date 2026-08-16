@@ -1,7 +1,11 @@
 use crate::{
-    AirBrakesWatch, AirbrakesStateWatch, AvionicsModeWatch, ContinuityWatch, FlightStageMutex,
-    GPSReadingWatch, KfStateWatch, VLStatusMutex,
-    tasks::sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
+    AirBrakesWatch, AirbrakesStateWatch, AmpStateWatch, AvionicsModeWatch, ContinuityWatch,
+    FlightStageMutex, GPSReadingWatch, KfStateWatch, VLStatusMutex,
+    can_central::CanCentral,
+    tasks::{
+        sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
+        unix_clock::UnixClock,
+    },
     utils::drain_latest,
 };
 
@@ -9,10 +13,13 @@ use defmt::warn;
 use embassy_futures::select::{Either, select};
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel};
 use embassy_time::{Duration, Instant, Timer};
-use firmware_common_new::flight_data_record::{
-    FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
-    VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
-    VALID_IMU, VALID_MAG,
+use firmware_common_new::{
+    can_bus::node_types::AMP_NODE_TYPE,
+    flight_data_record::{
+        FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
+        VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
+        VALID_IMU, VALID_MAG,
+    },
 };
 
 /// Queue between the IMU-clocked logger and the SD writer.
@@ -30,6 +37,9 @@ pub async fn data_logger(
     battery_watch: &'static BatteryVWatch,
     continuity_watch: &'static ContinuityWatch,
     air_brakes_watch: &'static AirBrakesWatch,
+    amp_state_watch: &'static AmpStateWatch,
+    can_central: &'static CanCentral<NoopRawMutex>,
+    unix_clock: &'static UnixClock,
     flight_stage: &'static FlightStageMutex,
     kf_state_watch: &'static KfStateWatch,
     airbrakes_state_watch: &'static AirbrakesStateWatch,
@@ -73,7 +83,8 @@ pub async fn data_logger(
         let battery_opt = battery_receiver.try_get();
         let continuity_opt = continuity_receiver.try_get();
         let airbrakes_opt = air_brakes_watch.try_get();
-        let (stage, coasting) = flight_stage.lock(|r| *r.borrow());
+        let amp_opt = amp_state_watch.try_get();
+        let stage = flight_stage.lock(|r| *r.borrow());
         // NaN until the armed-mode estimators have produced their first sample.
         let (kf_altitude_asl, kf_vertical_velocity) =
             kf_state_watch.try_get().unwrap_or((f32::NAN, f32::NAN));
@@ -81,10 +92,10 @@ pub async fn data_logger(
             .try_get()
             .unwrap_or((f32::NAN, f32::NAN, f32::NAN, 0));
 
-        let mut imu_valid = 0u8;
+        let mut fast_valid = 0u8;
         let (acc, gyro) = match imu_opt {
             Some(imu) => {
-                imu_valid |= VALID_IMU;
+                fast_valid |= VALID_IMU;
                 (
                     [imu.acc.x, imu.acc.y, imu.acc.z],
                     [imu.gyro.x, imu.gyro.y, imu.gyro.z],
@@ -94,14 +105,14 @@ pub async fn data_logger(
         };
         let (temperature, pressure) = match baro_opt {
             Some(b) => {
-                imu_valid |= VALID_BARO;
+                fast_valid |= VALID_BARO;
                 (b.temperature, b.pressure)
             }
             None => (0.0, 0.0),
         };
         let mag = match mag_opt {
             Some(r) => {
-                imu_valid |= VALID_MAG;
+                fast_valid |= VALID_MAG;
                 let m = r.data.mag;
                 [m.x, m.y, m.z]
             }
@@ -146,19 +157,28 @@ pub async fn data_logger(
             }
             None => 0,
         };
-        let (air_brakes_commanded_extension, air_brakes_actual_extension) =
+        let (air_brakes_commanded_extension, air_brakes_actual_extension, air_brakes_servo_temp) =
             match airbrakes_opt {
                 Some(ab) => {
                     if ab.commanded_valid {
-                        slow_valid |= VALID_AIRBRAKES_COMMANDED;
+                        fast_valid |= VALID_AIRBRAKES_COMMANDED;
                     }
                     if ab.actual_valid {
-                        slow_valid |= VALID_AIRBRAKES_ACTUAL;
+                        fast_valid |= VALID_AIRBRAKES_ACTUAL;
                     }
-                    (ab.commanded_extension, ab.actual_extension)
+                    (ab.commanded_extension, ab.actual_extension, ab.servo_temp)
                 }
-                None => (0.0, 0.0),
+                None => (0.0, 0.0, 0.0),
             };
+        let (amp_shared_battery_v, amp_out_status) = match amp_opt {
+            Some(a) => (a.shared_battery_v, a.out_status),
+            None => (0.0, 0),
+        };
+        let amp_online = can_central
+            .get_nodes::<1>(AMP_NODE_TYPE)
+            .first()
+            .map(|node| node.is_online())
+            .unwrap_or(false);
 
         let sd_ok = vl_status.lock(|s| s.borrow().sd_ok);
         if !sd_ok {
@@ -168,6 +188,8 @@ pub async fn data_logger(
         let fast_record = LogRecord::Fast(FlightDataFastRecord {
             sequence,
             timestamp_us,
+            // 0 until the GPS PPS has disciplined the unix clock.
+            unix_time_us: unix_clock.convert_to_unix_us(timestamp_us).unwrap_or(0),
             acc,
             gyro,
             temperature,
@@ -179,9 +201,11 @@ pub async fn data_logger(
             ab_vertical_velocity,
             ab_tilt_deg,
             ab_flags,
+            pyro_flags,
+            air_brakes_commanded_extension,
+            air_brakes_actual_extension,
             flight_stage: stage,
-            coasting,
-            valid: imu_valid,
+            valid: fast_valid,
         });
         sequence = sequence.wrapping_add(1);
 
@@ -195,9 +219,10 @@ pub async fn data_logger(
             vdop,
             pdop,
             flight_stage: stage,
-            pyro_flags,
-            air_brakes_commanded_extension,
-            air_brakes_actual_extension,
+            air_brakes_servo_temp,
+            amp_online,
+            amp_out_status,
+            amp_shared_battery_v,
             valid: slow_valid,
         };
 

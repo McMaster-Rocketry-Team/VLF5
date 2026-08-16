@@ -37,7 +37,7 @@ use firmware_common_new::{
 use stm32_device_signature::device_id;
 
 use crate::{
-    AirBrakesWatch, FlightStageMutex, VLStatusMutex,
+    AirBrakesWatch, AmpLogState, AmpStateWatch, FlightStageMutex, VLStatusMutex,
     can_central::CanCentral,
     tasks::{sensor_tasks::BatteryVWatch, unix_clock::UnixClock},
 };
@@ -119,6 +119,7 @@ pub async fn start_can_bus_low_prio_tasks(
     flight_stage: &'static FlightStageMutex,
     battery_v_watch: &'static BatteryVWatch,
     air_brakes_watch: &'static AirBrakesWatch,
+    amp_state_watch: &'static AmpStateWatch,
     vl_status: &'static VLStatusMutex,
 ) -> (
     &'static CanSender<NoopRawMutex>,
@@ -143,6 +144,7 @@ pub async fn start_can_bus_low_prio_tasks(
         can_node_id,
         can_central,
         air_brakes_watch,
+        amp_state_watch,
         can_receiver_sub,
     ).unwrap());
 
@@ -245,9 +247,7 @@ async fn node_status_task(
         );
         can_sender.send(
             VLStatusMessage {
-                // Coasting travels separately (`RocketStateMessage::is_coasting`),
-                // not in the status heartbeat.
-                flight_stage: flight_stage.lock(|r| r.borrow().0),
+                flight_stage: flight_stage.lock(|r| *r.borrow()),
                 battery_mv: (battery_v_reading.try_get().unwrap().data * 1000.0) as u16,
             }
             .into(),
@@ -261,6 +261,7 @@ async fn can_message_receive_task(
     self_can_id: u16,
     can_central: &'static CanCentral<NoopRawMutex>,
     air_brakes_watch: &'static AirBrakesWatch,
+    amp_state_watch: &'static AmpStateWatch,
     mut can_receiver_sub: CanReceiverSub,
 ) {
     loop {
@@ -280,8 +281,17 @@ async fn can_message_receive_task(
             CanBusMessageEnum::IcarusStatus(message) => {
                 let mut state = air_brakes_watch.try_get().unwrap_or_default();
                 state.actual_extension = message.actual_extension_percentage();
+                state.servo_temp = message.servo_temperature();
                 state.actual_valid = true;
                 let _ = air_brakes_watch.sender().send(state);
+            }
+            CanBusMessageEnum::AmpStatus(message) => {
+                amp_state_watch.sender().send(AmpLogState {
+                    shared_battery_v: message.shared_battery_mv as f32 / 1000.0,
+                    out_status: (message.out1.status as u8)
+                        | ((message.out2.status as u8) << 2)
+                        | ((message.out3.status as u8) << 4),
+                });
             }
             _ => {}
         }

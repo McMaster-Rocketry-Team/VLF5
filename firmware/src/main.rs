@@ -182,10 +182,9 @@ pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
 pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
-/// `(flight_stage, coasting)`: the wire stage mirrors the deployment
-/// estimator's `RocketState` 1:1; coasting is its burn-timer flag, orthogonal
-/// to the stage and reported alongside it, never folded in.
-pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<(FlightStage, bool)>>;
+/// The wire flight stage: mirrors the deployment estimator's `RocketState`
+/// 1:1 while armed, mode-fixed values in the other modes.
+pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
 /// Latest state-estimator KF output `(altitude_asl, vertical_velocity)` for SD
 /// logging, published per estimator sample in armed mode.
 pub type KfStateWatch = Watch<NoopRawMutex, (f32, f32), 2>;
@@ -199,16 +198,30 @@ pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
 
-/// Latest airbrakes extension for SD logging (commanded + Icarus-reported actual).
+/// Latest airbrakes state for SD logging: commanded extension,
+/// Icarus-reported actual extension, and Icarus-reported servo temperature.
 #[derive(Clone, Copy, Default, defmt::Format)]
 pub struct AirBrakesLogState {
     pub commanded_extension: f32,
     pub actual_extension: f32,
+    pub servo_temp: f32,
     pub commanded_valid: bool,
     pub actual_valid: bool,
 }
 
 pub type AirBrakesWatch = Watch<NoopRawMutex, AirBrakesLogState, 2>;
+
+/// Latest AMP status heartbeat for SD logging: shared battery rail voltage
+/// and the three output statuses packed 2 bits per output
+/// (`PowerOutputStatus` discriminants, out1 in the LSBs) — the same encoding
+/// the slow record stores.
+#[derive(Clone, Copy, Default, defmt::Format)]
+pub struct AmpLogState {
+    pub shared_battery_v: f32,
+    pub out_status: u8,
+}
+
+pub type AmpStateWatch = Watch<NoopRawMutex, AmpLogState, 2>;
 
 pub fn publish_airbrakes_commanded(watch: &AirBrakesWatch, extension: f32) {
     let mut state = watch.try_get().unwrap_or_default();
@@ -354,10 +367,11 @@ async fn low_prio_main(
 
     let vlp_avionics_client = singleton!(: VLPAvionics<NoopRawMutex> = VLPAvionics::new()).unwrap();
     let flight_stage =
-        singleton!(: FlightStageMutex = BlockingMutex::new(RefCell::new((FlightStage::Armed, false))))
+        singleton!(: FlightStageMutex = BlockingMutex::new(RefCell::new(FlightStage::Armed)))
             .unwrap();
     let battery_v_watch = singleton!(: BatteryVWatch = BatteryVWatch::new()).unwrap();
     let air_brakes_watch = singleton!(: AirBrakesWatch = AirBrakesWatch::new()).unwrap();
+    let amp_state_watch = singleton!(: AmpStateWatch = AmpStateWatch::new()).unwrap();
     let kf_state_watch = singleton!(: KfStateWatch = KfStateWatch::new()).unwrap();
     let airbrakes_state_watch =
         singleton!(: AirbrakesStateWatch = AirbrakesStateWatch::new()).unwrap();
@@ -440,6 +454,7 @@ async fn low_prio_main(
         flight_stage,
         battery_v_watch,
         air_brakes_watch,
+        amp_state_watch,
         vl_status,
     )
     .await;
@@ -480,6 +495,9 @@ async fn low_prio_main(
         battery_v_watch,
         continuity_watch,
         air_brakes_watch,
+        amp_state_watch,
+        can_central,
+        unix_clock,
         flight_stage,
         kf_state_watch,
         airbrakes_state_watch,

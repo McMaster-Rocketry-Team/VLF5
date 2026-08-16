@@ -2,36 +2,53 @@
 
 Reference for what data leaves the flight computer, on which channel, at what
 rate, and whether a value lost from one channel can be reconstructed from
-another after the flight. Updated 2026-08-13 (storage format v4).
+another after the flight. Updated 2026-08-15 (storage format v7: airbrakes
+state on the downlink, UTC + pyro + extension at full rate, amp/servo temp on
+SD, bulkheads and the coasting bit off the wire).
 
 ## SD flight log (armed mode only)
 
 Two tagged record types interleaved into 512 B blocks (508 usable + CRC32),
 superblock flushed every 250 ms. Decoding: `rocket-cli download-file <out.csv>`
 (one CSV row per fast record, latest slow snapshot merged in). Storage format
-v4 is **not** backward compatible: logs written by older firmware are reported
+v7 is **not** backward compatible: logs written by older firmware are reported
 as unsupported by rocket-cli, and the firmware starts a fresh log over them on
 the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
-| **Fast** (tag 0x01) | ~427 Hz (per IMU data-ready edge; placeholder at 50 Hz during sensor-stream stalls) | 73 B | sequence, timestamp_us, accel ×3, gyro ×3, baro temperature + pressure, mag ×3 (100 Hz source, resampled), **KF altitude ASL**, **KF vertical velocity**, **flight stage**, valid bitmask |
-| **Slow** (tag 0x02) | 10 Hz | 73 B | timestamp_us, battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), flight stage (redundant with fast), pyro flags (continuity / fire / short), airbrakes commanded + actual extension, valid bitmask |
+| **Fast** (tag 0x01) | ~427 Hz (per IMU data-ready edge; placeholder at 50 Hz during sensor-stream stalls) | 105 B | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, 0 until the clock locks), accel ×3, gyro ×3, baro temperature + pressure, mag ×3 (100 Hz source, resampled), deployment KF altitude ASL + vertical velocity, airbrakes estimator altitude ASL + vertical velocity + tilt, ab_flags (3 lockout-exit vote bits, filter-born, apogee latch), flight stage (honest `RocketState` mirror), **pyro flags** (continuity / fire / short — fire bits double as the chutes' `deployed`, now at ±2.3 ms), **airbrakes commanded + actual extension**, valid bitmask |
+| **Slow** (tag 0x02) | 10 Hz | 73 B | timestamp_us, battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), flight stage (redundant with fast), **airbrakes servo temp**, **amp online + output statuses + shared battery voltage**, valid bitmask |
 
-Throughput ≈ 32 kB/s ≈ 113 MB/hour; capacity is a non-issue.
+Throughput ≈ 46 kB/s ≈ 164 MB/hour; capacity is a non-issue.
 
 The KF fields are NaN until the armed-mode estimator produces its first sample
-(a few ms after arming). `flight_stage` in the fast record gives stage
-transitions at ~2.3 ms resolution (previously only 100 ms via the slow record).
+(a few ms after arming); the ab fields are NaN until their piece of the
+airbrakes estimator is alive (tilt from ignition, altitude/velocity from the
+vertical filter's birth). `flight_stage` gives stage transitions at ~2.3 ms
+resolution, and the per-sample vote bits reconstruct the lockout-exit truth
+table post-flight; since v7 the pyro fire bits get the same resolution
+(previously ±100 ms via the slow record). The deployment KF columns are frozen
+(stale) during MachLockout — the one place the log intentionally carries
+numbers the state machine refuses to expose to control logic. The coasting
+flag is no longer stored: it is a pure timer, reconstructible as
+ignition-time + `max_burn_time` from the flight profile.
 
 ## Radio telemetry (VLP downlink, LoRa)
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 34 B | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), flight stage, tilt (unimplemented, 0), amp status + outputs + shared battery, bulkhead status + brightness, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, EPM rails |
-| `LowPowerTelemetryPacket` | 5 B | every 5 s in LowPower + Demo | sats, gps_fixed, VL battery, amp online, shared battery, air temp |
+| `TelemetryPacket` | 36 B (288/288 bits — zero spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), tilt, flight stage (4-bit honest mirror), drogue/main deployed bits, **ab altitude AGL + ab vertical velocity (signed, ±400 m/s @ ~1.6 m/s) + 3 vote bits + born + apogee**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, EPM rails |
+| `LowPowerTelemetryPacket` | 11 B | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
 | `LandedTelemetryPacket` | 12 B | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 | `GPSBeaconPacket` | 12 B | **never sent by VLF5** (defined in VLP only) | — |
+
+Stage-honesty on the downlink: during MachLockout the packet reports the KF
+altitude and air speed as 0 (the state carries no numbers — the stage value
+explains why) while the ab fields stay live. FailedToReachMinApogee is
+reported as itself. The ground now sees the airbrakes estimator directly:
+whether it's born, which votes pass, its altitude/velocity, and the target
+apogee it's steering toward.
 
 ## Full data map
 
@@ -44,25 +61,31 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | mag (3-axis) | – | – | ✓ (100 Hz source) | – | primary data |
 | baro pressure | – | – | ✓ | – | primary data |
 | baro/air temperature | ✓ | LP | ✓ | – | logged |
-| KF altitude ASL | ✓ (as AGL, coarse) | – | ✓ | – | yes — replay pressure through estimator |
-| KF vertical velocity | ✓ (as \|air_speed\|, 8-bit) | – | ✓ | – | yes — replay |
-| flight stage | ✓ (3-bit) | – | ✓ full rate | ✓ (redundant) | logged |
+| deployment KF altitude ASL | ✓ (as AGL, coarse; 0 in MachLockout) | – | ✓ | – | yes — replay pressure through estimator |
+| deployment KF vertical velocity | ✓ (as \|air_speed\|, 8-bit; 0 in MachLockout) | – | ✓ | – | yes — replay |
+| ab estimator altitude | ✓ (as AGL, 13-bit) | – | ✓ (ASL, NaN until born) | – | yes — replay IMU+baro through estimator |
+| ab estimator vertical velocity | ✓ (signed 9-bit) | – | ✓ (NaN until born) | – | yes — replay |
+| ab tilt | ✓ (8-bit) | – | ✓ (NaN before ignition) | – | yes — replay / offline attitude |
+| ab lockout-exit votes, born, apogee latch | ✓ (5 bits) | – | ✓ (ab_flags bits) | – | yes — replay |
+| ab pad calibration complete | – | – | – | – | **nowhere on the wire** — RTT log line only; candidate for a VLCustomStatus bit |
+| flight stage (honest, incl. MachLockout / FailedToReachMinApogee) | ✓ (4-bit) | – | ✓ full rate | ✓ (redundant) | logged |
+| coasting (burn-timer flag) | – | – | – | – | yes — ignition time (stage change) + `max_burn_time` config; internal to the airbrakes gate |
+| drogue/main deployed | ✓ (bits) | – | ✓ (pyro fire flags) | – | logged |
 | max altitude / max airspeed | ✓ | – | – | – | yes — max() over fast records |
-| tilt_deg | ✓ (always 0, unimplemented) | – | – | – | yes — offline attitude from logged IMU + mag |
+| target apogee | ✓ (13-bit AGL) | – | – | – | also in SD config block |
 | KF innovation / gate rejections | – | – | – | – | yes — replay pressure |
 | launch pad altitude | – | – | – | – | yes — KF altitude while on pad |
-| GPS lat/lon, sat count | ✓ | LD (lat/lon), both (sats) | – | ✓ | logged |
+| GPS lat/lon, sat count | ✓ | ✓ all three | – | ✓ | logged |
 | GPS altitude, DOPs | – | – | – | ✓ | logged |
-| GPS UTC time | – | – | – | – | **nowhere** — parsed then dropped; log has only boot-time µs |
+| GPS UTC time | – | – | ✓ (unix µs, full rate) | – | logged — absolute time for video/GCM correlation |
 | VL battery voltage | ✓ | ✓ | – | ✓ | logged |
-| pyro continuity (main/drogue) | ✓ | – | – | ✓ | logged |
-| pyro fire outputs, short-circuit | – | – | – | ✓ (10 Hz) | logged, ±100 ms |
-| airbrakes commanded/actual ext. | ✓ (5-bit) | – | – | ✓ | logged |
-| airbrakes servo temp | ✓ | – | – | – | **not derivable** — radio only |
-| MPC predicted apogee | – | – | – | – | approx — re-run MPC on logged KF state |
-| target apogee | – | – | – | – | SD config block (separate from log stream) |
-| amp: online, outputs, shared battery | ✓ | ✓/LD | – | – | **not derivable** — radio only |
-| bulkheads: online, brightness | ✓ | – | – | – | **not derivable** — radio only |
+| pyro continuity (main/drogue) | ✓ | – | ✓ | – | logged |
+| pyro fire outputs, short-circuit | – | – | ✓ (±2.3 ms) | – | logged |
+| airbrakes commanded/actual ext. | ✓ (5-bit) | – | ✓ full rate | – | logged |
+| airbrakes servo temp | ✓ | – | – | ✓ | logged |
+| MPC predicted apogee | – | – | – | – | approx — re-run MPC on logged ab state |
+| amp: online, outputs ×3, shared battery | ✓ | ✓/LD | – | ✓ | logged |
+| bulkheads: online, brightness | – | – | – | – | **nowhere** — dropped from TM in v7; CAN-local only |
 | Icarus / OzYS / SDRM online, uptime | ✓ | – | – | – | **not derivable** — radio only |
 | payload stack status | ✓ (11-bit) | – | – | – | **not derivable** — radio only |
 | EPM rails (batt, 3v3, 5v, per-5v, per-9v) | ✓ | – | – | – | **not derivable** — radio only |
@@ -70,9 +93,14 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 
 Takeaways:
 
-- Everything marked "radio only" (CAN node health, EPM rails, stack status,
-  servo temp) is lost forever if the RF link drops — a 1 Hz CAN-health snapshot
-  record on SD would close that gap.
-- GPS UTC time is the only value that is parsed and then discarded with no way
-  to reconstruct it; adding it to the slow record would give the log absolute
-  time for correlating with video / GCM logs / the redundant flight computer.
+- v7 closed the two old gaps: GPS UTC time is now logged at full rate (absolute
+  time for video / GCM / redundant-FC correlation), and amp state + servo temp
+  survive an RF-link drop via the slow record.
+- Still radio-only: EPM rails, payload stack status, Icarus/OzYS/SDRM health.
+  A 1 Hz CAN-health snapshot record on SD would close the remainder.
+- Bulkhead status is now on no channel at all (deliberate v7 drop) — it exists
+  only as live CAN traffic.
+- `calibration_complete()` (airbrakes pad calibration, a launch-readiness
+  condition) is visible only on RTT — it has no CAN/telemetry slot. The
+  natural home is a VLCustomStatus bit on the CAN heartbeat, relayed by the
+  ground station as a GO/NO-GO light.
