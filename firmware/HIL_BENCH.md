@@ -42,12 +42,11 @@ rocket-cli send-uplink --frequency 920000000 --vlp-key "$(cat vlp.key)" arm   # 
 rocket-cli download-flight-log out.csv
 ```
 
-Verified 2026-07-10 end-to-end over the air: `SelfTest → LowPower → Armed → PoweredAscent →
-DrogueDeployed → MainDeployed → Landed`, apogee ~3295 m AGL, airbrakes commanded full
+Verified 2026-07-10 end-to-end over the air: `SelfTest → LowPower → Armed → Ascent →
+DrogueChute → MainChute → Landed`, apogee ~3295 m AGL, airbrakes commanded full
 extension (target 2500 m < natural apogee), **both pyros fired via the real `pyro_task` GPIO**
-(SD `pyro_*_fire` edges), link strong (RSSI ~-44, every uplink acked first try). Note: this
-firmware never reports `FlightStage::Coasting` — `armed_mode` maps ascent+coast both to
-`PoweredAscent`. Flight-data logging is gated to **Armed→Landed** (`AvionicsMode::should_log`),
+(SD `pyro_*_fire` edges), link strong (RSSI ~-44, every uplink acked first try).
+Flight-data logging is gated to **Armed→Landed** (`AvionicsMode::should_log`),
 so preflight is not logged and downloads stay small.
 
 ---

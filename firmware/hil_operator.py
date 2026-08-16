@@ -146,12 +146,12 @@ def main():
     if not op.wait(lambda: op.acked("arm"), 20, "arm ack"):
         fails.append("arm not acked")
 
-    # 5. Autonomous flight (pad hold ~15s, burn, coast, apogee, deploy). Coasting may be
-    # skipped by the stage machine, and DrogueDeployed is transient (single-deploy delays=0
-    # fires drogue->main in <1ms), so key on the telemetry-observable stages and confirm
-    # the drogue fire from RTT (--rtt-log) separately.
-    op.wait(lambda: "PoweredAscent" in op.stages, 90, "PoweredAscent (liftoff)")
-    op.wait(lambda: "MainDeployed" in op.stages or "DrogueDeployed" in op.stages,
+    # 5. Autonomous flight (pad hold ~15s, burn, coast, apogee, deploy). DrogueChute is
+    # transient (single-deploy delays=0 fires drogue->main in <1ms), so key on the
+    # telemetry-observable stages and confirm the drogue fire from RTT (--rtt-log)
+    # separately.
+    op.wait(lambda: "Ascent" in op.stages, 90, "Ascent (liftoff)")
+    op.wait(lambda: "MainChute" in op.stages or "DrogueChute" in op.stages,
             150, "deploy (Drogue/Main)")
 
     # 6. Landing
@@ -168,12 +168,12 @@ def report(op, fails):
     print("saw airbrakes cmd>0:", op.saw_airbrakes_cmd, flush=True)
     print("acks:", op.acks, flush=True)
 
-    for s in ["Armed", "PoweredAscent"]:
+    for s in ["Armed", "Ascent"]:
         if s not in op.stages:
             fails.append(f"missing stage {s}")
     # Deploy: at least one of Drogue/Main must show in telemetry (transient drogue may be
     # missed by 2s sampling); the RTT check below confirms both pyros actually fired.
-    if not ("MainDeployed" in op.stages or "DrogueDeployed" in op.stages):
+    if not ("MainChute" in op.stages or "DrogueChute" in op.stages):
         fails.append("no deploy stage (Drogue/Main) in telemetry")
     if not (op.landed or "Landed" in op.stages):
         fails.append("never landed")

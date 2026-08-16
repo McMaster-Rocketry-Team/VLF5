@@ -41,7 +41,6 @@ ignition-time + `max_burn_time` from the flight profile.
 | `TelemetryPacket` | 36 B (288/288 bits — zero spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), tilt, flight stage (4-bit honest mirror), drogue/main deployed bits, **ab altitude AGL + ab vertical velocity (signed, ±400 m/s @ ~1.6 m/s) + 3 vote bits + born + apogee**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, EPM rails |
 | `LowPowerTelemetryPacket` | 11 B | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
 | `LandedTelemetryPacket` | 12 B | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
-| `GPSBeaconPacket` | 12 B | **never sent by VLF5** (defined in VLP only) | — |
 
 Stage-honesty on the downlink: during MachLockout the packet reports the KF
 altitude and air speed as 0 (the state carries no numbers — the stage value

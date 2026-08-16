@@ -152,7 +152,7 @@ pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
     reference_area: 0.008982476,
 };
 
-/// Airbrakes (Phase B v2) estimator profile. HIL synthesizes the IMU values
+/// Airbrakes estimator profile. HIL synthesizes the IMU values
 /// (accel/gyro from the same script clock as the baro, real DRDY pacing), so
 /// the whole estimator runs on the bench — pad calibration through apogee —
 /// with no application-layer overrides.

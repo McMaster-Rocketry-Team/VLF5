@@ -158,7 +158,7 @@ Watch for panics (`[ERROR]`, `panicked`, `Firmware exited`) while the plot runs.
 4. ~15 s after arm, ignition: the airbrakes estimator's own path lights up —
    `ignition detected, rewinding pad buffer`, `gyro bias: screened over 7 windows`,
    `launch angle: ~0 deg`, then `vertical filter born` — followed by the slow filter's
-   `Armed -> PoweredAscent`.
+   `Armed -> Ascent`.
 5. Telemetry `alt_agl` climbs (not stuck near 0); `air_speed` tracks vertical speed.
    Airbrakes start ~20 s (the slow filter's burn timer declares coasting; the airbrakes
    filter has been alive since ~16 s).

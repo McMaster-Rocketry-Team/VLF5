@@ -127,18 +127,18 @@ pub async fn data_logger(
             }
             None => 0.0,
         };
-        let (lat_lon, altitude, num_sats, hdop, vdop, pdop) = match gps_opt {
+        let (lat_lon, gps_altitude_asl, num_sats, hdop, vdop, pdop) = match gps_opt {
             Some(r) => {
                 let g = r.data;
                 if g.lat_lon.is_some() {
                     slow_valid |= VALID_GPS_FIX;
                 }
-                if g.altitude.is_some() {
+                if g.altitude_asl.is_some() {
                     slow_valid |= VALID_GPS_ALT;
                 }
                 (
                     g.lat_lon.unwrap_or((0.0, 0.0)),
-                    g.altitude.unwrap_or(0.0),
+                    g.altitude_asl.unwrap_or(0.0),
                     g.num_of_fix_satellites,
                     g.hdop.unwrap_or(0.0),
                     g.vdop.unwrap_or(0.0),
@@ -213,7 +213,7 @@ pub async fn data_logger(
             timestamp_us,
             battery_voltage,
             lat_lon,
-            altitude,
+            gps_altitude_asl,
             num_of_fixed_satalites: num_sats,
             hdop,
             vdop,

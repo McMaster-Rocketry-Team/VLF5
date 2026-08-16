@@ -269,7 +269,6 @@ impl FlightLogger {
             .await
             .is_ok()
             && let Some(info) = decode_superblock(&*sb)
-            && info.storage_version == STORAGE_VERSION
             && info.block_count > 0
         {
             let last_index = DATA_START_BLOCK + info.block_count - 1;
@@ -436,7 +435,8 @@ impl FlightLogger {
     }
 
     async fn send_header(&self, resp: &StorageRespChannel) {
-        let header = encode_response_header(self.record_count, self.block_count());
+        let header =
+            encode_response_header(self.record_count, STORAGE_VERSION, self.block_count());
         resp.send(StorageResponse::chunk(&header)).await;
     }
 

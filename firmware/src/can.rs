@@ -99,6 +99,10 @@ pub async fn can_bus_broadcast_unix_time_task(
         let tx = tx.lock().await;
         let mut tx = tx.borrow_mut();
 
+        // Sacrificial empty frame: absorbs the TX-mailbox/arbitration wait so
+        // the UnixTime frame enqueued next (whose payload samples the clock at
+        // creation) reaches the bus with minimal timestamp staleness. Every
+        // receiver drops empty frames before decoding, by design.
         tx.write(&Frame::new_extended(pre_unix_frame_id, &[]).unwrap())
             .await;
         tx.write(

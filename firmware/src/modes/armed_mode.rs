@@ -206,6 +206,8 @@ pub async fn armed_mode(
                             packet.air_speed = 0.0;
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Armed;
+                            packet.drogue_deployed = false;
+                            packet.main_deployed = false;
                         }
                         RocketState::Ascent {
                             vertical_velocity,
@@ -216,6 +218,8 @@ pub async fn armed_mode(
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = ab_tilt_deg;
                             packet.flight_stage = FlightStage::Ascent;
+                            packet.drogue_deployed = false;
+                            packet.main_deployed = false;
                         }
                         RocketState::MachLockout { .. } => {
                             // The slow KF is frozen here and the state carries
@@ -225,40 +229,52 @@ pub async fn armed_mode(
                             packet.air_speed = 0.0;
                             packet.tilt_deg = ab_tilt_deg;
                             packet.flight_stage = FlightStage::MachLockout;
+                            packet.drogue_deployed = false;
+                            packet.main_deployed = false;
                         }
                         RocketState::DrogueChute {
+                            deployed,
                             vertical_velocity,
                             altitude_asl,
                             launch_pad_altitude_asl,
-                            ..
                         } => {
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::DrogueChute;
+                            packet.drogue_deployed = deployed;
+                            packet.main_deployed = false;
                         }
                         RocketState::MainChute {
+                            deployed,
                             vertical_velocity,
                             altitude_asl,
                             launch_pad_altitude_asl,
-                            ..
                         } => {
                             packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
                             packet.air_speed = vertical_velocity.abs();
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::MainChute;
+                            // The main phase only starts after the drogue
+                            // phase completed, so the drogue is out.
+                            packet.drogue_deployed = true;
+                            packet.main_deployed = deployed;
                         }
                         RocketState::Landed => {
                             packet.altitude_agl = 0.0;
                             packet.air_speed = 0.0;
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Landed;
+                            packet.drogue_deployed = false;
+                            packet.main_deployed = false;
                         }
                         RocketState::FailedToReachMinApogee => {
                             packet.altitude_agl = 0.0;
                             packet.air_speed = 0.0;
                             packet.tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::FailedToReachMinApogee;
+                            packet.drogue_deployed = false;
+                            packet.main_deployed = false;
                         }
                     }
                 });

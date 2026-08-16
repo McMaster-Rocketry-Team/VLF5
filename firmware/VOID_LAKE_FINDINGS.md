@@ -42,7 +42,9 @@ unconditionally to `PoweredAscent`.
 **Fix:** burnout detection inside the estimator (low-passed d(KF velocity)/dt,
 latched; see finding 6 for the hardening), exposed as
 `RocketStateEstimator::is_coasting()`, mapped to `FlightStage::Coasting` in
-both armed_mode sites. Additionally the airbrakes start signal and the CAN
+both armed_mode sites. (Superseded 2026-08-15: `FlightStage` is now an honest
+`RocketState` mirror; coasting is no longer on the wire.)
+Additionally the airbrakes start signal and the CAN
 `RocketStateMessage.is_coasting` field (previously filled with an
 ascending-and-subsonic proxy that was true mid-burn) now use the real flag, so
 airbrakes can no longer be commanded under thrust.

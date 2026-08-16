@@ -144,7 +144,7 @@ pub async fn receive_vlp_task(
                 }
             }
             VLPUplinkPacket::SetTargetApogee(packet) => {
-                let agl = packet.get_altitude();
+                let agl = packet.get_altitude_agl();
                 info!("SetTargetApogee: {} m AGL (persisting to SD)", agl);
                 target_agl_watch.sender().send(agl);
                 storage_cmd.signal(StorageCommand::SaveTargetApogee(agl));

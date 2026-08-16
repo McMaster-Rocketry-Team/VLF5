@@ -62,21 +62,21 @@ pub fn trajectory_altitude_asl(t_s: f32) -> f32 {
     }
 
     let v_burnout = BURN_ACCEL_MS2 * BURN_TIME_S;
-    let h_burnout = PAD_ALTITUDE_ASL + 0.5 * BURN_ACCEL_MS2 * BURN_TIME_S * BURN_TIME_S;
+    let h_burnout_asl = PAD_ALTITUDE_ASL + 0.5 * BURN_ACCEL_MS2 * BURN_TIME_S * BURN_TIME_S;
     let t_coast = t - BURN_TIME_S;
 
     // Ballistic coast (up then down) until descent reaches terminal velocity.
     let v_uncapped = v_burnout - GRAVITY * t_coast;
     if v_uncapped >= DESCENT_TERMINAL_MS {
-        let altitude = h_burnout + v_burnout * t_coast - 0.5 * GRAVITY * t_coast * t_coast;
-        return altitude.max(PAD_ALTITUDE_ASL);
+        let altitude_asl = h_burnout_asl + v_burnout * t_coast - 0.5 * GRAVITY * t_coast * t_coast;
+        return altitude_asl.max(PAD_ALTITUDE_ASL);
     }
 
     // Terminal-velocity descent to the ground.
     let t_term = (v_burnout - DESCENT_TERMINAL_MS) / GRAVITY;
-    let h_term = h_burnout + v_burnout * t_term - 0.5 * GRAVITY * t_term * t_term;
-    let altitude = h_term + DESCENT_TERMINAL_MS * (t_coast - t_term);
-    altitude.max(PAD_ALTITUDE_ASL)
+    let h_term_asl = h_burnout_asl + v_burnout * t_term - 0.5 * GRAVITY * t_term * t_term;
+    let altitude_asl = h_term_asl + DESCENT_TERMINAL_MS * (t_coast - t_term);
+    altitude_asl.max(PAD_ALTITUDE_ASL)
 }
 
 /// Generate a noisy barometer reading for flight time `t_s`, sample `sample_idx`.
