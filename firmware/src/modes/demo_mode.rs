@@ -115,7 +115,14 @@ pub async fn demo_mode(
         loop {
             let now_s = Instant::now().as_millis() as f32 / 1000.0;
             let airbrake_extension_percentage = (frequency * PI * 2.0 * now_s).sin() * 0.5 + 0.5;
-            publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
+            // Demo sweeps the servo directly; no MPC, so no prediction and
+            // nothing to validate.
+            publish_airbrakes_commanded(
+                air_brakes_watch,
+                airbrake_extension_percentage,
+                f32::NAN,
+                false,
+            );
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
 
             ticker.next().await;

@@ -160,7 +160,8 @@ Watch for panics (`[ERROR]`, `panicked`, `Firmware exited`) while the plot runs.
    `ignition detected, rewinding pad buffer`, `gyro bias: screened over 7 windows`,
    `launch angle: ~0 deg`, then `vertical filter born` — followed by the slow filter's
    `Armed -> Ascent`.
-5. Telemetry `alt_agl` climbs (not stuck near 0); `air_speed` tracks vertical speed.
+5. Telemetry `deployment_kf_altitude_agl` climbs (not stuck near 0); `airbrakes_kf_vertical_velocity`
+   tracks vertical speed.
    Airbrakes start ~20 s (the slow filter's burn timer declares coasting; the airbrakes
    filter has been alive since ~16 s).
 6. Pyro at apogee (`apogee latched at …`, then drogue/main) — the real `pyro_task` drives
@@ -186,7 +187,7 @@ full extension early. To exercise it, arm with a target apogee well above the sc
 ~3.3 km — then expect `forcing 100% for validation` in the last few seconds of ascent.
 
 Either way, expect one `retiring airbrakes estimator (descending: …, below horizon: …,
-deployment apogee: …)` line at apogee, and the `ab_*` telemetry/SD columns to go
+deployment apogee: …)` line at apogee, and the `airbrakes_*` telemetry/SD columns to go
 0/NaN from there through the whole descent. That line firing more than once, or the ab
 columns coming back after it, is a bug.
 

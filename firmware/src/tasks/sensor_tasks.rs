@@ -64,10 +64,22 @@ bind_interrupts!(struct I2c2Irqs {
 });
 
 /// Subscribers: data_logger, CAN broadcast, mode telemetry, and (in Armed) state estimator.
+///
+/// Depth is sized so a subscriber stall cannot silently cost samples. A full
+/// queue drops the oldest message and the subscriber only learns a count, so
+/// the depth is the real guarantee here — the `Lagged` handling downstream is
+/// the fallback, not the plan. 256 slots is ~615 ms at 416 Hz, an order of
+/// magnitude above the worst stall this board has shown (a ~55 ms SD block
+/// write, see HIL.md), and it matters most for the deployment estimator, whose
+/// timers are counts of samples rather than elapsed time.
+///
+/// Cost is ~14 kB of the 512 kB RAM. Buffering deeper does not add latency:
+/// a subscriber drains at far above the sample rate, so how far behind it can
+/// fall is set by the stall, not by the depth.
 pub type IMUBaroReadingPubSub = PubSubChannel<
     CriticalSectionRawMutex,
     SensorReading<BootTimestamp, (Option<IMUData>, BaroData)>,
-    10,
+    256,
     4,
     1,
 >;

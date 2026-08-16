@@ -1,8 +1,12 @@
 log predicted altitude
-
 test on simulated data on openrocket
-
-measure sensor noise
-
-joined fut jitter
 Some vs None instead of NaN
+mach lockout absence is inconsistent between channels: the packet reports
+  deployment_kf_altitude_agl as 0, while the SD deployment_kf_altitude_asl /
+  deployment_kf_vertical_velocity columns carry the frozen (stale) values. a
+  ground display and a post-flight plot disagree about that window. pick one
+
+need hardware:
+joined fut jitter
+measure sensor noise
+55ms sd stall?

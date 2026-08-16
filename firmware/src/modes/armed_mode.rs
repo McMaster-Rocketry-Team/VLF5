@@ -3,10 +3,11 @@ use core::{cell::RefCell, future::join};
 use air_brakes_controller_core::{
     AirBrakesMPC, FlightEstimators, ImuSample, RocketState, approximate_speed_of_sound,
 };
-use defmt::info;
+use defmt::{info, warn};
 use embassy_futures::select::select;
 use embassy_sync::{
     blocking_mutex::{Mutex as BlockingMutex, raw::NoopRawMutex},
+    pubsub::WaitResult,
     signal::Signal,
 };
 use embassy_time::{Duration, Ticker, Timer};
@@ -31,7 +32,8 @@ use crate::{
     OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     SetTargetWatch, VLStatusMutex,
     tasks::data_logger::{
-        AirBrakesWatch, AmpStateWatch, PayloadStateWatch, publish_airbrakes_commanded,
+        AirBrakesWatch, AmpStateWatch, EstimatorLogWatch, PayloadStateWatch,
+        publish_airbrakes_commanded,
     },
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
@@ -182,27 +184,13 @@ pub async fn armed_mode(
                     // the ground which side of the flight a zero is from.
                     let ab = est.airbrakes_estimator();
 
-                    // Airbrakes estimator health: the lockout-exit drag
-                    // check (false outside the dead-reckoning phase),
-                    // whether the vertical filter is born, apogee latch.
-                    packet.ab_subsonic_drag =
-                        ab.and_then(|ab| ab.subsonic_by_drag()).unwrap_or(false);
-                    packet.ab_born = ab.is_some_and(|ab| ab.baro_trusted());
-                    packet.ab_apogee = ab.is_some_and(|ab| ab.is_apogee());
-                    packet.ab_altitude_agl = match ab
-                        .map(|ab| (ab.altitude_asl(), ab.launch_pad_altitude_asl()))
-                    {
-                        Some((Some(altitude_asl), Some(launch_pad_altitude_asl))) => {
-                            altitude_asl - launch_pad_altitude_asl
-                        }
-                        _ => 0.0,
-                    };
-                    packet.ab_vertical_velocity =
-                        ab.and_then(|ab| ab.velocity()).map(|v| v.y).unwrap_or(0.0);
+                    // Airbrakes estimator health: whether the vertical filter
+                    // is born. The rest of its state is SD-only.
+                    packet.airbrakes_born = ab.is_some_and(|ab| ab.baro_trusted());
 
                     // Tilt is the airbrakes estimator's gyro dead reckoning
                     // (0 before ignition and after retirement).
-                    let ab_tilt_deg = ab
+                    let airbrakes_kf_tilt_deg = ab
                         .and_then(|ab| ab.tilt())
                         .map(|t| t.to_degrees())
                         .unwrap_or(0.0);
@@ -210,83 +198,68 @@ pub async fn armed_mode(
                     // The flight part of the stage mirrors `RocketState` 1:1.
                     match est.state() {
                         RocketState::OnPad => {
-                            packet.altitude_agl = 0.0;
-                            packet.air_speed = 0.0;
-                            packet.tilt_deg = 0.0;
+                            packet.deployment_kf_altitude_agl = 0.0;
+                            packet.deployment_kf_vertical_velocity = 0.0;
+                            packet.airbrakes_kf_tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Armed;
-                            packet.drogue_deployed = false;
-                            packet.main_deployed = false;
                         }
                         RocketState::Ascent {
                             vertical_velocity,
                             altitude_asl,
                             launch_pad_altitude_asl,
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.air_speed = vertical_velocity.abs();
-                            packet.tilt_deg = ab_tilt_deg;
+                            packet.deployment_kf_altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.deployment_kf_vertical_velocity = vertical_velocity;
+                            packet.airbrakes_kf_tilt_deg = airbrakes_kf_tilt_deg;
                             packet.flight_stage = FlightStage::Ascent;
-                            packet.drogue_deployed = false;
-                            packet.main_deployed = false;
                         }
                         RocketState::MachLockout { .. } => {
                             // Folded into `Ascent` on the wire: the rocket is
                             // ascending, and the lockout is an internal detail
                             // of the baro filter. The slow KF is frozen and the
                             // state carries no altitude/velocity, so these
-                            // report zeros rather than stale numbers — the live
-                            // numbers for this phase are the `ab_*` fields
-                            // below, which come from the airbrakes estimator.
-                            packet.altitude_agl = 0.0;
-                            packet.air_speed = 0.0;
-                            packet.tilt_deg = ab_tilt_deg;
+                            // report zeros rather than stale numbers. Tilt is
+                            // the only live number on the downlink through this
+                            // window; the SD log's `airbrakes_kf_*` columns are
+                            // what to read for the rest.
+                            packet.deployment_kf_altitude_agl = 0.0;
+                            packet.deployment_kf_vertical_velocity = 0.0;
+                            packet.airbrakes_kf_tilt_deg = airbrakes_kf_tilt_deg;
                             packet.flight_stage = FlightStage::Ascent;
-                            packet.drogue_deployed = false;
-                            packet.main_deployed = false;
                         }
                         RocketState::DrogueChute {
-                            deployed,
                             vertical_velocity,
                             altitude_asl,
                             launch_pad_altitude_asl,
+                            ..
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.air_speed = vertical_velocity.abs();
-                            packet.tilt_deg = 0.0;
+                            packet.deployment_kf_altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.deployment_kf_vertical_velocity = vertical_velocity;
+                            packet.airbrakes_kf_tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::DrogueChute;
-                            packet.drogue_deployed = deployed;
-                            packet.main_deployed = false;
                         }
                         RocketState::MainChute {
-                            deployed,
                             vertical_velocity,
                             altitude_asl,
                             launch_pad_altitude_asl,
+                            ..
                         } => {
-                            packet.altitude_agl = altitude_asl - launch_pad_altitude_asl;
-                            packet.air_speed = vertical_velocity.abs();
-                            packet.tilt_deg = 0.0;
+                            packet.deployment_kf_altitude_agl = altitude_asl - launch_pad_altitude_asl;
+                            packet.deployment_kf_vertical_velocity = vertical_velocity;
+                            packet.airbrakes_kf_tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::MainChute;
-                            // The main phase only starts after the drogue
-                            // phase completed, so the drogue is out.
-                            packet.drogue_deployed = true;
-                            packet.main_deployed = deployed;
                         }
                         RocketState::Landed => {
-                            packet.altitude_agl = 0.0;
-                            packet.air_speed = 0.0;
-                            packet.tilt_deg = 0.0;
+                            packet.deployment_kf_altitude_agl = 0.0;
+                            packet.deployment_kf_vertical_velocity = 0.0;
+                            packet.airbrakes_kf_tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::Landed;
-                            packet.drogue_deployed = false;
-                            packet.main_deployed = false;
                         }
                         RocketState::FailedToReachMinApogee => {
-                            packet.altitude_agl = 0.0;
-                            packet.air_speed = 0.0;
-                            packet.tilt_deg = 0.0;
+                            packet.deployment_kf_altitude_agl = 0.0;
+                            packet.deployment_kf_vertical_velocity = 0.0;
+                            packet.airbrakes_kf_tilt_deg = 0.0;
                             packet.flight_stage = FlightStage::FailedToReachMinApogee;
-                            packet.drogue_deployed = false;
-                            packet.main_deployed = false;
                         }
                     }
                 });
@@ -339,14 +312,44 @@ pub async fn armed_mode(
         }
     };
 
+    // Session-scoped, like `estimators` itself: the per-sample estimator
+    // state the SD logger records, published by the loop below.
+    let estimator_log_watch = EstimatorLogWatch::new();
+
     let start_airbrakes_signal = Signal::<NoopRawMutex, ()>::new();
     let update_estimators_fut = async {
         let mut airbrakes_started = false;
         let mut terminal_handled = false;
+        let mut lag_warned = false;
+        let mut estimator_dropped_samples = 0u64;
         let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
 
         loop {
-            let reading = imu_baro_sub.next_message_pure().await;
+            // Not `next_message_pure`: that silently swallows `Lagged`, and a
+            // dropped sample is not a neutral event here. The deployment
+            // estimator is SAMPLE-clocked — its burn timer, apogee
+            // persistence, landing persistence and pyro delays are all counts
+            // of samples, and its KF integrates a fixed `DT` — so every
+            // sample this loop misses stretches those timers and shortens the
+            // filter's idea of elapsed time, with nothing in the flight log
+            // to say it happened. The data is gone either way; refusing to
+            // drop it quietly is the point.
+            let reading = loop {
+                match imu_baro_sub.next_message().await {
+                    WaitResult::Message(reading) => break reading,
+                    WaitResult::Lagged(dropped) => {
+                        estimator_dropped_samples =
+                            estimator_dropped_samples.saturating_add(dropped);
+                        if !lag_warned {
+                            warn!(
+                                "estimator loop lagged the sensor stream, {} samples lost — sample-clocked timers now run long",
+                                estimator_dropped_samples
+                            );
+                            lag_warned = true;
+                        }
+                    }
+                }
+            };
             let baro_data = reading.data.1;
             let baro_altitude_asl = baro_data.altitude_asl();
             // IMU is optional: on the rare sample without it the airbrakes
@@ -359,15 +362,28 @@ pub async fn armed_mode(
             });
 
             // One update per ~416 Hz sample; retiring the airbrakes half at
-            // apogee happens inside. Nothing is published for the SD log here
-            // — the logger reads the estimators directly, so there is no
-            // cached copy that could outlive the session that produced it.
-            let (pyro, state, mpc_states) = estimators.lock(|s| {
+            // apogee happens inside.
+            //
+            // `log_sample` is taken here, inside the same lock as `update`,
+            // because the baro innovation-gate outcomes it carries describe
+            // exactly the sample `update` just processed and are overwritten
+            // by the next one. It is published with its timestamp so the
+            // logger can pair it with the matching fast record and refuse
+            // anything else.
+            let (pyro, state, mpc_states, log_sample) = estimators.lock(|s| {
                 let mut est = s.borrow_mut();
                 let pyro = est.update(reading.timestamp_us, imu.as_ref(), baro_altitude_asl);
 
-                (pyro, est.state(), est.airbrakes_mpc_states())
+                (
+                    pyro,
+                    est.state(),
+                    est.airbrakes_mpc_states(),
+                    est.log_sample(),
+                )
             });
+            estimator_log_watch
+                .sender()
+                .send((reading.timestamp_us, log_sample));
 
             if let Some(pyro) = pyro {
                 // Channel capacity 2: drogue+main can queue for single-at-apogee.
@@ -423,7 +439,7 @@ pub async fn armed_mode(
     };
 
     let control_airbrakes_fut = async {
-        publish_airbrakes_commanded(air_brakes_watch, 0.0);
+        publish_airbrakes_commanded(air_brakes_watch, 0.0, f32::NAN, false);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;
@@ -456,8 +472,8 @@ pub async fn armed_mode(
             let Some(s) = estimators.lock(|s| s.borrow().airbrakes_mpc_states()) else {
                 break;
             };
-            let mpc_extension = airbrakes_mpc.update(s.altitude_asl, s.velocity);
-            mpc_went_full |= mpc_extension >= 0.99;
+            let mpc = airbrakes_mpc.update(s.altitude_asl, s.velocity);
+            mpc_went_full |= mpc.extension_percentage >= 0.99;
 
             // An undershoot barely moves the brakes, leaving the flight with no
             // evidence they work — so once slow enough to be harmless (full
@@ -476,20 +492,46 @@ pub async fn armed_mode(
                 validating = true;
             }
 
-            let airbrake_extension_percentage = if validating { 1.0 } else { mpc_extension };
-            publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
+            let airbrake_extension_percentage = if validating {
+                1.0
+            } else {
+                mpc.extension_percentage
+            };
+            // The prediction belongs to the MPC's own command. While the
+            // validation deploy overrides it, there is no prediction for what
+            // is actually being commanded, so report absence rather than a
+            // number about a different extension.
+            let predicted_apogee_agl = if validating {
+                f32::NAN
+            } else {
+                mpc.predicted_apogee_asl - launch_pad_altitude_asl
+            };
+            publish_airbrakes_commanded(
+                air_brakes_watch,
+                airbrake_extension_percentage,
+                predicted_apogee_agl,
+                validating,
+            );
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
             packet_builder.update(|packet| {
                 packet.air_brakes_commanded_extension_percentage = airbrake_extension_percentage;
+                // The packet has no absence encoding here; 0 while the MPC is
+                // not running reads the same as before it started.
+                packet.mpc_predicted_apogee_agl = if predicted_apogee_agl.is_nan() {
+                    0.0
+                } else {
+                    predicted_apogee_agl
+                };
             });
 
             ticker.next().await;
         }
 
-        publish_airbrakes_commanded(air_brakes_watch, 0.0);
+        publish_airbrakes_commanded(air_brakes_watch, 0.0, f32::NAN, false);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {
             packet.air_brakes_commanded_extension_percentage = 0.0;
+            packet.mpc_predicted_apogee_agl = 0.0;
         });
     };
 
@@ -499,7 +541,7 @@ pub async fn armed_mode(
     };
 
     let log_flight_data_fut = log_flight_data(
-        &estimators,
+        &estimator_log_watch,
         imu_baro_pubsub,
         mag_pubsub,
         gps_reading_watch,
@@ -515,6 +557,13 @@ pub async fn armed_mode(
         flight_data_channel,
     );
 
+    // ORDER MATTERS: `update_estimators_fut` must stay ahead of
+    // `log_flight_data_fut`. `join!` polls in declaration order, so within the
+    // poll round that delivers one sensor sample the estimator updates and
+    // publishes before the logger builds that sample's record — which is what
+    // puts the per-sample gate outcomes on the right row. The logger checks
+    // the timestamp and warns if this is ever violated rather than logging a
+    // neighbouring tick's flags.
     let fut = join!(
         update_packet_sensor_fut,
         update_packet_can_fut,
