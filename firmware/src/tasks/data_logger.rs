@@ -17,7 +17,7 @@ use embassy_time::{Duration, Instant, Timer};
 use firmware_common_new::{
     can_bus::node_types::AMP_NODE_TYPE,
     flight_data_record::{
-        AB_APOGEE, AB_BARO_TRUSTED, AB_VOTE_DRAG,
+        AB_APOGEE, AB_BARO_TRUSTED, AB_BURNOUT, AB_VOTE_DRAG,
         FlightDataFastRecord, FlightDataSlowRecord, LogRecord, VALID_AIRBRAKES_ACTUAL,
         VALID_AIRBRAKES_COMMANDED, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
         VALID_IMU, VALID_MAG,
@@ -38,7 +38,8 @@ const SLOW_INTERVAL: Duration = Duration::from_millis(100);
 ///   possibly lockout-frozen output. Logging only.
 /// * `(ab_altitude_asl, ab_vertical_velocity, ab_tilt_deg, ab_flags)` — the
 ///   airbrakes estimator, with `ab_flags` packing the `AB_*` bits (the
-///   lockout-exit drag vote, baro-trusted/born, apogee latch).
+///   lockout-exit drag vote, the burnout latch, baro-trusted/born, apogee
+///   latch).
 ///
 /// NaN for any value this session's estimators have not produced yet.
 fn estimator_log_state(est: &FlightEstimators) -> ((f32, f32), (f32, f32, f32, u8)) {
@@ -49,6 +50,9 @@ fn estimator_log_state(est: &FlightEstimators) -> ((f32, f32), (f32, f32, f32, u
     let mut flags = 0u8;
     if ab.lockout_vote().unwrap_or(false) {
         flags |= AB_VOTE_DRAG;
+    }
+    if ab.burnout_detected() {
+        flags |= AB_BURNOUT;
     }
     if ab.baro_trusted() {
         flags |= AB_BARO_TRUSTED;

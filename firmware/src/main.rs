@@ -10,9 +10,11 @@ use core::cell::RefCell;
 use {defmt_rtt_pipe as _, panic_probe as _};
 
 use air_brakes_controller_core::{
-    DeploymentProfile, FlightEstimators, FlightProfile, RocketParameters,
-    airbrakes_estimator::{AirbrakesConfig, MachLockoutConfig},
+    DeploymentProfile, FlightConfig, FlightEstimators, FlightProfile, RocketParameters,
+    airbrakes_estimator::AirbrakesConfig,
 };
+#[cfg(not(feature = "hil-replay"))]
+use air_brakes_controller_core::airbrakes_estimator::MachLockoutConfig;
 use binary_macros::base64;
 use cortex_m::singleton;
 use cortex_m_rt::entry;
@@ -104,94 +106,77 @@ pub const DROGUE_BULKHEAD_NODE_ID: u16 = 0x328;
 pub const OZYS_1_NODE_ID: u16 = 0x2B2;
 pub const OZYS_2_NODE_ID: u16 = 0x0E1;
 
-// HIL replay profiles: Void Lake test-flight data — subsonic (no Mach
-// lockout), burn ~3.5 s from liftoff (~2.2 s left after the slow filter
-// detects ignition).
+#[cfg(not(feature = "hil-replay"))]
+pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
+    profile: FlightProfile {
+        mach_lockout_duration_us: Some(20_000_000),
+        deployment: DeploymentProfile::Dual {
+            drogue_chute_minimum_altitude_agl: 2000.0,
+            drogue_chute_delay_us: 0,
+            main_chute_altitude_agl: 457.2,
+            main_chute_delay_us: 0,
+        },
+    },
+    airbrakes: AirbrakesConfig {
+        ignition_detection_acc_threshold: 4.0 * 9.81,
+        mach_lockout: Some(MachLockoutConfig {
+            earliest_subsonic_after_ignition_us: 8_000_000,
+            force_birth_after_ignition_us: 20_000_000,
+        }),
+        rocket: RocketParameters {
+            burnout_mass: 17.607,
+            cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
+            reference_area: 0.008982476,
+        },
+    },
+};
+
 #[cfg(feature = "hil-single")]
-pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
-    mach_lockout_duration_us: None,
-    max_burn_time_us: 4_000_000,
-    deployment: DeploymentProfile::Single {
-        minimum_deployment_altitude_agl: 2000.0,
-        delay_us: 0,
+pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
+    profile: FlightProfile {
+        mach_lockout_duration_us: None,
+        deployment: DeploymentProfile::Single {
+            minimum_deployment_altitude_agl: 2000.0,
+            delay_us: 0,
+        },
+    },
+    airbrakes: AirbrakesConfig {
+        ignition_detection_acc_threshold: 4.0 * 9.81,
+        mach_lockout: None,
+        rocket: RocketParameters {
+            burnout_mass: 17.607,
+            cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
+            reference_area: 0.008982476,
+        },
     },
 };
 
 #[cfg(all(feature = "hil-replay", not(feature = "hil-single")))]
-pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
-    mach_lockout_duration_us: None,
-    max_burn_time_us: 4_000_000,
-    deployment: DeploymentProfile::Dual {
-        drogue_chute_minimum_altitude_agl: 2000.0,
-        drogue_chute_delay_us: 0,
-        main_chute_altitude_agl: 457.2,
-        main_chute_delay_us: 0,
+pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
+    profile: FlightProfile {
+        mach_lockout_duration_us: None,
+        deployment: DeploymentProfile::Dual {
+            drogue_chute_minimum_altitude_agl: 2000.0,
+            drogue_chute_delay_us: 0,
+            main_chute_altitude_agl: 457.2,
+            main_chute_delay_us: 0,
+        },
     },
-};
-
-/// TODO before flight: both timers from the flight sim —
-/// `mach_lockout_duration_us` = (time from ignition detection until back
-/// below Mach 0.75) x 1.4, and it must end >5 s before the earliest
-/// simulated apogee; `max_burn_time_us` = burn time x ~1.3.
-#[cfg(not(feature = "hil-replay"))]
-pub const FLIGHT_PROFILE: FlightProfile = FlightProfile {
-    mach_lockout_duration_us: Some(20_000_000),
-    max_burn_time_us: 8_000_000,
-    deployment: DeploymentProfile::Dual {
-        drogue_chute_minimum_altitude_agl: 2000.0,
-        drogue_chute_delay_us: 0,
-        main_chute_altitude_agl: 457.2,
-        main_chute_delay_us: 0,
+    airbrakes: AirbrakesConfig {
+        ignition_detection_acc_threshold: 4.0 * 9.81,
+        mach_lockout: None,
+        rocket: RocketParameters {
+            burnout_mass: 17.607,
+            cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
+            reference_area: 0.008982476,
+        },
     },
-};
-
-pub const ROCKET_PARAMETERS: RocketParameters = RocketParameters {
-    burnout_mass: 17.607,
-    cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
-    reference_area: 0.008982476,
-};
-
-/// Airbrakes estimator profile. HIL synthesizes the IMU values
-/// (accel/gyro from the same script clock as the baro, real DRDY pacing), so
-/// the whole estimator runs on the bench — pad calibration through apogee —
-/// with no application-layer overrides.
-#[cfg(feature = "hil-replay")]
-pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
-    ignition_detection_acc_threshold: 4.0 * 9.81,
-    mach_lockout: None,
-    subsonic_cda_over_mass: ROCKET_PARAMETERS.subsonic_cda_over_mass(),
-};
-
-/// TODO before flight, both from the LC'26 flight sim: `t_min_us` =
-/// earliest possible time below Mach 0.8 after ignition detection, which
-/// must ALSO be after the motor is out (the drag vote assumes free
-/// flight); `t_max_us` = latest plausible + margin, ending >5 s before the
-/// earliest simulated apogee.
-///
-/// There is no static-port coefficient to fill in any more, and the
-/// lockout's drag parameter is derived from [`ROCKET_PARAMETERS`] rather
-/// than configured, so the only airframe numbers to get right are the ones
-/// the MPC already needed.
-#[cfg(not(feature = "hil-replay"))]
-pub const AIRBRAKES_CONFIG: AirbrakesConfig = AirbrakesConfig {
-    ignition_detection_acc_threshold: 4.0 * 9.81,
-    mach_lockout: Some(MachLockoutConfig {
-        t_min_us: 8_000_000,
-        t_max_us: 20_000_000,
-    }),
-    subsonic_cda_over_mass: ROCKET_PARAMETERS.subsonic_cda_over_mass(),
 };
 
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
 pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;
-/// The wire flight stage: mirrors the deployment estimator's `RocketState`
-/// 1:1 while armed, mode-fixed values in the other modes.
 pub type FlightStageMutex = BlockingMutex<NoopRawMutex, RefCell<FlightStage>>;
-/// Both flight estimators behind one lock, owned by [`modes::armed_mode`] and
-/// rebuilt per armed session. Armed mode's own futures and the flight-data
-/// logger share it directly, so every consumer reads the live estimator rather
-/// than a cached copy that could outlive the session that produced it.
 pub type FlightEstimatorsMutex = BlockingMutex<NoopRawMutex, RefCell<FlightEstimators>>;
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;

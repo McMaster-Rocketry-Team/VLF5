@@ -24,10 +24,10 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AIRBRAKES_CONFIG, AmpStateWatch, AvionicsModeWatch, AirBrakesWatch, ContinuityWatch,
-    FLIGHT_PROFILE, FireSignal, FlightEstimatorsMutex, FlightStageMutex, GPSReadingWatch,
+    AmpStateWatch, AvionicsModeWatch, AirBrakesWatch, ContinuityWatch,
+    FLIGHT_CONFIG, FireSignal, FlightEstimatorsMutex, FlightStageMutex, GPSReadingWatch,
     OZYS_1_NODE_ID, OZYS_2_NODE_ID, PayloadStateWatch,
-    ROCKET_PARAMETERS, SetTargetWatch, VLStatusMutex, publish_airbrakes_commanded,
+    SetTargetWatch, VLStatusMutex, publish_airbrakes_commanded,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
@@ -79,7 +79,7 @@ pub async fn armed_mode(
     // airbrakes-permission gate inside `airbrakes_mpc_states`) — firmware
     // holds it behind one mutex.
     let estimators: FlightEstimatorsMutex = BlockingMutex::new(RefCell::new(
-        FlightEstimators::new(FLIGHT_PROFILE.clone(), AIRBRAKES_CONFIG.clone()),
+        FlightEstimators::new(FLIGHT_CONFIG.clone()),
     ));
 
     let update_packet_sensor_fut = async {
@@ -218,13 +218,17 @@ pub async fn armed_mode(
                             packet.main_deployed = false;
                         }
                         RocketState::MachLockout { .. } => {
-                            // The slow KF is frozen here and the state carries
-                            // no altitude/velocity — report zeros rather than
-                            // stale numbers; the stage tells the ground why.
+                            // Folded into `Ascent` on the wire: the rocket is
+                            // ascending, and the lockout is an internal detail
+                            // of the baro filter. The slow KF is frozen and the
+                            // state carries no altitude/velocity, so these
+                            // report zeros rather than stale numbers — the live
+                            // numbers for this phase are the `ab_*` fields
+                            // below, which come from the airbrakes estimator.
                             packet.altitude_agl = 0.0;
                             packet.air_speed = 0.0;
                             packet.tilt_deg = ab_tilt_deg;
-                            packet.flight_stage = FlightStage::MachLockout;
+                            packet.flight_stage = FlightStage::Ascent;
                             packet.drogue_deployed = false;
                             packet.main_deployed = false;
                         }
@@ -442,11 +446,11 @@ pub async fn armed_mode(
                 avionics_mode_watch.sender().send(AvionicsMode::Landed);
             }
 
-            // Honest 1:1 mirror of `RocketState`.
+            // Mirror of `RocketState`, with the Mach lockout folded into
+            // `Ascent` (see `FlightStage`) — the only stage that is not 1:1.
             let new_stage = match state {
                 RocketState::OnPad => FlightStage::Armed,
-                RocketState::Ascent { .. } => FlightStage::Ascent,
-                RocketState::MachLockout { .. } => FlightStage::MachLockout,
+                RocketState::Ascent { .. } | RocketState::MachLockout { .. } => FlightStage::Ascent,
                 RocketState::DrogueChute { .. } => FlightStage::DrogueChute,
                 RocketState::MainChute { .. } => FlightStage::MainChute,
                 RocketState::Landed => FlightStage::Landed,
@@ -476,8 +480,11 @@ pub async fn armed_mode(
         let launch_pad_altitude_asl =
             estimators.lock(|s| s.borrow().deployment_estimator().launch_pad_altitude_asl());
 
+        // The same airframe the airbrakes estimator inverts for its drag
+        // vote — one field, so the lockout and the apogee prediction cannot
+        // be flying different rockets.
         let airbrakes_mpc = AirBrakesMPC::new(
-            ROCKET_PARAMETERS.clone(),
+            FLIGHT_CONFIG.airbrakes.rocket.clone(),
             launch_pad_altitude_asl
                 + target_agl_watch
                     .try_get()

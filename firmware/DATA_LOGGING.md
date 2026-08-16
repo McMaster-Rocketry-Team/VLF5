@@ -18,7 +18,7 @@ the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
-| **Fast** (tag 0x01) | ~427 Hz (per IMU data-ready edge; placeholder at 50 Hz during sensor-stream stalls) | 105 B | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, 0 until the clock locks), accel ×3, gyro ×3, baro temperature + pressure, mag ×3 (100 Hz source, resampled), deployment KF altitude ASL + vertical velocity, airbrakes estimator altitude ASL + vertical velocity + tilt, ab_flags (lockout-exit drag vote, filter-born, apogee latch), flight stage (honest `RocketState` mirror), **pyro flags** (continuity / fire / short — fire bits double as the chutes' `deployed`, now at ±2.3 ms), **airbrakes commanded + actual extension**, valid bitmask |
+| **Fast** (tag 0x01) | ~427 Hz (per IMU data-ready edge; placeholder at 50 Hz during sensor-stream stalls) | 105 B | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, 0 until the clock locks), accel ×3, gyro ×3, baro temperature + pressure, mag ×3 (100 Hz source, resampled), deployment KF altitude ASL + vertical velocity, airbrakes estimator altitude ASL + vertical velocity + tilt, ab_flags (lockout-exit drag vote, burnout latch, filter-born, apogee latch), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`), **pyro flags** (continuity / fire / short — fire bits double as the chutes' `deployed`, now at ±2.3 ms), **airbrakes commanded + actual extension**, valid bitmask |
 | **Slow** (tag 0x02) | 10 Hz | 97 B | timestamp_us, battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), flight stage (redundant with fast), **airbrakes servo temp**, **amp online + output statuses + shared battery voltage**, **payload EPM battery mV + six rail currents mA + three SEM actuator step counts** (2 Hz source, `0xFFFF` = unavailable), valid bitmask |
 
 Throughput ≈ 46 kB/s ≈ 164 MB/hour; capacity is a non-issue.
@@ -27,26 +27,30 @@ The KF fields are NaN until the armed-mode estimator produces its first sample
 (a few ms after arming); the ab fields are NaN until their piece of the
 airbrakes estimator is alive (tilt from ignition, altitude/velocity from the
 vertical filter's birth). `flight_stage` gives stage transitions at ~2.3 ms
-resolution, and the per-sample drag-vote bit reconstructs the lockout-exit
+resolution, and the per-sample drag-vote and burnout bits reconstruct the lockout-exit
 table post-flight; since v7 the pyro fire bits get the same resolution
 (previously ±100 ms via the slow record). The deployment KF columns are frozen
-(stale) during MachLockout — the one place the log intentionally carries
-numbers the state machine refuses to expose to control logic. The coasting
-flag is no longer stored: it is a pure timer, reconstructible as
-ignition-time + `max_burn_time` from the flight profile.
+(stale) during the deployment estimator's Mach lockout — the one place the log
+intentionally carries numbers the state machine refuses to expose to control
+logic. `flight_stage` reads `Ascent` through that window (the lockout is folded
+into `Ascent` on the wire), so the frozen stretch is identified by the KF
+columns going flat rather than by the stage value; the `ab_*` columns are live
+throughout and are what to read there.
 
 ## Radio telemetry (VLP downlink, LoRa)
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 43 B (341/344 bits — 3 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), tilt, flight stage (4-bit honest mirror), drogue/main deployed bits, **ab altitude AGL + ab vertical velocity (signed, ±400 m/s @ ~1.6 m/s) + drag vote + born + apogee**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
+| `TelemetryPacket` | 43 B (341/344 bits — 3 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, KF altitude AGL + air speed (+ maxima), tilt, flight stage (4-bit `RocketState` mirror, Mach lockout folded into `Ascent`), drogue/main deployed bits, **ab altitude AGL + ab vertical velocity (signed, ±400 m/s @ ~1.6 m/s) + drag vote + born + apogee**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
 | `LowPowerTelemetryPacket` | 11 B | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
 | `LandedTelemetryPacket` | 12 B | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
-Stage-honesty on the downlink: during MachLockout the packet reports the KF
-altitude and air speed as 0 (the state carries no numbers — the stage value
-explains why) while the ab fields stay live. FailedToReachMinApogee is
-reported as itself. The ground now sees the airbrakes estimator directly:
+Stage on the downlink: during the deployment estimator's Mach lockout the
+packet reports the KF altitude and air speed as 0 (the state carries no
+numbers) under stage `Ascent`, while the ab fields stay live — so a ground
+display should prefer the ab fields during ascent rather than showing the flat
+zero. FailedToReachMinApogee is reported as itself. The ground sees the
+airbrakes estimator directly:
 whether it's born, whether the drag vote passes, its altitude/velocity, and the target
 apogee it's steering toward.
 
@@ -61,15 +65,15 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | mag (3-axis) | – | – | ✓ (100 Hz source) | – | primary data |
 | baro pressure | – | – | ✓ | – | primary data |
 | baro/air temperature | ✓ | LP | ✓ | – | logged |
-| deployment KF altitude ASL | ✓ (as AGL, coarse; 0 in MachLockout) | – | ✓ | – | yes — replay pressure through estimator |
-| deployment KF vertical velocity | ✓ (as \|air_speed\|, 8-bit; 0 in MachLockout) | – | ✓ | – | yes — replay |
+| deployment KF altitude ASL | ✓ (as AGL, coarse; 0 during the baro Mach lockout) | – | ✓ | – | yes — replay pressure through estimator |
+| deployment KF vertical velocity | ✓ (as \|air_speed\|, 8-bit; 0 during the baro Mach lockout) | – | ✓ | – | yes — replay |
 | ab estimator altitude | ✓ (as AGL, 13-bit) | – | ✓ (ASL, NaN until born) | – | yes — replay IMU+baro through estimator |
 | ab estimator vertical velocity | ✓ (signed 9-bit) | – | ✓ (NaN until born) | – | yes — replay |
 | ab tilt | ✓ (8-bit) | – | ✓ (NaN before ignition) | – | yes — replay / offline attitude |
-| ab lockout-exit drag vote, born, apogee latch | ✓ (3 bits) | – | ✓ (ab_flags bits) | – | yes — replay |
+| ab drag vote, born, apogee latch | ✓ (3 bits) | – | ✓ (ab_flags bits) | – | yes — replay |
+| ab burnout latch | – | – | ✓ (`AB_BURNOUT`) | – | SD only; the packet has 3 spare bits if it's wanted live |
 | ab pad calibration complete | – | – | – | – | **nowhere on the wire** — RTT log line only; candidate for a VLCustomStatus bit |
-| flight stage (honest, incl. MachLockout / FailedToReachMinApogee) | ✓ (4-bit) | – | ✓ full rate | ✓ (redundant) | logged |
-| coasting (burn-timer flag) | – | – | – | – | yes — ignition time (stage change) + `max_burn_time` config; internal to the airbrakes gate |
+| flight stage (incl. FailedToReachMinApogee; Mach lockout folded into `Ascent`) | ✓ (4-bit) | – | ✓ full rate | ✓ (redundant) | logged |
 | drogue/main deployed | ✓ (bits) | – | ✓ (pyro fire flags) | – | logged |
 | max altitude / max airspeed | ✓ | – | – | – | yes — max() over fast records |
 | target apogee | ✓ (13-bit AGL) | – | – | – | also in SD config block |
