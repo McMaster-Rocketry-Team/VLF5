@@ -26,5 +26,6 @@ impl AvionicsMode {
     /// and time on the ground after landing don't fill the SD card.
     pub fn should_log(&self) -> bool {
         matches!(self, AvionicsMode::Armed)
+        // true
     }
 }

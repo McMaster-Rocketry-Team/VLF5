@@ -62,7 +62,6 @@ pub async fn self_test_mode(
             out1_enable: false,
             out2_enable: false,
             out3_enable: false,
-            out4_enable: false,
         });
         Timer::after_millis(1000).await;
         can_central.clear();
@@ -141,7 +140,6 @@ pub async fn self_test_mode(
                 out1_enable: true,
                 out2_enable: false,
                 out3_enable: false,
-                out4_enable: false,
             });
             Timer::after_millis(10000).await; // longer time for ICARUS to home
             let out1_power_good = if let Some(amp_status_message) =
@@ -168,25 +166,25 @@ pub async fn self_test_mode(
             });
         }
 
-        // test amp out 4 (was amp out 2)
+        // recovery beacon is on battery 1
+        // test amp out 1
         {
             amp_control_watch.sender().send(AmpControlMessage {
-                out1_enable: false,
+                out1_enable: true,
                 out2_enable: false,
                 out3_enable: false,
-                out4_enable: true,
             });
             Timer::after_millis(10000).await; // longer time for payload sdrm to connect to payload
-            let out4_power_good = if let Some(amp_status_message) =
+            let out1_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
-                amp_status_message.out4.status == PowerOutputStatus::PowerGood
+                amp_status_message.out1.status == PowerOutputStatus::PowerGood
             } else {
                 self_test_partial_failure = true;
                 false
             };
             packet_builder.update(|packet| {
-                packet.amp_out4_power_good = out4_power_good;
+                packet.amp_out1_power_good = out1_power_good;
             });
 
             packet_builder.update(|packet| {
@@ -225,7 +223,6 @@ pub async fn self_test_mode(
                 out1_enable: false,
                 out2_enable: false,
                 out3_enable: true,
-                out4_enable: false,
             });
             Timer::after_millis(2000).await;
             let out3_power_good = if let Some(amp_status_message) =
@@ -262,7 +259,6 @@ pub async fn self_test_mode(
                 out1_enable: false,
                 out2_enable: true,
                 out3_enable: false,
-                out4_enable: false,
             });
             Timer::after_millis(2000).await;
             let out2_power_good = if let Some(amp_status_message) =
@@ -282,7 +278,6 @@ pub async fn self_test_mode(
             out1_enable: false,
             out2_enable: false,
             out3_enable: false,
-            out4_enable: false,
         });
 
         if self_test_failed {

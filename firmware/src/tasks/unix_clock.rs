@@ -26,7 +26,7 @@ pub async fn unix_clock_task(
 
     gps_reading.get().await;
     loop {
-        pps.wait_for_high().await;
+        pps.wait_for_rising_edge().await;
         let pps_time_us = Instant::now().as_micros();
         if let Some(SensorReading {
             timestamp_us: reading_timestamp_us,

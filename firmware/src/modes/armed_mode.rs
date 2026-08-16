@@ -75,7 +75,6 @@ pub async fn armed_mode(
         out1_enable: true,
         out2_enable: false,
         out3_enable: true,
-        out4_enable: true,
     });
 
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
@@ -288,8 +287,6 @@ pub async fn armed_mode(
                     packet.amp_out2 = message.out2.status;
                     packet.amp_out3_overwrote = message.out3.overwrote;
                     packet.amp_out3 = message.out3.status;
-                    packet.amp_out4_overwrote = message.out4.overwrote;
-                    packet.amp_out4 = message.out4.status;
                 }
                 CanBusMessageEnum::BrightnessMeasurement(message) => {
                     if node_id == MAIN_BULKHEAD_NODE_ID {

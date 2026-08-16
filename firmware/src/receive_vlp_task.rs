@@ -71,10 +71,10 @@ pub async fn receive_vlp_task(
                         can_sender.send(AmpResetOutputMessage { output: 3 }.into());
                         NodeSelection::None
                     }
-                    DeviceToReset::AMPOut4 => {
-                        can_sender.send(AmpResetOutputMessage { output: 4 }.into());
-                        NodeSelection::None
-                    }
+                    // DeviceToReset::AMPOut4 => {
+                    //     can_sender.send(AmpResetOutputMessage { output: 4 }.into());
+                    //     NodeSelection::None
+                    // }
 
                     DeviceToReset::VoidLake => NodeSelection::NodeType(VOID_LAKE_NODE_TYPE),
                     DeviceToReset::AMP => NodeSelection::NodeType(AMP_NODE_TYPE),
@@ -129,7 +129,7 @@ pub async fn receive_vlp_task(
                         out1: packet.out1,
                         out2: packet.out2,
                         out3: packet.out3,
-                        out4: packet.out4,
+                        // out4: packet.out4,
                     }
                     .into(),
                 );
