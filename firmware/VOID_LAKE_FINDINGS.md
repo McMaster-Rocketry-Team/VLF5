@@ -47,7 +47,8 @@ both armed_mode sites. (Superseded 2026-08-15: `FlightStage` is now an honest
 Additionally the airbrakes start signal and the CAN
 `RocketStateMessage.is_coasting` field (previously filled with an
 ascending-and-subsonic proxy that was true mid-burn) now use the real flag, so
-airbrakes can no longer be commanded under thrust.
+airbrakes can no longer be commanded under thrust. (Superseded 2026-08-16:
+`RocketStateMessage` is removed entirely — nothing on the bus consumed it.)
 
 ## 3. KF ran at half its design rate — velocity 2× too high — FIXED
 

@@ -18,7 +18,7 @@ use firmware_common_new::{
         messages::custom_payload_status::PAYLOAD_READING_UNAVAILABLE, node_types::AMP_NODE_TYPE,
     },
     flight_data_record::{
-        AB_APOGEE, AB_BARO_TRUSTED, AB_BURNOUT, AB_VOTE_DRAG, FlightDataFastRecord,
+        AB_APOGEE, AB_BARO_TRUSTED, AB_BURNOUT, AB_SUBSONIC_DRAG, FlightDataFastRecord,
         FlightDataSlowRecord, LogRecord, VALID_BARO, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
         VALID_IMU, VALID_MAG,
     },
@@ -110,7 +110,7 @@ const SLOW_INTERVAL: Duration = Duration::from_millis(100);
 ///   possibly lockout-frozen output. Logging only.
 /// * `(ab_altitude_asl, ab_vertical_velocity, ab_tilt_deg, ab_flags)` — the
 ///   airbrakes estimator, with `ab_flags` packing the `AB_*` bits (the
-///   lockout-exit drag vote, the burnout latch, baro-trusted/born, apogee
+///   lockout-exit drag check, the burnout latch, baro-trusted/born, apogee
 ///   latch).
 ///
 /// NaN for any value this session's estimators have not produced yet.
@@ -118,10 +118,16 @@ fn estimator_log_state(est: &FlightEstimators) -> ((f32, f32), (f32, f32, f32, u
     let dep = est.deployment_estimator();
     let kf = (dep.kf_altitude_asl(), dep.kf_vertical_velocity());
 
-    let ab = est.airbrakes_estimator();
+    // Retired (post-apogee) reads the same as not-yet-born: NaN values and
+    // clear flags. The estimator is gone, so there is genuinely nothing to
+    // report — `flight_stage` is what dates the transition.
+    let Some(ab) = est.airbrakes_estimator() else {
+        return (kf, (f32::NAN, f32::NAN, f32::NAN, 0));
+    };
+
     let mut flags = 0u8;
-    if ab.lockout_vote().unwrap_or(false) {
-        flags |= AB_VOTE_DRAG;
+    if ab.subsonic_by_drag().unwrap_or(false) {
+        flags |= AB_SUBSONIC_DRAG;
     }
     if ab.burnout_detected() {
         flags |= AB_BURNOUT;

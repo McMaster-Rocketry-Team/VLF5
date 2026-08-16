@@ -1,6 +1,8 @@
 use core::{cell::RefCell, future::join};
 
-use air_brakes_controller_core::{AirBrakesMPC, FlightEstimators, ImuSample, RocketState};
+use air_brakes_controller_core::{
+    AirBrakesMPC, FlightEstimators, ImuSample, RocketState, approximate_speed_of_sound,
+};
 use defmt::info;
 use embassy_futures::select::select;
 use embassy_sync::{
@@ -14,7 +16,7 @@ use firmware_common_new::{
         messages::{
             CanBusMessageEnum, airbrakes_control::AirBrakesControlMessage,
             amp_control::AmpControlMessage, custom_payload_status::CustomPayloadStatusMessage,
-            rocket_state::RocketStateMessage, vl_status::FlightStage,
+            vl_status::FlightStage,
         },
         node_types::{AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE},
         sender::CanSender,
@@ -174,29 +176,36 @@ pub async fn armed_mode(
 
                 estimators.lock(|s| {
                     let est = s.borrow();
+                    // All zero once the estimator is retired at apogee, same
+                    // as before it is born. The packet has no absence
+                    // encoding for these, so `flight_stage` is what tells
+                    // the ground which side of the flight a zero is from.
                     let ab = est.airbrakes_estimator();
 
                     // Airbrakes estimator health: the lockout-exit drag
-                    // vote (false outside the dead-reckoning phase),
+                    // check (false outside the dead-reckoning phase),
                     // whether the vertical filter is born, apogee latch.
-                    packet.ab_vote_drag = ab.lockout_vote().unwrap_or(false);
-                    packet.ab_born = ab.baro_trusted();
-                    packet.ab_apogee = ab.is_apogee();
-                    // Airbrakes-estimator altitude/velocity; 0 while the
-                    // estimator has no output (on the pad, so no pad
-                    // reference exists yet either).
-                    packet.ab_altitude_agl =
-                        match (ab.altitude_asl(), ab.launch_pad_altitude_asl()) {
-                            (Some(altitude_asl), Some(launch_pad_altitude_asl)) => {
-                                altitude_asl - launch_pad_altitude_asl
-                            }
-                            _ => 0.0,
-                        };
-                    packet.ab_vertical_velocity = ab.velocity().map(|v| v.y).unwrap_or(0.0);
+                    packet.ab_subsonic_drag =
+                        ab.and_then(|ab| ab.subsonic_by_drag()).unwrap_or(false);
+                    packet.ab_born = ab.is_some_and(|ab| ab.baro_trusted());
+                    packet.ab_apogee = ab.is_some_and(|ab| ab.is_apogee());
+                    packet.ab_altitude_agl = match ab
+                        .map(|ab| (ab.altitude_asl(), ab.launch_pad_altitude_asl()))
+                    {
+                        Some((Some(altitude_asl), Some(launch_pad_altitude_asl))) => {
+                            altitude_asl - launch_pad_altitude_asl
+                        }
+                        _ => 0.0,
+                    };
+                    packet.ab_vertical_velocity =
+                        ab.and_then(|ab| ab.velocity()).map(|v| v.y).unwrap_or(0.0);
 
                     // Tilt is the airbrakes estimator's gyro dead reckoning
-                    // (0 before ignition and after its apogee latch).
-                    let ab_tilt_deg = ab.tilt().map(|t| t.to_degrees()).unwrap_or(0.0);
+                    // (0 before ignition and after retirement).
+                    let ab_tilt_deg = ab
+                        .and_then(|ab| ab.tilt())
+                        .map(|t| t.to_degrees())
+                        .unwrap_or(0.0);
 
                     // The flight part of the stage mirrors `RocketState` 1:1.
                     match est.state() {
@@ -330,64 +339,6 @@ pub async fn armed_mode(
         }
     };
 
-    let send_rocket_state_fut = async {
-        let mut ticker = Ticker::every(Duration::from_hz(10));
-
-        loop {
-            // Velocity/altitude from the airbrakes estimator whenever its
-            // vertical filter is running (2D velocity, tilt included) — gate
-            // or not; slow-filter vertical-only state otherwise.
-            let (state, ab_state) = estimators.lock(|s| {
-                let est = s.borrow();
-                let ab = est.airbrakes_estimator();
-                let ab_state = match (ab.altitude_asl(), ab.velocity()) {
-                    (Some(alt), Some(velocity)) => Some((alt, velocity)),
-                    _ => None,
-                };
-                (est.state(), ab_state)
-            });
-            let message = match state {
-                RocketState::Ascent {
-                    vertical_velocity,
-                    altitude_asl,
-                    launch_pad_altitude_asl,
-                } => {
-                    let (velocity, altitude_agl) = match ab_state {
-                        Some((ab_alt, v)) => ([v.x, v.y], ab_alt - launch_pad_altitude_asl),
-                        None => (
-                            [0.0, vertical_velocity],
-                            altitude_asl - launch_pad_altitude_asl,
-                        ),
-                    };
-                    Some(RocketStateMessage::new(
-                        unix_clock.now_us_or_boot_time(),
-                        &velocity,
-                        altitude_agl,
-                    ))
-                }
-                // The slow KF is frozen (no numbers to report), but the
-                // airbrakes filter may already be alive — its 2-of-3 vote
-                // exits earlier than the slow filter's padded timer.
-                RocketState::MachLockout {
-                    launch_pad_altitude_asl,
-                } => ab_state.map(|(ab_alt, v)| {
-                    RocketStateMessage::new(
-                        unix_clock.now_us_or_boot_time(),
-                        &[v.x, v.y],
-                        ab_alt - launch_pad_altitude_asl,
-                    )
-                }),
-                _ => None,
-            };
-
-            if let Some(message) = message {
-                can_sender.send(message.into());
-            }
-
-            ticker.next().await;
-        }
-    };
-
     let start_airbrakes_signal = Signal::<NoopRawMutex, ()>::new();
     let update_estimators_fut = async {
         let mut airbrakes_started = false;
@@ -407,11 +358,10 @@ pub async fn armed_mode(
                 gyro: imu.gyro * (core::f32::consts::PI / 180.0),
             });
 
-            // One update per ~416 Hz sample; the deployment-speed feed to
-            // vote V2 (abstaining during the slow filter's Mach lockout)
-            // happens inside. Nothing is published for the SD log here — the
-            // logger reads the estimators directly, so there is no cached copy
-            // that could outlive the session that produced it.
+            // One update per ~416 Hz sample; retiring the airbrakes half at
+            // apogee happens inside. Nothing is published for the SD log here
+            // — the logger reads the estimators directly, so there is no
+            // cached copy that could outlive the session that produced it.
             let (pyro, state, mpc_states) = estimators.lock(|s| {
                 let mut est = s.borrow_mut();
                 let pyro = est.update(reading.timestamp_us, imu.as_ref(), baro_altitude_asl);
@@ -426,7 +376,7 @@ pub async fn armed_mode(
                 let _ = fire_signal.try_send(pyro);
             }
 
-            // Act-once latch. Permission (coasting, filter alive, ascending,
+            // Act-once latch. Permission (not retired, filter alive,
             // subsonic on the airbrakes filter's own state) lives inside
             // `airbrakes_mpc_states` — Some exactly when brakes may open.
             if !airbrakes_started && mpc_states.is_some() {
@@ -484,7 +434,7 @@ pub async fn armed_mode(
             estimators.lock(|s| s.borrow().deployment_estimator().launch_pad_altitude_asl());
 
         // The same airframe the airbrakes estimator inverts for its drag
-        // vote — one field, so the lockout and the apogee prediction cannot
+        // check — one field, so the lockout and the apogee prediction cannot
         // be flying different rockets.
         let airbrakes_mpc = AirBrakesMPC::new(
             FLIGHT_CONFIG.airbrakes.rocket.clone(),
@@ -495,6 +445,8 @@ pub async fn armed_mode(
         );
 
         let mut ticker = Ticker::every(Duration::from_hz(10));
+        let mut mpc_went_full = false;
+        let mut validating = false;
         loop {
             // Run condition and MPC state are the same Option: Some exactly
             // while the airbrakes are permitted to be open (coasting, filter
@@ -504,7 +456,27 @@ pub async fn armed_mode(
             let Some(s) = estimators.lock(|s| s.borrow().airbrakes_mpc_states()) else {
                 break;
             };
-            let airbrake_extension_percentage = airbrakes_mpc.update(s.altitude_asl, s.velocity);
+            let mpc_extension = airbrakes_mpc.update(s.altitude_asl, s.velocity);
+            mpc_went_full |= mpc_extension >= 0.99;
+
+            // An undershoot barely moves the brakes, leaving the flight with no
+            // evidence they work — so once slow enough to be harmless (full
+            // extension costs ~0.1 m/s^2 at Mach 0.1), open them fully anyway.
+            // Vertical velocity, like the gate's own `MAX_OPEN_MACH`, so it
+            // always sweeps through before apogee — total airspeed would not on
+            // a tilted flight.
+            if !validating
+                && !mpc_went_full
+                && s.velocity.y < 0.1 * approximate_speed_of_sound(s.altitude_asl)
+            {
+                info!(
+                    "airbrakes: MPC never reached full extension; forcing 100% for validation at {} m/s",
+                    s.velocity.y
+                );
+                validating = true;
+            }
+
+            let airbrake_extension_percentage = if validating { 1.0 } else { mpc_extension };
             publish_airbrakes_commanded(air_brakes_watch, airbrake_extension_percentage);
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
             packet_builder.update(|packet| {
@@ -547,7 +519,6 @@ pub async fn armed_mode(
         update_packet_sensor_fut,
         update_packet_can_fut,
         send_telemetry_packet_fut,
-        send_rocket_state_fut,
         update_estimators_fut,
         control_airbrakes_fut,
         log_flight_data_fut,

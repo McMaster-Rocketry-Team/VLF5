@@ -119,8 +119,9 @@ vertical-filter birth → Tracking → apogee latch. The MPC runs on that estima
 state, and `armed_mode` carries no HIL overrides — it is identical to flight.
 
 Future work: a supersonic script variant (Mach ~1.5 profile, synthetic static-port error
-`c·v²` plus shock garbage on the baro, Mach lockout configured) would exercise the 2-of-3
-lockout-exit vote and the born-subsonic birth on the bench, not just in desktop replays.
+`c·v²` plus shock garbage on the baro, Mach lockout configured) would exercise the
+lockout-exit drag check and the born-subsonic birth on the bench, not just in desktop
+replays.
 
 ### Everything else is real
 
@@ -178,7 +179,16 @@ Watch for panics (`[ERROR]`, `panicked`, `Firmware exited`) while the plot runs.
 
 Airbrakes: HIL exercises the real start gate and the MPC on the airbrakes estimator's own
 KF state (no fallback — the flight path exactly); the scripted trajectory is open-loop, so
-the brakes are commanded but do not change the baro/IMU profile.
+the brakes are commanded but do not change the baro/IMU profile. The near-apogee
+validation deploy (forced 100% below Mach 0.1 when the MPC never went full) does *not*
+fire on the bench: the scripted flight overshoots the 3000 m target, so the MPC commands
+full extension early. To exercise it, arm with a target apogee well above the scripted
+~3.3 km — then expect `forcing 100% for validation` in the last few seconds of ascent.
+
+Either way, expect one `retiring airbrakes estimator (descending: …, below horizon: …,
+deployment apogee: …)` line at apogee, and the `ab_*` telemetry/SD columns to go
+0/NaN from there through the whole descent. That line firing more than once, or the ab
+columns coming back after it, is a bug.
 
 ## SD dump with rocket-cli
 
