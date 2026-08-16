@@ -5,4 +5,9 @@ test on simulated data on openrocket
 repeated arm -> lowpower mode switch corrupt data?
 
 measure sensor noise
-payload message priority and message type
+airbrakes always enable near apogee
+sensor error?
+
+datapath between sensors, can bus, airbrakes, sd card, and telemetry
+
+joined fut jitter
