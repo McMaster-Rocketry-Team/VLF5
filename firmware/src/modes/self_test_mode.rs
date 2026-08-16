@@ -24,7 +24,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, ContinuityWatch, FlightStageMutex, OZYS_1_NODE_ID, OZYS_2_NODE_ID,
+    AvionicsModeWatch, ContinuityWatch, FlightStageMutex,
     VLStatusMutex,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
@@ -156,16 +156,12 @@ pub async fn self_test_mode(
             });
 
             packet_builder.update(|packet| {
-                if let Some(ozys_1) = can_central
-                    .get_nodes::<4>(OZYS_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == OZYS_1_NODE_ID)
-                {
-                    packet.ozys1 = NodeStatus::from_message(&ozys_1.status);
+                if let Some(ozys) = can_central.get_nodes::<1>(OZYS_NODE_TYPE).first() {
+                    packet.ozys = NodeStatus::from_message(&ozys.status);
                 } else {
-                    packet.ozys1 = NodeStatus::offline();
+                    packet.ozys = NodeStatus::offline();
                 }
-                if !packet.ozys1.healthy() {
+                if !packet.ozys.healthy() {
                     self_test_partial_failure = true;
                 }
 
@@ -203,21 +199,6 @@ pub async fn self_test_mode(
             };
             packet_builder.update(|packet| {
                 packet.amp_out3_power_good = out3_power_good;
-            });
-
-            packet_builder.update(|packet| {
-                if let Some(ozys_2) = can_central
-                    .get_nodes::<4>(OZYS_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == OZYS_2_NODE_ID)
-                {
-                    packet.ozys2 = NodeStatus::from_message(&ozys_2.status);
-                } else {
-                    packet.ozys2 = NodeStatus::offline();
-                }
-                if !packet.ozys2.healthy() {
-                    self_test_partial_failure = true;
-                }
             });
         }
 

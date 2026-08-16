@@ -36,7 +36,7 @@ use embassy_sync::{
     pubsub::PubSubBehavior as _,
     watch::{self, Watch},
 };
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use firmware_common_new::{
     can_bus::{
         custom_status::vl_custom_status::VLCustomStatus,
@@ -101,9 +101,6 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
     cr: 8,
     power: 22,
 };
-pub const OZYS_1_NODE_ID: u16 = 0x2B2;
-pub const OZYS_2_NODE_ID: u16 = 0x0E1;
-
 #[cfg(not(feature = "hil-replay"))]
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     profile: FlightProfile {
@@ -466,7 +463,32 @@ async fn low_prio_main(
     if !DISABLE_BUZZER {
         buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
         buzzer_pubsub.publish_immediate(BuzzerTone::Mid(250, 100));
-        buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 100));
+        // 500 ms of silence, not the usual 100: it separates the fixed
+        // power-on burst from the continuity report that follows, so the two
+        // do not run together as one uniform five-note run.
+        buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 500));
+
+        // Then report igniter continuity: two highs if both channels are
+        // good, two lows otherwise. `pyro_task` publishes its first reading
+        // ~10 ms after boot (it waits for the pyro supply to come up), but
+        // boot must not hang on it — a timeout counts as "not good", which is
+        // the honest answer when continuity cannot be read at all.
+        let continuity = {
+            let mut receiver = continuity_watch.receiver().unwrap();
+            with_timeout(Duration::from_millis(500), receiver.get())
+                .await
+                .ok()
+        };
+        let both_good = continuity
+            .map(|c| c.pyro_main_continuity && c.pyro_drogue_continuity)
+            .unwrap_or(false);
+        if both_good {
+            buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 100));
+            buzzer_pubsub.publish_immediate(BuzzerTone::High(250, 100));
+        } else {
+            buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
+            buzzer_pubsub.publish_immediate(BuzzerTone::Low(250, 100));
+        }
     }
 
     loop {

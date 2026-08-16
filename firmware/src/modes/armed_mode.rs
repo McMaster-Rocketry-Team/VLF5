@@ -29,7 +29,6 @@ use firmware_common_new::{
 use crate::{
     AvionicsModeWatch, ContinuityWatch,
     FLIGHT_CONFIG, FireSignal, FlightEstimatorsMutex, FlightStageMutex, GPSReadingWatch,
-    OZYS_1_NODE_ID, OZYS_2_NODE_ID,
     SetTargetWatch, VLStatusMutex,
     tasks::data_logger::{
         AirBrakesWatch, AmpStateWatch, EstimatorLogWatch, PayloadStateWatch,
@@ -136,28 +135,12 @@ pub async fn armed_mode(
                     packet.icarus_uptime_s = 0;
                 }
 
-                if let Some(ozys_1) = can_central
-                    .get_nodes::<4>(OZYS_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == OZYS_1_NODE_ID)
-                {
-                    packet.ozys1_online = ozys_1.is_online();
-                    packet.ozys1_uptime_s = ozys_1.status.uptime_s;
+                if let Some(ozys) = can_central.get_nodes::<1>(OZYS_NODE_TYPE).first() {
+                    packet.ozys_online = ozys.is_online();
+                    packet.ozys_uptime_s = ozys.status.uptime_s;
                 } else {
-                    packet.ozys1_online = false;
-                    packet.ozys1_uptime_s = 0;
-                }
-
-                if let Some(ozys_2) = can_central
-                    .get_nodes::<4>(OZYS_NODE_TYPE)
-                    .iter()
-                    .find(|node| node.id == OZYS_2_NODE_ID)
-                {
-                    packet.ozys2_online = ozys_2.is_online();
-                    packet.ozys2_uptime_s = ozys_2.status.uptime_s;
-                } else {
-                    packet.ozys2_online = false;
-                    packet.ozys2_uptime_s = 0;
+                    packet.ozys_online = false;
+                    packet.ozys_uptime_s = 0;
                 }
 
                 if let Some(payload_sdrm) = can_central

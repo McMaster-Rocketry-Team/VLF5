@@ -16,17 +16,36 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant};
 use firmware_common_new::{
     can_bus::{
-        messages::custom_payload_status::PAYLOAD_READING_UNAVAILABLE, node_types::AMP_NODE_TYPE,
+        messages::custom_payload_status::PAYLOAD_READING_UNAVAILABLE,
+        node_types::{
+            AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
+        },
     },
     flight_data_record::{
         AIRBRAKES_APOGEE, AIRBRAKES_BARO_GATE_REJECT,
         AIRBRAKES_BARO_RESYNC, AIRBRAKES_BARO_TRUSTED, AIRBRAKES_BURNOUT,
         AIRBRAKES_SUBSONIC_DRAG, DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC,
         FlightDataFastRecord,
-        FlightDataSlowRecord, LogRecord, VALID_BATTERY, VALID_GPS_ALT, VALID_GPS_FIX,
-        VALID_IMU, VALID_MAG,
+        FlightDataSlowRecord, LogRecord, NodeStatusRecord, VALID_BATTERY, VALID_GPS_ALT,
+        VALID_GPS_FIX, VALID_IMU, VALID_MAG,
     },
 };
+
+/// The last heartbeat from the single node of `node_type`, or `offline()` when
+/// the node has never been heard from.
+///
+/// `online` is a 5 s timeout, so a node that has just gone quiet still reports
+/// its last-known health here — that is what the flag is for.
+fn node_status_record(
+    can_central: &CanCentral<NoopRawMutex>,
+    node_type: u8,
+) -> NodeStatusRecord {
+    can_central
+        .get_nodes::<1>(node_type)
+        .first()
+        .map(|node| NodeStatusRecord::from_message(node.is_online(), &node.status))
+        .unwrap_or_else(NodeStatusRecord::offline)
+}
 
 /// Queue between the IMU-clocked logger and the SD writer.
 pub const FLIGHT_DATA_CHANNEL_DEPTH: usize = 512;
@@ -357,12 +376,12 @@ pub async fn log_flight_data(
                 if g.lat_lon.is_some() {
                     slow_valid |= VALID_GPS_FIX;
                 }
-                if g.altitude_asl.is_some() {
+                if g.gps_altitude_asl.is_some() {
                     slow_valid |= VALID_GPS_ALT;
                 }
                 (
                     g.lat_lon.unwrap_or((0.0, 0.0)),
-                    g.altitude_asl.unwrap_or(0.0),
+                    g.gps_altitude_asl.unwrap_or(0.0),
                     g.num_of_fix_satellites,
                     g.hdop.unwrap_or(0.0),
                     g.vdop.unwrap_or(0.0),
@@ -405,11 +424,13 @@ pub async fn log_flight_data(
             Some(a) => (a.shared_battery_v, a.out_status),
             None => (0.0, 0),
         };
-        let amp_online = can_central
-            .get_nodes::<1>(AMP_NODE_TYPE)
-            .first()
-            .map(|node| node.is_online())
-            .unwrap_or(false);
+        // The whole heartbeat, not just liveness: the downlink can only afford
+        // two bits per node, so the log is the only place a mid-flight reboot
+        // or a health change is recoverable.
+        let amp_node = node_status_record(can_central, AMP_NODE_TYPE);
+        let icarus_node = node_status_record(can_central, ICARUS_NODE_TYPE);
+        let ozys_node = node_status_record(can_central, OZYS_NODE_TYPE);
+        let payload_sdrm_node = node_status_record(can_central, PAYLOAD_SDRM_NODE_TYPE);
 
         let sd_ok = vl_status.lock(|s| s.borrow().sd_ok);
         if !sd_ok {
@@ -457,7 +478,10 @@ pub async fn log_flight_data(
             air_brakes_servo_temp,
             air_brakes_validation_deploy,
             mpc_predicted_apogee_agl,
-            amp_online,
+            amp_node,
+            icarus_node,
+            ozys_node,
+            payload_sdrm_node,
             amp_out_status,
             amp_shared_battery_v,
             payload_epm_batt_mv: payload.epm_batt_mv,

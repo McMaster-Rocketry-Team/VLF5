@@ -2,23 +2,23 @@
 
 Reference for what data leaves the flight computer, on which channel, at what
 rate, and whether a value lost from one channel can be reconstructed from
-another after the flight. Storage format v10. Updated 2026-08-16.
+another after the flight. Storage format v11. Updated 2026-08-16.
 
 ## SD flight log (armed mode only)
 
 Two tagged record types interleaved into 512 B blocks (508 usable + CRC32),
 superblock flushed every 250 ms. Decoding: `rocket-cli download-file <out.csv>`
 (one CSV row per fast record, latest slow snapshot merged in). Storage format
-v10 is **not** backward compatible: logs written by older firmware are reported
+v11 is **not** backward compatible: logs written by older firmware are reported
 as unsupported by rocket-cli, and the firmware starts a fresh log over them on
 the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
 | **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 97 B | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, 0 until the clock locks), accel ×3, gyro ×3, baro pressure, mag ×3 (100 Hz source, resampled), `deployment_kf_altitude_asl` + `deployment_kf_vertical_velocity` + `deployment_flags` (baro innovation-gate reject + resync, per sample), `airbrakes_kf_altitude_asl` + `airbrakes_kf_vertical_velocity` + `airbrakes_kf_tilt_deg`, `airbrakes_flags` (lockout-exit drag check, burnout latch, filter-born, apogee latch, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), valid bitmask |
-| **Slow** (tag 0x02) | 10 Hz | 105 B | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **airbrakes commanded + actual extension** + **validation-deploy flag** + **servo temp**, **MPC predicted apogee AGL**, **amp online + output statuses + shared battery voltage**, **payload EPM battery mV + six rail currents mA + three SEM actuator step counts** (2 Hz source, `0xFFFF` = unavailable), valid bitmask |
+| **Slow** (tag 0x02) | 10 Hz | 153 B | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **airbrakes commanded + actual extension** + **validation-deploy flag** + **servo temp**, **MPC predicted apogee AGL**, **full `NodeStatus` for AMP / Icarus / OzYS / payload SDRM** (uptime, health, mode, custom status), **amp output statuses + shared battery voltage**, **payload EPM battery mV + six rail currents mA + three SEM actuator step counts** (2 Hz source, `0xFFFF` = unavailable), valid bitmask |
 
-Throughput ≈ 42 kB/s ≈ 153 MB/hour; capacity is a non-issue.
+Throughput ≈ 43 kB/s ≈ 154 MB/hour; capacity is a non-issue.
 
 NaN means "no source is producing this", uniformly: the `deployment_*` fields
 until the armed-mode estimator produces its first sample (a few ms after
@@ -49,9 +49,9 @@ into `Ascent` on the wire), so the frozen stretch is identified by the
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 41 B (325/328 bits — 3 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes born**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
+| `TelemetryPacket` | 37 B (293/296 bits — 3 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes born**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OzYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
 | `LowPowerTelemetryPacket` | 11 B | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
-| `LandedTelemetryPacket` | 12 B | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
+| `LandedTelemetryPacket` | 11 B | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
 Stage on the downlink: during the deployment estimator's Mach lockout the
 packet reports `deployment_kf_altitude_agl` and `deployment_kf_vertical_velocity`
@@ -95,8 +95,10 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | airbrakes baro gate reject, resync | – | – | ✓ (`airbrakes_flags` bits, exact per sample) | – | logged |
 | KF innovation magnitude | – | – | – | – | yes — replay pressure |
 | launch pad altitude | – | – | – | – | yes — `deployment_kf_altitude_asl` while on pad |
-| GPS lat/lon, sat count | ✓ | ✓ all three | – | ✓ | logged |
-| GPS altitude, DOPs | – | – | – | ✓ | logged |
+| GPS `lat_lon` | ✓ (23-bit lat / 24-bit lon, ~2.4 m) | ✓ all three | – | ✓ (f64, exact) | logged |
+| `num_of_fix_satellites` | ✓ (5-bit, **saturates at 31**) | ✓ (full u8) | – | ✓ (full u8) | logged |
+| `gps_altitude_asl` | – | – | – | ✓ (`VALID_GPS_ALT`) | logged |
+| `hdop` / `vdop` / `pdop` | – | – | – | ✓ | logged — but 0.0 when absent, see below |
 | GPS UTC time | – | – | ✓ (unix µs, full rate) | – | logged — absolute time for video/GCM correlation |
 | VL battery voltage | ✓ | ✓ | – | ✓ | logged |
 | pyro continuity (main/drogue) | ✓ | – | ✓ | – | logged |
@@ -108,11 +110,14 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | Icarus servo current | – | – | – | – | **nowhere** — the field was dropped from `IcarusStatusMessage`; the servo does not measure current |
 | MPC predicted apogee | ✓ (14-bit AGL) | – | – | ✓ (NaN while the MPC is not running) | logged |
 | amp: online, outputs ×3, shared battery | ✓ | ✓/LD | – | ✓ | logged |
-| Icarus / OzYS / SDRM online, uptime | ✓ | – | – | – | **not derivable** — radio only |
-| payload stack status | ✓ (11-bit) | – | – | – | **not derivable** — radio only |
-| EPM battery voltage | ✓ (1+10 bit, 11–17 V) | – | – | ✓ (raw mV) | logged |
-| EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (1+10 bit each, 0–10.23 A @ 10 mA) | – | – | ✓ (raw mA) | logged |
-| SEM actuator steps ×3 | ✓ (1+10 bit each, full u16 @ ~64 steps) | – | – | ✓ (raw steps) | logged |
+| Icarus / OzYS / SDRM online + rebooted | ✓ (2 bits each) | – | – | ✓ (full `NodeStatus`) | logged |
+| node uptime, health, mode (all four) | – | – | – | ✓ | logged |
+| OzYS disk usage, gauge-connected, `sd_ok` | – | – | – | ✓ (`ozys_custom_status`, decode with `OzysCustomStatus`) | logged |
+| OzYS strain measurements | – | – | – | – | **nowhere** — OzYS logs to its own SD |
+| payload stack flags ×8 (`payload_epm_alive` etc.) | ✓ (1 bit each) | – | – | – | **not derivable** — radio only |
+| EPM battery voltage | ✓ (11-bit, 0–17 V; **0 = unavailable**) | – | – | ✓ (raw mV, `0xFFFF` = unavailable) | logged |
+| EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (7-bit each, 0–5 A @ ~39 mA; **0 = unavailable**) | – | – | ✓ (raw mA, `0xFFFF` = unavailable) | logged |
+| SEM actuator steps ×3 | ✓ (10-bit each, full u16 @ ~64 steps; **0 = unavailable**) | – | – | ✓ (raw steps, `0xFFFF` = unavailable) | logged |
 | VL health flags (imu_ok, sd_ok, …) | – | – | – | – | CAN node status only; not persisted |
 
 Takeaways:
@@ -124,12 +129,29 @@ Takeaways:
   raw mV / mA / step values (with the payload's own `0xFFFF` = unavailable
   sentinel), so an RF-link drop does not lose EPM rails or actuator positions.
   The downlink copies are quantized; the SD copies are exact.
-- The downlink packet is 41 B (52 B on air after the type byte and
-  reed-solomon ecc): 1642 ms time-on-air at SF12 / 250 kHz / CR 4:8, inside
-  the 2 s period. Time-on-air steps at 50 / 55 / 60 bytes on air, so anything
-  from 37 to 43 B costs exactly this much air time — the next saving is at
-  36 B.
-- Still radio-only: payload stack status, Icarus/OzYS/SDRM health.
+- The downlink packet is 37 B — 47 B on air, after the type byte and
+  reed-solomon ecc (`(n+1) + (n+1)/4`). Every packet is sized to its contents,
+  so the 3 spare bits here are padding, not budget. The symbol count steps at
+  50 / 55 / 60 bytes on air, so there is room to grow to 38 B before air time
+  increases; past that it costs a step. Time-on-air is lower than the 1642 ms
+  quoted for the old 41 B packet and should be re-measured.
+  The payload stack owns 93 of the 293 used bits (32%): 8 for the stack flags,
+  11 for the EPM battery, 42 for the six rails, 30 for the three actuators,
+  2 for SDRM liveness. Every other CAN node together costs 33.
+- Payload readings have **no validity bit on the downlink**: a reading the
+  payload could not take is sent as 0, so a dead INA and a rail drawing nothing
+  look the same live. The SD slow record keeps the CAN `0xFFFF` sentinel, so
+  post-flight the distinction survives. The EPM battery factory starts at 0 V
+  rather than 11 V for this reason — an 11 V floor would have decoded an
+  unavailable reading as a plausible low pack.
+- Every CAN node's heartbeat is now on SD in full: uptime, health, mode and
+  the 11-bit custom status, at 10 Hz, for AMP / Icarus / OzYS / payload SDRM.
+  The downlink still compresses each to two bits because it has no room, so
+  the log is the only place a mid-flight reboot or health change is
+  recoverable — a reboot is `uptime_s` stepping backwards, which the packet's
+  derived `uptime_s < 5` bit misses entirely if it lands between two 2 s
+  packets. There is one OzYS on the rocket this year, so it is addressed by
+  node type like every other node rather than by a hardcoded node ID.
   A 1 Hz CAN-health snapshot record on SD would close the remainder.
 - The commanded extension is not always the MPC's output: if the MPC never
   asks for full extension the whole way up (what an undershoot looks like),
@@ -189,6 +211,16 @@ Takeaways:
   transient bus error costs one skipped tick (~2.4 ms), and anything longer is
   a dead sensor, which ends the log rather than padding it. `sequence` still
   gaps for samples lost between the sensor and the card.
+- The packet's satellite count is 5 bits and **saturates at 31** rather than
+  wrapping. It has to: packed_struct truncates, so a 32-satellite fix would
+  have downlinked as 0 — exactly the reading that means "no fix, do not fly".
+  31 on the downlink means "31 or more"; the SD log and the low-power / landed
+  packets carry the full count.
+- GPS is the one part of the slow record that signals absence with validity
+  bits (`VALID_GPS_FIX`, `VALID_GPS_ALT`) rather than NaN. The DOPs are covered
+  by neither: with no fix they log as **0.0, which is not a sentinel but the
+  ideal value**, so "no DOP reported" reads as "geometry as good as it gets".
+  Check `VALID_GPS_FIX` before believing a DOP column.
 - `calibration_complete()` (airbrakes pad calibration, a launch-readiness
   condition) is visible only on RTT — it has no CAN/telemetry slot. The
   natural home is a VLCustomStatus bit on the CAN heartbeat, relayed by the

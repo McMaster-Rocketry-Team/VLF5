@@ -1,4 +1,3 @@
-log predicted altitude
 test on simulated data on openrocket
 Some vs None instead of NaN
 mach lockout absence is inconsistent between channels: the packet reports

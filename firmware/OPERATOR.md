@@ -24,8 +24,17 @@ If ground-station fails to open or crashes, check that exactly one GCM is plugge
 
 ## 1. Power on — self-test beeps
 
-1. Power on VLF5.
-2. Wait for self-test to finish (about half a minute or more). You may hear a short burst right at power-on — ignore that.
+1. Power on VLF5. Right away you get **five beeps**: Low, Mid, High (VLF5 is alive),
+   then a short pause, then two more reporting igniter continuity:
+
+| Meaning | Last two beeps |
+|--------|--------|
+| **Both igniters have continuity** | High, High |
+| **One or both do not** | Low, Low |
+
+   Low-Low here is expected before the igniters are wired in. Once they are in,
+   Low-Low means a channel is open — fix it before continuing.
+2. Wait for self-test to finish (about half a minute or more).
 3. When self-test finishes, listen for **four beeps in a row**:
 
 | Meaning | Beeps |
@@ -99,6 +108,7 @@ rocket-cli clear-flight-log
 
 **Power on**
 
+- [ ] Hear power-on beeps; last two are High, High (both igniters have continuity)
 - [ ] Hear finish beeps (OK / partial / failed)
 
 **Before launch**
