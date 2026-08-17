@@ -155,11 +155,22 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
         // Boost holds 14 g for the whole 6.3 s burn, so 4 g clears easily.
         ignition_detection_acc_threshold: 4.0 * 9.81,
         mach_lockout: Some(MachLockoutConfig {
-            // Earliest simulated time below Mach 0.8: 17.52 s.
+            // Earliest simulated time below Mach 0.8: 17.52 s. This floor,
+            // not the velocity ceiling, is what actually keeps an early
+            // birth out: on the O3400 sim a 5x-wrong Cd moves birth only
+            // from 18.89 s to 18.52 s, because the check cannot speak before
+            // this.
             earliest_subsonic_after_ignition_us: 17_500_000,
             // Latest (17.57 s) x1.4; still 14 s before the earliest apogee.
             force_birth_after_ignition_us: 25_000_000,
         }),
+        // The Mach the CFD Cd table below is tabulated at (FDR Table 10 is a
+        // Mach 0.8, 4000 m sweep), which is also the speed below which the
+        // flaps may open — one fact, so one number. The drag check votes at
+        // it and the MPC gate refuses above it. Measured birth lands at Mach
+        // 0.726 nominal and 0.743 with a 5x-wrong Cd, so the gate is slack
+        // on a healthy flight without a second, higher constant.
+        max_open_mach: 0.8,
         rocket: RocketParameters {
             burnout_mass: 18.696,
             // FDR Table 10 — STAR-CCM+ drag at Mach 0.8 and 4000 m for 0/25/
@@ -194,6 +205,10 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     airbrakes: AirbrakesConfig {
         ignition_detection_acc_threshold: 4.0 * 9.81,
         mach_lockout: None,
+        // No lockout on this bench profile, so the drag check never reads
+        // this; it is only the MPC gate's ceiling here. Kept at the flight
+        // value so the gate behaves the same on the bench.
+        max_open_mach: 0.8,
         rocket: RocketParameters {
             burnout_mass: 17.607,
             cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],

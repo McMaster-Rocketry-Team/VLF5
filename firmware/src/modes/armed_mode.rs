@@ -459,7 +459,7 @@ pub async fn armed_mode(
             // An undershoot barely moves the brakes, leaving the flight with no
             // evidence they work — so once slow enough to be harmless (full
             // extension costs ~0.1 m/s^2 at Mach 0.1), open them fully anyway.
-            // Vertical velocity, like the gate's own `MAX_OPEN_MACH`, so it
+            // Vertical velocity, like the gate's own `max_open_mach`, so it
             // always sweeps through before apogee — total airspeed would not on
             // a tilted flight.
             if !validating
