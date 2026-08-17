@@ -23,4 +23,5 @@ Pad ops (beeps + rocket-cli): [OPERATOR.md](OPERATOR.md).
 
 # Hardware-in-the-Loop (HIL)
 
-In-process sensor/VLP replay plots (`hil-dual` / `hil-single`) are documented in [HIL.md](HIL.md).
+The HIL model itself lives in `src/hil/mod.rs`. Bench identity, measured hardware properties,
+verified runs and known gaps: [HIL2.md](HIL2.md).

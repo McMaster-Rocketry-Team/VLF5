@@ -13,7 +13,9 @@
 //! still read on its real data-ready interrupt, so loop pacing and sample
 //! timestamps stay genuine; only the values are swapped. The board boots into
 //! SelfTest exactly like a flight build and is flown from rocket-cli over the
-//! radio (see the crate-root [`HIL.md`](../../HIL.md) for the plot guide).
+//! radio — except under `boot-armed`, which `hil-dual` implies. The crate-root
+//! [`HIL2.md`](../../HIL2.md) carries the bench specifics: probe identification,
+//! measured hardware properties, verified runs, and what HIL does not prove.
 //!
 //! Because the real pyro task drives real GPIO in HIL,
 //! **never flash a HIL build with live e-matches connected.**
