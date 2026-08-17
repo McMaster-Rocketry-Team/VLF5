@@ -178,6 +178,15 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
             earliest_subsonic_after_ignition_us: 17_500_000,
             // Latest (17.57 s) x1.4; still 14 s before the earliest apogee.
             force_birth_after_ignition_us: 25_000_000,
+            // The O3400 crosses Mach 0.8 at 6734 m in the sim the two timers
+            // above come from; this is that, rounded up, since erring HIGH
+            // reads density low and airspeed high and so only ever delays
+            // the exit. The N2900 backup crosses 1151 m lower (5583 m), and
+            // taking the higher of the two is the same one-sided choice —
+            // flying the backup then makes the check vote at Mach 0.736
+            // instead of 0.796, which `mach_lockout_timers_bracket_every_simulation`
+            // asserts for both motors.
+            subsonic_crossing_altitude_asl: 6800.0,
         }),
         // The Mach the CFD Cd table below is tabulated at (FDR Table 10 is a
         // Mach 0.8, 4000 m sweep), which is also the speed below which the
