@@ -1,3 +1,7 @@
+// `sleep!` resolves through this import in the flight binary but not in every
+// bench binary that shares this driver, so it is unused in some targets and
+// required in others.
+#[allow(unused_imports)]
 use crate::sleep;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_hal_async::spi::SpiDevice;
@@ -60,7 +64,29 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
         }
     }
 
-    pub async fn reset(&mut self) -> Result<(), B::Error> {
+    /// Reset the part, read its calibration PROM, and confirm it is really
+    /// there.
+    ///
+    /// `Ok(false)` means every SPI transfer completed but the PROM readback
+    /// cannot have come from a calibrated MS5607 — an absent, unpowered or
+    /// mis-wired barometer. This part has no `WHO_AM_I`, so the PROM is the
+    /// only identity evidence it offers, and SPI's lack of acknowledgement
+    /// means `Ok(_)` on its own proves nothing about the device.
+    ///
+    /// The test is deliberately the weakest one that still catches a dead bus:
+    /// all six coefficients reading back identical. That is precisely the
+    /// signature of an idle MISO line — held low (all `0x0000`) or floating /
+    /// pulled up (all `0xFFFF`) — and it also catches a stuck-at pattern of any
+    /// other value. Six equal 16-bit words cannot come out of a factory
+    /// calibration, so this cannot false-fail on healthy hardware, which
+    /// matters more than sensitivity here: a spurious failure at boot costs the
+    /// barometer for the whole flight, and with it apogee detection. A full
+    /// PROM CRC4 check would be strictly stronger and is the natural follow-up.
+    ///
+    /// Callers MUST treat `Ok(false)` as fatal for this sensor. The
+    /// coefficients are still stored either way, so `read` behaves exactly as
+    /// it did before for any caller that has not been updated.
+    pub async fn reset(&mut self) -> Result<bool, B::Error> {
         let (read_buffer, write_buffer) = create_buffer!(self, [0x1E]);
         // reset
         self.spi
@@ -91,7 +117,14 @@ impl<'a, B: SpiDevice> MS5607<'a, B> {
         self.last_d2 = None;
         self.reads_since_temp = 0;
 
-        Ok(())
+        // Every word identical => nothing answered on the bus. See the doc
+        // comment above for why this is the whole test.
+        let first = coefficients[0];
+        if coefficients.iter().all(|c| *c == first) {
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     pub async fn read(&mut self) -> Result<SensorReading<BootTimestamp, BaroData>, B::Error> {

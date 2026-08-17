@@ -4,7 +4,10 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Ticker, Timer};
 use firmware_common_new::{
     can_bus::{
-        messages::{CanBusMessageEnum, amp_control::AmpControlMessage, vl_status::FlightStage},
+        messages::{
+            CanBusMessageEnum, amp_control::AmpControlMessage,
+            amp_status::PowerOutputStatus, vl_status::FlightStage,
+        },
         node_types::AMP_NODE_TYPE,
     },
     vlp::{client::VLPAvionics, packets::landed_telemetry::LandedTelemetryPacketBuilder},
@@ -15,6 +18,7 @@ use crate::{
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
+    modes::{StatusStreamReceipt, mark_status_received, status_stream_stale},
     tasks::{amp_control_task::AmpControlWatch, sensor_tasks::BatteryVWatch},
 };
 
@@ -49,6 +53,13 @@ pub async fn landed_mode(
 
     let packet_builder = LandedTelemetryPacketBuilder::<NoopRawMutex>::new();
 
+    // When AMP's status stream last delivered. Landed mode is where a frozen
+    // relayed value does the most damage: this mode ends only on an operator
+    // uplink, and out 1 is deliberately left powered, so a search party can be
+    // reading a battery voltage sampled hours ago and still rendered as a
+    // healthy pack.
+    let amp_status_receipt = StatusStreamReceipt::new(None);
+
     let update_packet_sensor_fut = async {
         let mut gps_reading = gps_reading_watch.receiver().unwrap();
         let mut battery_v_reading = battery_v_watch.receiver().unwrap();
@@ -76,6 +87,25 @@ pub async fn landed_mode(
                     packet.amp_online = false;
                     packet.amp_rebooted_in_last_5s = false;
                 }
+
+                // The fields below come only from `update_packet_can_fut`'s
+                // `AmpStatus` arm, so nothing else ever clears them. Note this
+                // is a different question from `amp_online` just above, which
+                // is the heartbeat's answer and stays as it is: AMP's status
+                // task and its heartbeat are independent, so silence here does
+                // not mean the node is gone.
+                if status_stream_stale(&amp_status_receipt) {
+                    packet.shared_battery_v = None;
+                    // `Unknown` rather than `Disabled` — `Disabled` is an
+                    // output AMP reports as commanded off, a deliberate state
+                    // it is not entitled to claim on AMP's behalf.
+                    packet.amp_out1 = PowerOutputStatus::Unknown;
+                    packet.amp_out2 = PowerOutputStatus::Unknown;
+                    packet.amp_out3 = PowerOutputStatus::Unknown;
+                    packet.amp_out1_overwrote = false;
+                    packet.amp_out2_overwrote = false;
+                    packet.amp_out3_overwrote = false;
+                }
             });
 
             ticker.next().await;
@@ -87,8 +117,11 @@ pub async fn landed_mode(
             let message = can_receiver_sub.next_message_pure().await.data.message;
             match message {
                 CanBusMessageEnum::AmpStatus(message) => {
+                    // Stamped beside the fields it fills, so the receipt and the
+                    // values it vouches for cannot drift apart.
+                    mark_status_received(&amp_status_receipt);
                     packet_builder.update(|packet| {
-                        packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
+                        packet.shared_battery_v = Some(message.shared_battery_mv as f32 / 1000.0);
                         packet.amp_out1 = message.out1.status;
                         packet.amp_out1_overwrote = message.out1.overwrote;
                         packet.amp_out2 = message.out2.status;

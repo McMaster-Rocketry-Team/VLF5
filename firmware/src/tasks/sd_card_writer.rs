@@ -574,7 +574,7 @@ async fn run_offline_loop(
     channel: &'static FlightDataChannel,
     storage_cmd: &'static StorageCmdSignal,
     storage_resp: &'static StorageRespChannel,
-    vl_status: &'static VLStatusMutex,
+    _vl_status: &'static VLStatusMutex,
 ) -> ! {
     let mut logger = FlightLogger::empty();
     loop {
@@ -625,6 +625,10 @@ pub async fn sd_card_writer(
     let mut storage = 'init: loop {
         for attempt in 1..=SD_INIT_ATTEMPTS {
             let mut cmd_block = CmdBlock::new();
+            // embassy deprecated this in favour of the `sdio` crate. Migrating
+            // is a real change to the card bring-up path, not a rename, so it
+            // stays a deliberate follow-up rather than a drive-by edit.
+            #[allow(deprecated)]
             match select(
                 Timer::after(SD_INIT_TIMEOUT),
                 StorageDevice::new_sd_card(&mut sdmmc, &mut cmd_block, mhz(25)),

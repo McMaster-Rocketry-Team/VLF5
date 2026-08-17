@@ -34,7 +34,6 @@
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
-#![feature(never_type)]
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 

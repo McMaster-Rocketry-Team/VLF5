@@ -105,6 +105,11 @@ impl<R: RawMutex> CanCentral<R> {
         })
     }
 
+    /// Every node the bus has ever reported, regardless of freshness. Nothing
+    /// calls it today — `get_nodes` by type covers the flight paths — but it is
+    /// the natural accessor for a bus-wide health view, so it is kept rather
+    /// than rewritten later.
+    #[allow(dead_code)]
     pub fn get_all_nodes(&self) -> Vec<CanNode, 16> {
         self.nodes.lock(|r| {
             let nodes = r.borrow();

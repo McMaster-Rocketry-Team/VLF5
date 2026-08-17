@@ -41,6 +41,10 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Ok(())
     }
 
+    /// Called by the flight binary's sensor task when leaving Armed, but not by
+    /// the bench binaries that share this driver — hence the allow, which is
+    /// about which target is being built rather than about the method.
+    #[allow(dead_code)]
     pub async fn power_down(&mut self) -> Result<(), B::Error> {
         self.write_register(CTRL1_XL, 0).await?;
         self.write_register(CTRL2_G, 0).await?;
@@ -68,6 +72,14 @@ impl<B: SpiDevice> LSM6DSM<B> {
         Ok(())
     }
 
+    /// Reset the part and confirm it is really there.
+    ///
+    /// `Ok(false)` means the bus transfers completed but `WHO_AM_I` did not
+    /// read back this part's ID — an absent, unpowered or mis-wired IMU. SPI
+    /// has no acknowledgement, so `Ok(_)` alone proves nothing: this is the
+    /// only readback that does. Callers MUST treat `Ok(false)` as fatal for
+    /// this sensor; a dead LSM6DSM never asserts INT1, so a caller that
+    /// ignores it parks forever on data-ready with no error to show for it.
     pub async fn reset(&mut self) -> Result<bool, B::Error> {
         Timer::after_millis(20).await; // wait for initialize
 

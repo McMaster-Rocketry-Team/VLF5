@@ -11,7 +11,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, tasks::{amp_control_task::AmpControlWatch, sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub}}, utils::SubscriberWithLastValue, AvionicsModeWatch, FlightStageMutex, GPSReadingWatch
+    avionics_mode::AvionicsMode, can::CanReceiverSub, can_central::CanCentral, modes::{mark_status_received, status_stream_stale, StatusStreamReceipt}, tasks::{amp_control_task::AmpControlWatch, sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub}}, utils::SubscriberWithLastValue, AvionicsModeWatch, FlightStageMutex, GPSReadingWatch
 };
 
 pub async fn low_power_mode(
@@ -37,6 +37,12 @@ pub async fn low_power_mode(
 
     let packet_builder = LowPowerTelemetryPacketBuilder::<NoopRawMutex>::new();
 
+    // When AMP's status stream last delivered. `shared_battery_v` is written
+    // only from the `AmpStatus` arm below, so without this the last relayed
+    // voltage would be transmitted for as long as the mode lasts — which, in
+    // low power, is until an operator says otherwise.
+    let amp_status_receipt = StatusStreamReceipt::new(None);
+
     let update_packet_sensor_fut = async {
         let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
         let mut gps_reading = gps_reading_watch.receiver().unwrap();
@@ -60,7 +66,15 @@ pub async fn low_power_mode(
                     .get_nodes::<1>(AMP_NODE_TYPE)
                     .first()
                     .map(|node| node.is_online())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+
+                // Written only from the `AmpStatus` arm below, so this loop is
+                // the only thing that can un-write it. `amp_online` just above
+                // is the heartbeat and answers a different question, so it is
+                // left alone.
+                if status_stream_stale(&amp_status_receipt) {
+                    packet.shared_battery_v = None;
+                }
             });
 
             ticker.next().await;
@@ -72,8 +86,9 @@ pub async fn low_power_mode(
             let message = can_receiver_sub.next_message_pure().await.data.message;
             match message {
                 CanBusMessageEnum::AmpStatus(message) => {
+                    mark_status_received(&amp_status_receipt);
                     packet_builder.update(|packet| {
-                        packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
+                        packet.shared_battery_v = Some(message.shared_battery_mv as f32 / 1000.0);
                     });
                 }
                 _ => {}

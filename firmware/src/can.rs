@@ -223,10 +223,39 @@ async fn can_bus_rx_task(
         async fn receive(&mut self) -> Result<Self::Frame, Self::Error> {
             let result = self.0.read().await.map(EnvelopeWrapper);
 
-            self.1.lock(|s| {
-                let mut s = s.borrow_mut();
-                s.can_bus_ok = result.is_ok();
-            });
+            // Latched on the first frame this node successfully receives, and
+            // never lowered from here.
+            //
+            // `can_bus_ok = result.is_ok()` was wrong in both directions. It
+            // only ran when `read()` returned, so a bus that went silent — a
+            // severed twisted pair, a transceiver that never came up — left the
+            // flag at whatever it was at boot; and with the flag now defaulting
+            // false (`VLCustomStatus::new`) that half is already fail-safe. The
+            // other direction is the one this line fixes: a single transient
+            // (a form/stuff error from one noisy node) used to clear the flag
+            // and leave it cleared until the next good frame happened to
+            // arrive, which reported a working bus as broken.
+            //
+            // Deliberately not a short RX timeout: `modes::self_test_mode`
+            // disables all three AMP outputs and waits ~2 s, de-powering bus
+            // nodes on purpose immediately before it snapshots these flags, so
+            // any timeout shorter than the surviving traffic cadence would
+            // false-fail on healthy hardware. Latching asks "has this node ever
+            // proven it can receive?", which is exactly the boot-self-test
+            // question and is immune to that de-powering — the same shape as
+            // `imu_ok`/`baro_ok`/`mag_ok`/`sd_ok`. A staleness window would be
+            // strictly better for detecting a bus that dies mid-flight, but it
+            // needs a periodic evaluator (`node_status_task` already has a
+            // 500 ms ticker, matching this node's own heartbeat) rather than a
+            // change confined to this call, which only runs when a frame
+            // arrives. Mid-flight silence is meanwhile still visible through
+            // `can_central`'s per-node timeouts.
+            if result.is_ok() {
+                self.1.lock(|s| {
+                    let mut s = s.borrow_mut();
+                    s.can_bus_ok = true;
+                });
+            }
 
             result
         }

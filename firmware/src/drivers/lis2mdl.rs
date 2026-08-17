@@ -49,6 +49,12 @@ impl<B: I2c> LIS2MDL<B> {
         Ok(())
     }
 
+    /// Reset the part and confirm it is really there.
+    ///
+    /// `Ok(false)` means the I2C transfers were acknowledged but `WHO_AM_I`
+    /// did not read back this part's ID. Callers MUST treat `Ok(false)` as
+    /// fatal for this sensor rather than carrying on with a device that is not
+    /// the LIS2MDL.
     pub async fn reset(&mut self) -> Result<bool, B::Error> {
         Timer::after_millis(15).await; // wait for initialize
 

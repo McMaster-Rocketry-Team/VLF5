@@ -16,7 +16,8 @@ use firmware_common_new::{
         custom_status::payload_sdrm_custom_status::PayloadSDRMCustomStatus,
         messages::{
             CanBusMessageEnum, airbrakes_control::AirBrakesControlMessage,
-            amp_control::AmpControlMessage, vl_status::FlightStage,
+            amp_control::AmpControlMessage, amp_status::PowerOutputStatus,
+            vl_status::FlightStage,
         },
         node_types::{AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE},
         sender::CanSender,
@@ -39,6 +40,7 @@ use crate::{
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
+    modes::{StatusStreamReceipt, mark_status_received, status_stream_stale},
     tasks::{
         amp_control_task::AmpControlWatch,
         data_logger::{FlightDataChannel, log_flight_data},
@@ -103,7 +105,44 @@ pub async fn armed_mode(
         out3_enable: true,
     });
 
+    // Drop what the PREVIOUS armed session heard from the two sources that are
+    // unpowered between sessions. These watches are `&'static`, so unlike the
+    // logger's pubsub subscribers they survive a mode change and would
+    // otherwise hand the new session's first records values taken minutes ago.
+    //
+    // Both sit on AMP out 2, which low-power mode disables — so between
+    // sessions they are not merely quiet, they are switched off, and the
+    // repower budget above (the self test allows 15 s for the payload to
+    // connect and the brakes to home) is ~150 slow records of stale data.
+    //
+    // Deliberately NOT `gps_reading_watch` (VL's own USART, running in every
+    // mode, and clearing it would stall the 5 Hz builder below, which blocks on
+    // the first fix) and NOT `amp_state_watch` (AMP is always powered and
+    // reports unconditionally every 500 ms, so at most a handful of slow
+    // records and those are current).
+    payload_state_watch.sender().clear();
+    if let Some(mut air_brakes) = air_brakes_watch.try_get() {
+        // Field-selective, not `clear()`: `publish_airbrakes_commanded`
+        // preserves the Icarus-sourced half by read-modify-write, so armed
+        // entry's own `Some(0.0)` command below would otherwise carry the
+        // previous session's `actual_extension`/`servo_temp` forward. The
+        // commanded half is legitimately set at entry and must keep working.
+        air_brakes.actual_extension = None;
+        air_brakes.servo_temp = None;
+        air_brakes_watch.sender().send(air_brakes);
+    }
+
     let packet_builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
+
+    // When each CAN status stream last delivered. Written by
+    // `update_packet_can_fut` beside the fields it fills, read by the 5 Hz
+    // `update_packet_sensor_fut` to clear those fields once the stream has gone
+    // quiet. See `modes::CAN_STATUS_STALE_AFTER` for why this is not
+    // `is_online()`.
+    let amp_status_receipt = StatusStreamReceipt::new(None);
+    let icarus_status_receipt = StatusStreamReceipt::new(None);
+    let payload_status_receipt = StatusStreamReceipt::new(None);
+
     // One struct owns both estimators and the policy connecting them (the
     // airbrakes-permission gate inside `airbrakes_mpc_states`) — firmware
     // holds it behind one mutex.
@@ -186,6 +225,49 @@ pub async fn armed_mode(
                     packet.payload_sdrm_online = false;
                     packet.payload_sdrm_uptime_s = 0;
                     packet.payload_stack_status = PayloadSDRMCustomStatus::new();
+                }
+
+                // Everything above is re-derived from a live source every tick,
+                // so it cannot go stale. Everything below is written ONLY from
+                // `update_packet_can_fut`'s match arms, which means nothing
+                // clears it when the sender stops — this is that clear.
+                //
+                // The `*_online` fields just above are the heartbeat's answer
+                // and are left alone: they are a genuinely separate fact, and
+                // keeping them is what lets the ground tell "AMP is gone" from
+                // "AMP is alive but its status task is not reporting".
+                if status_stream_stale(&amp_status_receipt) {
+                    packet.shared_battery_v = None;
+                    // `Unknown`, not `Disabled`: `Disabled` is an output AMP is
+                    // actively reporting as commanded off, which is a normal,
+                    // deliberate state. Silence is not that.
+                    packet.amp_out1 = PowerOutputStatus::Unknown;
+                    packet.amp_out2 = PowerOutputStatus::Unknown;
+                    packet.amp_out3 = PowerOutputStatus::Unknown;
+                    // The overwrote bits are part of the same report, so they
+                    // go with it. `false` is the only value available and does
+                    // not overstate: it says "no overwrite reported".
+                    packet.amp_out1_overwrote = false;
+                    packet.amp_out2_overwrote = false;
+                    packet.amp_out3_overwrote = false;
+                }
+
+                if status_stream_stale(&icarus_status_receipt) {
+                    // The packet already carries a validity bit for this pair,
+                    // so absence downlinks as absence. Until now the field was
+                    // a first-report latch that only ever went `None -> Some`:
+                    // an Icarus that stopped reporting — including one whose
+                    // servo UART temperature reads started failing, which skips
+                    // the send while the heartbeat stays Healthy — kept
+                    // transmitting the last extension and temperature it ever
+                    // managed.
+                    packet.icarus_air_brakes = None;
+                }
+
+                if status_stream_stale(&payload_status_receipt) {
+                    packet.epm_batt_mv = None;
+                    packet.epm_rail_ma = [None; 6];
+                    packet.sem_actuator_steps = [None; 3];
                 }
 
                 {
@@ -283,7 +365,10 @@ pub async fn armed_mode(
             let message = can_receiver_sub.next_message_pure().await.data.message;
             packet_builder.update(|packet| match message {
                 CanBusMessageEnum::AmpStatus(message) => {
-                    packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
+                    // Stamped beside the fields it fills, so the receipt and the
+                    // values it vouches for cannot drift apart.
+                    mark_status_received(&amp_status_receipt);
+                    packet.shared_battery_v = Some(message.shared_battery_mv as f32 / 1000.0);
                     packet.amp_out1_overwrote = message.out1.overwrote;
                     packet.amp_out1 = message.out1.status;
                     packet.amp_out2_overwrote = message.out2.overwrote;
@@ -292,14 +377,16 @@ pub async fn armed_mode(
                     packet.amp_out3 = message.out3.status;
                 }
                 CanBusMessageEnum::IcarusStatus(message) => {
+                    mark_status_received(&icarus_status_receipt);
                     // Both numbers arrive in this one message, so they become
-                    // present together and stay absent together until it does.
+                    // present together and go absent together when it stops.
                     packet.icarus_air_brakes = Some(IcarusAirBrakesState {
                         actual_extension_percentage: message.actual_extension_percentage(),
                         servo_temp: message.servo_temperature(),
                     });
                 }
                 CanBusMessageEnum::CustomPayloadStatus(message) => {
+                    mark_status_received(&payload_status_receipt);
                     // The accessors decode the payload's 0xFFFF "could not read
                     // this" sentinel — which exists only because the CAN frame
                     // cannot carry an `Option` — back into `None`, so the ground

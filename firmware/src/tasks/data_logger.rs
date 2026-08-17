@@ -234,17 +234,28 @@ fn pack_estimator_sample(
 /// every input below is already `&'static` except `estimator_log_watch`, which
 /// only exists while armed.
 ///
-/// That containment is what makes cross-session leakage unrepresentable. Every
-/// subscriber and counter below is created on entry, and an embassy pubsub
-/// subscriber only receives messages published after its creation, so a re-arm
-/// (Armed -> LowPower -> Armed) cannot carry pre-arm samples into the new
-/// session's first records — no low-power baro backlog, and no mag readings left
-/// over from the *previous* armed session (`mag_task` is powered down outside
-/// Armed, so its queue would otherwise be minutes stale). The estimator numbers
-/// arrive on `estimator_log_watch`, which armed mode rebuilds per session
-/// alongside the estimators themselves, and each carries the timestamp it was
-/// taken at — so neither a previous session's sample nor a neighbouring tick's
-/// can be logged against this record.
+/// That containment is what rules out cross-session leakage *through the pubsub
+/// inputs*. Every subscriber and counter below is created on entry, and an
+/// embassy pubsub subscriber only receives messages published after its
+/// creation, so a re-arm (Armed -> LowPower -> Armed) cannot carry pre-arm
+/// samples into the new session's first records — no low-power baro backlog, and
+/// no mag readings left over from the *previous* armed session (`mag_task` is
+/// powered down outside Armed, so its queue would otherwise be minutes stale).
+/// The estimator numbers arrive on `estimator_log_watch`, which armed mode
+/// rebuilds per session alongside the estimators themselves, and each carries
+/// the timestamp it was taken at — so neither a previous session's sample nor a
+/// neighbouring tick's can be logged against this record.
+///
+/// The argument stops there, and deliberately: it is about subscribers, and the
+/// `&'static` watches are not subscribers. A watch holds one value that outlives
+/// the session, so `try_get` on entry returns whatever the last writer left —
+/// which for a source that is unpowered between sessions is the previous
+/// session's reading, with nothing about it to say so. Keeping those honest is
+/// the caller's job, and `armed_mode` does it explicitly at entry: it clears
+/// `payload_state_watch` and the Icarus-sourced fields of `air_brakes_watch`,
+/// both fed from nodes on AMP out 2 and so genuinely dark between sessions.
+/// `gps_reading_watch` and `amp_state_watch` are left alone on purpose — those
+/// sources run in every mode, so their last value is current, not stale.
 ///
 /// Cancellation-safe: records reach the SD writer through a non-blocking
 /// `try_send`, so being dropped at a mode change cannot tear one.

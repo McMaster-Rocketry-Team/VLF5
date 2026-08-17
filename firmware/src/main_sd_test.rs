@@ -1,8 +1,6 @@
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
-#![feature(never_type)]
-#![feature(try_blocks)]
 
 mod clock_config;
 mod sd_bench;
@@ -228,6 +226,10 @@ async fn main(_spawner: Spawner) {
     );
 
     let mut cmd_block = CmdBlock::new();
+    // Deprecated in favour of the `sdio` crate; migrating the bring-up path is
+    // a deliberate follow-up, tracked alongside the same call in
+    // `tasks::sd_card_writer`.
+    #[allow(deprecated)]
     let mut storage = StorageDevice::new_sd_card(&mut sdmmc, &mut cmd_block, mhz(25))
         .await
         .unwrap();

@@ -6,6 +6,7 @@ use crate::{
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
+    modes::{StatusStreamReceipt, mark_status_received, status_stream_stale},
     tasks::{
         amp_control_task::AmpControlWatch,
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub},
@@ -54,6 +55,10 @@ pub async fn demo_mode(
 
     let packet_builder = LowPowerTelemetryPacketBuilder::<NoopRawMutex>::new();
 
+    // When AMP's status stream last delivered. `shared_battery_v` is written
+    // only from the `AmpStatus` arm below, so nothing else would ever clear it.
+    let amp_status_receipt = StatusStreamReceipt::new(None);
+
     let update_packet_sensor_fut = async {
         let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
         let mut gps_reading = gps_reading_watch.receiver().unwrap();
@@ -77,7 +82,15 @@ pub async fn demo_mode(
                     .get_nodes::<1>(AMP_NODE_TYPE)
                     .first()
                     .map(|node| node.is_online())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+
+                // Written only from the `AmpStatus` arm below, so this loop is
+                // the only thing that can un-write it. `amp_online` just above
+                // is the heartbeat and answers a different question, so it is
+                // left alone.
+                if status_stream_stale(&amp_status_receipt) {
+                    packet.shared_battery_v = None;
+                }
             });
 
             ticker.next().await;
@@ -89,8 +102,9 @@ pub async fn demo_mode(
             let message = can_receiver_sub.next_message_pure().await.data.message;
             match message {
                 CanBusMessageEnum::AmpStatus(message) => {
+                    mark_status_received(&amp_status_receipt);
                     packet_builder.update(|packet| {
-                        packet.shared_battery_v = message.shared_battery_mv as f32 / 1000.0;
+                        packet.shared_battery_v = Some(message.shared_battery_mv as f32 / 1000.0);
                     });
                 }
                 _ => {}
