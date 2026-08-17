@@ -90,7 +90,7 @@ are live throughout and are what to read there.
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
 | `TelemetryPacket` | 38 B (299/304 bits — 5 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes born**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
-| `LowPowerTelemetryPacket` | 11 B (87 bits — 1 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp |
+| `LowPowerTelemetryPacket` | 13 B (98 bits — 6 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp, **payload EPM battery** |
 | `LandedTelemetryPacket` | 11 B (88 bits — 0 spare) | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
 Six of the `TelemetryPacket`'s bits are validity bits. The packet is a
@@ -188,7 +188,7 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | OZYS disk usage, gauge-connected, `sd_ok` | – | – | – | ✓ (`ozys_custom_status`, decode with `OzysCustomStatus`) | logged |
 | OZYS strain measurements | – | – | – | – | **nowhere** — OZYS logs to its own SD |
 | payload stack flags ×8 (`payload_epm_alive` etc.) | ✓ (1 bit each) | – | – | – | **not derivable** — radio only |
-| EPM battery voltage | ✓ (11-bit, 0–17 V @ 8.3 mV; **all-ones code = unavailable**) | – | – | ✓ (raw mV, absent = unavailable) | logged |
+| EPM battery voltage | ✓ (11-bit, 0–17 V @ 8.3 mV; **all-ones code = unavailable**) | ✓/LP (same 11-bit field, same sentinel) | – | ✓ (raw mV, absent = unavailable) | logged |
 | EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (7-bit each, 0–5 A @ 39.4 mA; **all-ones code = unavailable**) | – | – | ✓ (raw mA, absent = unavailable) | logged |
 | SEM actuator steps ×3 | ✓ (10-bit each, full u16 @ 64.1 steps; **all-ones code = unavailable**) | – | – | ✓ (raw steps, absent = unavailable) | logged |
 | VL health flags (imu_ok, sd_ok, …) | – | – | – | – | CAN node status only; not persisted |
@@ -214,6 +214,22 @@ Takeaways:
   2 for SDRM liveness. Every other CAN node together costs 40 — AMP 21, Icarus
   17 (two liveness bits, `icarus_status_valid`, extension and servo temp),
   OZYS 2.
+- The EPM battery is the one payload reading that is **also on the low-power
+  packet**, which is where it matters most: low power is the mode the stack
+  sits in for the hours between power-up and launch, so until now the only way
+  to ask "is the payload still alive on the rail" was to arm the rocket. It
+  cost the low-power packet two bytes — it had one spare bit and the field is
+  11 wide, so 11 B became 13 B (98 bits, 6 spare). At a 5 s cadence that is
+  affordable in a way it would not be on the 2 s `TelemetryPacket`, which is
+  already at the last size that fits its symbol count. The factory, the
+  all-ones sentinel and the codec live in `vlp::packets` rather than in
+  `telemetry`, alongside `shared_battery_v`'s, so the voltage cannot decode one
+  way on the pad and another way once armed. The six rail currents and three
+  actuator step counts stay armed-only: they are flight diagnostics, and the
+  battery is the one number that decides whether the stack survives the wait.
+  The payload's status stream gets its own staleness receipt in both modes, so
+  a payload that browns out mid-wait goes `n/a` within 5 s instead of
+  downlinking the healthy voltage it had when it stopped talking.
 - Payload readings still have **no validity bit on the downlink**, but they no
   longer read as zero: `epm_batt_v`, the six rail currents and the three
   actuator step counts each spend their **all-ones code** on "the payload could

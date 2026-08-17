@@ -42,6 +42,11 @@ pub async fn low_power_mode(
     // voltage would be transmitted for as long as the mode lasts — which, in
     // low power, is until an operator says otherwise.
     let amp_status_receipt = StatusStreamReceipt::new(None);
+    // And the payload's, for `epm_batt_mv`. Same argument, and it bites harder
+    // here than anywhere else: low power is the mode the stack sits in for the
+    // hours before launch, so a payload that browns out would otherwise keep
+    // downlinking the healthy voltage it had when it stopped talking.
+    let payload_status_receipt = StatusStreamReceipt::new(None);
 
     let update_packet_sensor_fut = async {
         let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
@@ -75,6 +80,10 @@ pub async fn low_power_mode(
                 if status_stream_stale(&amp_status_receipt) {
                     packet.shared_battery_v = None;
                 }
+
+                if status_stream_stale(&payload_status_receipt) {
+                    packet.epm_batt_mv = None;
+                }
             });
 
             ticker.next().await;
@@ -89,6 +98,19 @@ pub async fn low_power_mode(
                     mark_status_received(&amp_status_receipt);
                     packet_builder.update(|packet| {
                         packet.shared_battery_v = Some(message.shared_battery_mv as f32 / 1000.0);
+                    });
+                }
+                CanBusMessageEnum::CustomPayloadStatus(message) => {
+                    mark_status_received(&payload_status_receipt);
+                    packet_builder.update(|packet| {
+                        // The accessor decodes the payload's 0xFFFF "could not
+                        // read this" sentinel back into `None`, so a dead
+                        // sensor downlinks as absent rather than as 0V. The
+                        // rails and actuator steps that come in the same
+                        // message are armed-mode only; this packet carries the
+                        // battery alone, which is the one number that decides
+                        // whether the stack survives the wait on the pad.
+                        packet.epm_batt_mv = message.epm_batt_mv();
                     });
                 }
                 _ => {}

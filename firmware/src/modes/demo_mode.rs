@@ -58,6 +58,9 @@ pub async fn demo_mode(
     // When AMP's status stream last delivered. `shared_battery_v` is written
     // only from the `AmpStatus` arm below, so nothing else would ever clear it.
     let amp_status_receipt = StatusStreamReceipt::new(None);
+    // And the payload's, for `epm_batt_mv`, which the same packet carries and
+    // the same argument applies to.
+    let payload_status_receipt = StatusStreamReceipt::new(None);
 
     let update_packet_sensor_fut = async {
         let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
@@ -91,6 +94,10 @@ pub async fn demo_mode(
                 if status_stream_stale(&amp_status_receipt) {
                     packet.shared_battery_v = None;
                 }
+
+                if status_stream_stale(&payload_status_receipt) {
+                    packet.epm_batt_mv = None;
+                }
             });
 
             ticker.next().await;
@@ -105,6 +112,15 @@ pub async fn demo_mode(
                     mark_status_received(&amp_status_receipt);
                     packet_builder.update(|packet| {
                         packet.shared_battery_v = Some(message.shared_battery_mv as f32 / 1000.0);
+                    });
+                }
+                CanBusMessageEnum::CustomPayloadStatus(message) => {
+                    mark_status_received(&payload_status_receipt);
+                    packet_builder.update(|packet| {
+                        // The accessor turns the payload's 0xFFFF "could not
+                        // read this" back into `None`, so a dead sensor
+                        // downlinks as absent rather than as 0V.
+                        packet.epm_batt_mv = message.epm_batt_mv();
                     });
                 }
                 _ => {}

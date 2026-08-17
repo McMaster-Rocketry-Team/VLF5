@@ -67,7 +67,11 @@ rocket-cli ground-station
 1. Click **Target apogee**, enter height in meters, confirm.
 2. Click **Low Power Mode**, confirm.
 3. On the right, expect **Low Power Telemetry**.
-4. Leave it in Low Power until you are ready to launch.
+4. Leave it in Low Power until you are ready to launch. Check **epm batt**
+   under **Payload** now and again while you wait — that is the payload
+   stack's own pack, and this is the mode it drains in. A dimmed `n/a` there
+   means the payload has stopped reporting (or could not read the bus), not
+   0 V.
 
 ---
 
@@ -130,7 +134,7 @@ rocket-cli clear-flight-log
 
 - [ ] After finish beeps: open `rocket-cli ground-station`; wait a few seconds for Self Test Result (still empty → stop — get the team)
 - [ ] **Target apogee**
-- [ ] **Low Power Mode**; see Low Power Telemetry
+- [ ] **Low Power Mode**; see Low Power Telemetry (watch **epm batt** while waiting)
 
 **Just before launch**
 
