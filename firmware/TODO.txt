@@ -1,19 +1,8 @@
 test on simulated data on openrocket
-hardware can bus filter on all pcbs
-
-airbrakes_flags is a u8 bitmask, so subsonic_by_drag None (no drag measurement
-  taken yet) and Some(false) (measured, not subsonic) both log as a clear
-  AIRBRAKES_SUBSONIC_DRAG bit. the estimator has the distinction, the storage
-  format throws it away. the one place absence is still lossy in the fast record
-UnixClock's Clock impl and the three CAN measurement broadcasts fall back to the
-  boot-time microsecond count when the GPS has not disciplined the clock yet, so
-  a receiver cannot tell an undisciplined uptime from a real unix time. same
-  fake-value-where-absence-belongs pattern, on the CAN boundary
-TelemetryPacket is at 38 bytes / 48 on air, the last size that fits the current
-  lora symbol count. anything new on the downlink costs air time inside the 2s
-  period
 
 need hardware:
 joined fut jitter
 measure sensor noise
 55ms sd stall?
+
+1s between ignition and supersonic?
