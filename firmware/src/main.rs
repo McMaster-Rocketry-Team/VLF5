@@ -512,6 +512,7 @@ async fn low_prio_main(
     spawner.spawn(amp_control_task(can_sender, amp_control_watch).unwrap());
 
     let flight_data_channel = singleton!(
+        
         : tasks::data_logger::FlightDataChannel = tasks::data_logger::FlightDataChannel::new()
     )
     .unwrap();

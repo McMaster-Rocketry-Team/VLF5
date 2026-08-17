@@ -33,15 +33,15 @@ pub async fn landed_mode(
         *r.borrow_mut() = FlightStage::Landed;
     });
     amp_control_watch.sender().send(AmpControlMessage {
-        out1_enable: true, // leave camera on for 15 minutes for it to save its data
-        out2_enable: false,
+        out1_enable: true,
+        out2_enable: true, // leave camera on for 15 minutes for it to save its data
         out3_enable: false,
     });
 
     let stop_camera_fut = async {
         Timer::after_secs(60 * 15).await;
         amp_control_watch.sender().send(AmpControlMessage {
-            out1_enable: false,
+            out1_enable: true,
             out2_enable: false,
             out3_enable: false,
         });

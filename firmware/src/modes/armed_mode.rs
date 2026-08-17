@@ -98,8 +98,8 @@ pub async fn armed_mode(
         *r.borrow_mut() = FlightStage::Armed;
     });
     amp_control_watch.sender().send(AmpControlMessage {
-        out1_enable: true,
-        out2_enable: false,
+        out1_enable: false,
+        out2_enable: true,
         out3_enable: true,
     });
 

@@ -10,9 +10,7 @@ use firmware_common_new::{
             amp_status::{AmpStatusMessage, PowerOutputStatus},
             vl_status::FlightStage,
         },
-        node_types::{
-            AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
-        },
+        node_types::{AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE},
     },
     vlp::{
         client::VLPAvionics,
@@ -24,8 +22,7 @@ use firmware_common_new::{
 };
 
 use crate::{
-    AvionicsModeWatch, ContinuityWatch, FlightStageMutex,
-    VLStatusMutex,
+    AvionicsModeWatch, ContinuityWatch, FlightStageMutex, VLStatusMutex,
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
     can_central::CanCentral,
@@ -103,13 +100,15 @@ pub async fn self_test_mode(
         });
 
         // test amp out 1
+        // recovery beacon is on battery 1
+
         {
             amp_control_watch.sender().send(AmpControlMessage {
                 out1_enable: true,
                 out2_enable: false,
                 out3_enable: false,
             });
-            Timer::after_millis(10000).await; // longer time for ICARUS to home
+            Timer::after_millis(5000).await; // keep this long for any longer and you shall deafen people
             let out1_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
@@ -120,39 +119,27 @@ pub async fn self_test_mode(
             };
             packet_builder.update(|packet| {
                 packet.amp_out1_power_good = out1_power_good;
-            });
-
-            packet_builder.update(|packet| {
-                if let Some(icarus) = can_central.get_nodes::<1>(ICARUS_NODE_TYPE).first() {
-                    packet.icarus = NodeStatus::from_message(&icarus.status);
-                } else {
-                    packet.icarus = NodeStatus::offline();
-                }
-                if !packet.icarus.healthy() {
-                    self_test_partial_failure = true;
-                }
             });
         }
 
-        // recovery beacon is on battery 1
-        // test amp out 1
+        // test amp out 2 (air brakes, camera, VL-Mini, VLF6)
         {
             amp_control_watch.sender().send(AmpControlMessage {
-                out1_enable: true,
-                out2_enable: false,
+                out1_enable: false,
+                out2_enable: true,
                 out3_enable: false,
             });
-            Timer::after_millis(10000).await; // longer time for payload sdrm to connect to payload
-            let out1_power_good = if let Some(amp_status_message) =
+            Timer::after_millis(15000).await; // longer time for payload sdrm to connect to payload, also air brakes need to home.
+            let out2_power_good = if let Some(amp_status_message) =
                 get_amp_status_message(&mut can_receiver_sub).await
             {
-                amp_status_message.out1.status == PowerOutputStatus::PowerGood
+                amp_status_message.out2.status == PowerOutputStatus::PowerGood
             } else {
                 self_test_partial_failure = true;
                 false
             };
             packet_builder.update(|packet| {
-                packet.amp_out1_power_good = out1_power_good;
+                packet.amp_out2_power_good = out2_power_good;
             });
 
             packet_builder.update(|packet| {
@@ -165,12 +152,10 @@ pub async fn self_test_mode(
                     self_test_partial_failure = true;
                 }
 
-                if let Some(payload_sdrm) = can_central
-                    .get_nodes::<1>(PAYLOAD_SDRM_NODE_TYPE)
-                    .first()
+                if let Some(payload_sdrm) =
+                    can_central.get_nodes::<1>(PAYLOAD_SDRM_NODE_TYPE).first()
                 {
-                    packet.payload_sdrm =
-                        NodeStatus::from_message(&payload_sdrm.status);
+                    packet.payload_sdrm = NodeStatus::from_message(&payload_sdrm.status);
                 } else {
                     packet.payload_sdrm = NodeStatus::offline();
                 }
@@ -178,6 +163,14 @@ pub async fn self_test_mode(
                     self_test_partial_failure = true;
                 }
 
+                if let Some(icarus) = can_central.get_nodes::<1>(ICARUS_NODE_TYPE).first() {
+                    packet.icarus = NodeStatus::from_message(&icarus.status);
+                } else {
+                    packet.icarus = NodeStatus::offline();
+                }
+                if !packet.icarus.healthy() {
+                    self_test_partial_failure = true;
+                }
             });
         }
 
@@ -199,27 +192,6 @@ pub async fn self_test_mode(
             };
             packet_builder.update(|packet| {
                 packet.amp_out3_power_good = out3_power_good;
-            });
-        }
-
-        // test amp out 2 (was out 4)
-        {
-            amp_control_watch.sender().send(AmpControlMessage {
-                out1_enable: false,
-                out2_enable: true,
-                out3_enable: false,
-            });
-            Timer::after_millis(2000).await;
-            let out2_power_good = if let Some(amp_status_message) =
-                get_amp_status_message(&mut can_receiver_sub).await
-            {
-                amp_status_message.out2.status == PowerOutputStatus::PowerGood
-            } else {
-                self_test_partial_failure = true;
-                false
-            };
-            packet_builder.update(|packet| {
-                packet.amp_out2_power_good = out2_power_good;
             });
         }
 

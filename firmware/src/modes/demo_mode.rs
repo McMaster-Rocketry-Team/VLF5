@@ -47,8 +47,8 @@ pub async fn demo_mode(
         *r.borrow_mut() = FlightStage::LowPower;
     });
     amp_control_watch.sender().send(AmpControlMessage {
-        out1_enable: true,
-        out2_enable: false,
+        out1_enable: false,
+        out2_enable: true,
         out3_enable: false,
     });
 
