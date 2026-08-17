@@ -602,6 +602,7 @@ pub async fn armed_mode(
         flight_stage,
         vl_status,
         flight_data_channel,
+        target_agl_watch,
     );
 
     // ORDER MATTERS: `update_estimators_fut` must stay ahead of

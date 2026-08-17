@@ -1,5 +1,5 @@
 use crate::{
-    ContinuityWatch, FlightStageMutex, GPSReadingWatch, VLStatusMutex,
+    ContinuityWatch, FlightStageMutex, GPSReadingWatch, SetTargetWatch, VLStatusMutex,
     can_central::CanCentral,
     tasks::{
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
@@ -263,6 +263,7 @@ pub async fn log_flight_data(
     flight_stage: &'static FlightStageMutex,
     vl_status: &'static VLStatusMutex,
     channel: &'static FlightDataChannel,
+    target_agl_watch: &'static SetTargetWatch,
 ) {
     let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
     let mut mag_sub = mag_pubsub.subscriber().unwrap();
@@ -390,6 +391,10 @@ pub async fn log_flight_data(
             validation_deploy: airbrakes_state.validation_deploy,
             actual_extension: airbrakes_state.actual_extension,
             servo_temp: airbrakes_state.servo_temp,
+            // Sampled per record rather than latched once: `SetTargetApogee` is
+            // accepted while Armed, so the target the MPC is chasing can move
+            // mid-flight and the log should say when.
+            target_apogee_agl: target_agl_watch.try_get(),
         };
         // No default to fall back on here: `out_status` packs `PowerOutputStatus`
         // discriminants two bits at a time and 0 is one of them, so an AMP that

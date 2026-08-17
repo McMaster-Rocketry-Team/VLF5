@@ -126,6 +126,14 @@ path = "src/main_imu_bench.rs"
 test = false
 bench = false
 
+# MPC solver micro-benchmark (not flight fw): splits the measured solve time
+# into powf / polynomial / opt-level contributions on real silicon.
+[[bin]]
+name = "mpc_bench"
+path = "src/main_mpc_bench.rs"
+test = false
+bench = false
+
 [profile.dev]
 debug = true
 lto = true
@@ -135,5 +143,10 @@ incremental = true
 [profile.release]
 debug = false
 lto = true
-opt-level = "z"
+# Was "z". The size build cost 2.2x on the airbrakes MPC solve (18.5 ms vs
+# 8.3 ms for the same source, measured on the board by `mpc_bench`) and flash
+# is not the binding constraint here: 403 KB of a 1984 KB budget. rustc enables
+# neither fast-math nor FP contraction at any opt-level, so every float result
+# is bit-identical to the "z" build.
+opt-level = 3
 incremental = true
