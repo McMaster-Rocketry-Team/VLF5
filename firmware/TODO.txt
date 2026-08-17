@@ -1,6 +1,2 @@
-need hardware:
-joined fut jitter
-55ms sd stall?
-gps
-
-HIL airbrakes
+plot data
+ground station tui

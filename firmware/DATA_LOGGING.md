@@ -2,7 +2,7 @@
 
 Reference for what data leaves the flight computer, on which channel, at what
 rate, and whether a value lost from one channel can be reconstructed from
-another after the flight. Storage format v12. Updated 2026-08-16.
+another after the flight. Storage format v13. Updated 2026-08-17.
 
 ## How absence is represented
 
@@ -21,7 +21,7 @@ every `0xFFFF` on CAN is decoded to `None` by the accessor that reads it. No
 code above the wire ever sees the sentinel.
 
 The cost is size: a sentinel is free, an `Option` costs a discriminant plus
-padding, which is why the v12 records are half again as large as v11's. That is
+padding, which is why the v13 records are half again as large as v11's. That is
 the deliberate price of a log that cannot mistake a reading for its own absence.
 
 ## SD flight log (armed mode only)
@@ -29,13 +29,13 @@ the deliberate price of a log that cannot mistake a reading for its own absence.
 Two tagged record types interleaved into 512 B blocks (508 usable + CRC32),
 superblock flushed every 250 ms. Decoding:
 `rocket-cli download-flight-log <out.csv>` (one CSV row per fast record, latest
-slow snapshot merged in). Storage format v12 is **not** backward compatible:
+slow snapshot merged in). Storage format v13 is **not** backward compatible:
 logs written by older firmware are reported as unsupported by rocket-cli, and
 the firmware starts a fresh log over them on the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
-| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 145 B (144 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, apogee latch, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms) |
+| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 145 B (144 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, pad calibration complete, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms) |
 | **Slow** (tag 0x02) | 10 Hz | 241 B (240 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), `air_brakes` (**commanded + actual extension**, **validation-deploy flag**, **servo temp**, **MPC predicted apogee AGL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
 
 Throughput ≈ 64 kB/s of record payload (427 Hz × 145 B + 10 Hz × 241 B),
@@ -158,9 +158,9 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | `airbrakes_kf_vertical_velocity` | – | – | ✓ (absent until born / after apogee) | – | yes — replay |
 | `airbrakes_kf_tilt_deg` | ✓ (8-bit, `airbrakes_kf_tilt_valid`) | – | ✓ (absent before ignition / after apogee) | – | yes — replay / offline attitude |
 | airbrakes born | ✓ (1 bit; 0 after apogee) | – | ✓ (`AIRBRAKES_BARO_TRUSTED`) | – | yes — replay |
-| airbrakes drag check, apogee latch | – | – | ✓ (`airbrakes.flags` bits) | – | yes — replay |
+| airbrakes drag check | – | – | ✓ (`airbrakes.flags` bit) | – | yes — replay |
 | airbrakes burnout latch | – | – | ✓ (`AIRBRAKES_BURNOUT`) | – | SD only; the packet has 5 spare bits, but see the air-time note below |
-| airbrakes pad calibration complete | – | – | – | – | **nowhere on the wire** — RTT log line only; candidate for a VLCustomStatus bit |
+| airbrakes pad calibration complete | – | – | ✓ (`AIRBRAKES_PAD_CALIBRATED`) | – | SD only — **nowhere on the wire**; RTT line live, candidate for a VLCustomStatus bit |
 | `flight_stage` (incl. FailedToReachMinApogee; Mach lockout folded into `Ascent`) | ✓ (3-bit) | – | ✓ full rate | – | logged |
 | drogue/main deployed | – | – | ✓ (pyro fire flags) | – | read the stage transition, or the pyro fire bits for the GPIO edge |
 | `target_apogee_agl` | ✓ (14-bit) | – | – | – | also in SD config block |
@@ -313,6 +313,7 @@ Takeaways:
   believed on its own. `lat_lon` and `gps_altitude_asl` are separate `Option`s
   for the same reason: a fix can carry a position without an altitude.
 - `calibration_complete()` (airbrakes pad calibration, a launch-readiness
-  condition) is visible only on RTT — it has no CAN/telemetry slot. The
+  condition) is on the fast record as `AIRBRAKES_PAD_CALIBRATED`, but live it
+  is visible only on RTT — it has no CAN/telemetry slot. The
   natural home is a VLCustomStatus bit on the CAN heartbeat, relayed by the
   ground station as a GO/NO-GO light.
