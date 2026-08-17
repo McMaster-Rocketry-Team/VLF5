@@ -5,6 +5,12 @@ Physical bench setup for hardware-in-the-loop testing of the **VLF5 avionics** a
 reference. For the HIL firmware model (what's faked vs real, the flight timeline, RTT
 checklist), see [HIL.md](HIL.md).
 
+> **Probe serials swapped since this was written.** As of 2026-08-16 the ST-Link
+> presenting `066BFF525086874967123919` is on the **VLF5**, not the GCM —
+> confirmed against silicon, not the label: reading the H7 unique-ID register
+> `0x1FF1E800` through it succeeds, and the F4 address `0x1FFF7A10` faults.
+> The GCM was not attached at all. Re-probe before trusting the table in §2.
+>
 > Probed 2026-07-09; §0/§5c/§7 rewritten 2026-07-10 for the baro-only-over-radio HIL model.
 > Spans three repos: `VLF5/firmware` (this dir), `The_Endgame/{gcm_firmware,main_firmware}`,
 > `Rust_Monorepo`.

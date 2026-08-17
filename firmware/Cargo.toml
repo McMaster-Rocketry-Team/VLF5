@@ -44,6 +44,7 @@ embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git" }
 stm32-device-signature = { version = "0.3.3", features = ["stm32h74x"] }
 embedded-can = "0.4.1"
 crc = "3.2.1"
+libm = "0.2.7"
 heapless = { version = "0.8.0", features = ["serde"], default-features = false }
 lora-phy = { git = "https://github.com/lora-rs/lora-rs.git", default-features = false, features = [
     "defmt-03",
@@ -74,12 +75,18 @@ default = []
 # Base HIL infrastructure: simulate ONLY the barometer; IMU/GPS/pyro/mag/CAN/SD/LoRa are
 # all real and the board boots into SelfTest. Prefer hil-dual or hil-single.
 hil-replay = ["dep:icao-isa", "dep:icao-units"]
-# Dual-deploy HIL plot (drogue at apogee, main at altitude).
+# Dual-deploy HIL: replays the real Osiris OpenRocket trajectory against the
+# real FLIGHT_CONFIG, and boots straight into Armed so no ground station is
+# needed. ~8 minutes of wall clock, ending in a landed detection.
 #   cargo run --bin main --features hil-dual
-hil-dual = ["hil-replay"]
+hil-dual = ["hil-replay", "boot-armed"]
 # Single-deploy HIL plot (drogue then main back-to-back at apogee).
 #   cargo run --bin main --features hil-single
 hil-single = ["hil-replay"]
+# Boot straight into Armed instead of SelfTest, for a bench with no ground
+# station. HIL-only — see the compile_error in main.rs. The pyro task drives
+# real GPIO, so a boot-armed board fires both channels unattended.
+boot-armed = []
 
 [patch.crates-io]
 embassy-sync = { git = "https://github.com/embassy-rs/embassy.git" }
@@ -109,6 +116,13 @@ bench = false
 [[bin]]
 name = "baro_bench"
 path = "src/main_baro_bench.rs"
+test = false
+bench = false
+
+# IMU noise-characterization bench (windowed LSM6DSM stats over RTT; not flight fw).
+[[bin]]
+name = "imu_bench"
+path = "src/main_imu_bench.rs"
 test = false
 bench = false
 

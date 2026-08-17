@@ -38,12 +38,10 @@ dependencies = [
 name = "air-brakes-controller-core"
 version = "0.1.0"
 dependencies = [
- "biquad",
  "defmt 1.0.1",
  "firmware-common-new",
  "heapless 0.8.0",
  "libm",
- "micromath",
  "nalgebra",
  "serde",
 ]
@@ -894,6 +892,7 @@ dependencies = [
  "heapless 0.8.0",
  "icao-isa",
  "icao-units",
+ "libm",
  "lora-phy",
  "micromath",
  "nalgebra",

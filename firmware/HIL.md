@@ -17,10 +17,23 @@ telemetry stream; dump the flight log afterward with rocket-cli.
 
 ## Features
 
-| Feature | Deployment profile | Expected pyro |
-|---------|-------------------|---------------|
-| `hil-dual` | Drogue at apogee, main at ~457 m AGL | `PyroDrogue` near apogee, then `PyroMain` near main altitude |
-| `hil-single` | Both pyros at apogee | `PyroDrogue` then `PyroMain` back-to-back at apogee |
+| Feature | Trajectory | Config flown | Arming | Duration |
+|---------|-----------|--------------|--------|----------|
+| `hil-dual` | **Osiris replay** — the real OpenRocket run, Mach 1.91, 9.5 km (`hil/osiris.rs`) | the real `FLIGHT_CONFIG` | **boots Armed** (no ground station) | ~8.5 min |
+| `hil-single` | analytic script, ~2.9 km (`hil/baro_sim.rs`) | HIL single-deploy stand-in | `arm` over the radio | ~1.5 min |
+
+`hil-dual` is the only profile that exercises the **Mach lockout** — nothing
+else on the bench goes supersonic — and the only one that flies the numbers
+the rocket will actually fly. It replays the same CSV the host-side estimator
+tests replay (`air-brakes-controller-core/src/tests/osiris_sim.rs`), so a
+disagreement between bench and test suite is a real signal rather than two
+different flights.
+
+> `hil-dual` implies **`boot-armed`**: the board enters Armed straight out of
+> reset with no operator, and the pyro task energizes the drogue and main FETs
+> on its own about a minute later, every time it is reset. `boot-armed` will
+> not compile into a flight build (see the `compile_error!` in `main.rs`), but
+> on the bench it removes the last human check. **No e-matches. Ever.**
 
 Enable **exactly one** of `hil-dual` / `hil-single` (both pull in base `hil-replay`). Bare
 `hil-replay` alone does not compile.
@@ -35,17 +48,118 @@ config are all identical to flight.
 
 ## Run
 
-You need the **GCM** plugged into the laptop and antennas on both boards, same as a real flight.
+`hil-single` needs the **GCM** plugged in and antennas on both boards, to arm
+over the radio. `hil-dual` needs neither — it arms itself.
 
 From `VLF5/firmware` (probe attached):
 
 ```bash
-# Single-deploy plot
-cargo run --release --bin main --features hil-single
+# Osiris replay, self-arming — just watch RTT for ~8.5 minutes
+cargo run --release --bin main --features hil-dual -- \
+  --probe 0483:374b:066BFF525086874967123919
 
-# Dual-deploy plot
-cargo run --release --bin main --features hil-dual
+# Short analytic plot, armed over the radio
+cargo run --release --bin main --features hil-single
 ```
+
+Regenerate the Osiris table (after a new `.ork`, or a different sim) with:
+
+```bash
+scripts/gen_osiris_hil_table.py > src/hil/osiris_table.rs
+```
+
+### Verified `hil-dual` run, 2026-08-17
+
+Wall clock; the 20 s pad hold means trajectory time is wall − 20 s.
+
+> **This run predates the accelerometer ignition trigger** added to the
+> deployment estimator (`FlightProfile::ignition_detection_acc_threshold`,
+> 8 g on this profile). Two rows will move on the next bench run: ignition
+> detection from 21.12 s to ~20.15 s, and the Mach lockout exit with it,
+> from 47.12 s to ~46.15 s — the lockout duration itself is unchanged, it is
+> the anchor that moved. Everything from apogee onward is driven by altitude
+> and by the apogee call rather than by ignition, so it should be
+> substantially unchanged; that has not been measured yet.
+
+| wall | event | vs truth |
+|---|---|---|
+| 0.01 s | `enter armed mode` (boot-armed) | — |
+| 6.06 s | pad calibration complete, 3 windows | 14 s before ignition |
+| 21.12 s | ignition detected, pad altitude −63.0 m | matches the ISA pressure altitude of the Osiris pad |
+| 25.61 s | burnout latched | axial sign crosses at t=5.21 s; latch is a tail-off latch, see `osiris_sim.rs` |
+| 38.94 s | vertical filter born, **not forced**, alt 6967 m, vv 229.0 m/s | trajectory t=18.94 s, matching the host suite's 18.87 s |
+| 47.12 s | Mach lockout over | **26.0015 s** wall for a 26.0000 s config |
+| 59.64 s | airbrakes estimator retired (descending) | true apogee t=39.58 s → **+0.06 s** |
+| 62.68 s | descent detected, peak 9347.4 m AGL | truth 9329.6 m pressure-AGL → **+17.8 m** |
+| 63.68 s | **PyroDrogue** | apogee call + **1.0026 s** for a 1.000 s config |
+| 386.39 s | **PyroMain** | truth 457.2 m AGL crossing at t=366.4 s → **−0.01 s** |
+| 497.15 s | `landed` | 5 s stillness persistence after touchdown |
+
+No panics, hard faults or errors; the session ends on the harness timeout.
+
+Against the previous run (same trajectory, before the deployment timers took
+their time from the sample timestamp):
+
+| | was | now | config |
+|---|---|---|---|
+| Mach lockout | 25.3320 s | **26.0015 s** | 26.000 s |
+| drogue delay | 0.9770 s | **1.0025 s** | 1.000 s |
+| `PyroMain` | 386.3891 s | 386.3895 s | — (an altitude crossing, not a timer) |
+| `landed` | 497.0170 s | 497.1461 s | — |
+
+`PyroMain` is the control: it is triggered by the 457.2 m AGL crossing rather
+than by a timer, and it does not move. `landed` moves +129 ms, which is
+exactly the 5 s stillness persistence that used to be 2080 samples — 4.872 s
+at the part's real 427.02 Hz.
+
+**The sample clock is not 416 Hz.** `imu_bench` measures this board's LSM6DSM
+at **427.02 Hz** (2341.8 µs, ±1.5 µs), 2.65 % above the nominal
+`SAMPLES_PER_S = 416`.
+
+**Resolved for the timers.** The deployment estimator used to count its Mach
+lockout, pyro delays and apogee/landing persistence in *samples*, so every one
+of them expired 2.65 % early in wall time — measured on the bench, the 26 s
+Mach lockout ran **25.332 s** and the 1 s drogue delay ran **0.977 s**. Those
+timers now read the sample timestamp instead, and the same bench run measures
+**26.0015 s** and **1.0026 s**: about one sample long each, which is a timer
+that fires on the first sample *after* it expires rather than before. The
+airbrakes estimator was already fully measured-dt; the last two pieces of it
+that were not (the pre-ignition rewind buffer, sized in samples, and the
+ignition low pass, a biquad designed at the nominal rate) are now spans of
+measured time as well.
+
+**Still present for the KF, on purpose.** `BaroAltitudeKF` integrates a fixed
+`DT = 1/416` per sample while samples arrive every 1/427 s, which biases its
+vertical velocity low by 2.6 %. That is the deliberate half of the split: the
+filter whose output fires the pyros cannot have its bandwidth moved by a
+clock, so it is fed one fixed step per sample and nothing else. The visible
+cost is that anything gated on the filter *settling* moves with the sample
+rate — landing detection spreads 2.3 s across 380–480 Hz (`cargo test -p
+air-brakes-controller-core timers_are_independent_of_the_sample_rate`), all of
+it after touchdown and after both pyros have fired.
+
+**Resolved: the air-density math differed between host and board.**
+`approximate_air_density` was written `x.powf(4.256)`. The method form
+resolves to the inherent `f32::powf` under std and to whatever `F32Ext` trait
+is in scope under `no_std`, so the host suite and the firmware computed
+different numbers from the same source line — with `micromath` in scope the
+board's density ran up to 39% low at altitude, inflating the drag check's
+inverted airspeed by 28%.
+
+That first showed up here as a filter born at trajectory t=22.1 s against the
+host suite's 18.9 s. Everything else was ruled out against the SD log first:
+the logged accelerometer matched the baked table to <1%, logged tilt matched
+the host model, and integrating the logged sensors reproduced the true
+altitude to 40 m. The fix is `libm::powf` called by name — no
+inherent-vs-trait resolution, so the tests and the rocket run the same
+arithmetic — applied alongside the other three divergent call sites (`sqrt`,
+`tan`, `powi`), after which `micromath` left the dependency list entirely.
+
+Re-flown 2026-08-16: born at trajectory **t=18.89 s**, matching the host
+suite, recovering **3.17 s** of airbrakes control window. Deployment was
+unchanged to the millisecond (drogue 63.639 s, main 386.389 s, landed
+497.017 s), which is the expected result — the deployment estimator is
+baro-only and never reads air density.
 
 If `--connect-under-reset` fails to attach on a freshly-replugged probe, retry (or omit it).
 
@@ -92,8 +206,10 @@ so a bench baro fault can't abort the simulated flight.
 ### IMU values (`imu_sim::generate_imu`)
 
 The LSM6DSM is still **read for real** on its real data-ready interrupt — that read paces
-the 416 Hz loop and stamps the samples, so the estimators' measured-dt integration sees
-genuine timing, jitter and all. Only the *values* are replaced. The trajectory is
+the sample loop (nominally 416 Hz, measured 427.02 Hz on this part) and stamps the
+samples, so everything downstream that reads a timestamp sees genuine timing, jitter and
+all: both estimators' integrations, and now the deployment estimator's timers too. Only
+the *values* are replaced. The trajectory is
 analytic, so the specific force (what an accelerometer measures) is exact per phase, on
 device +Z — the scripted "up" (the estimator self-calibrates its mounting from pad
 gravity + thrust direction, so the axis choice is arbitrary; what matters is that pad

@@ -30,12 +30,17 @@ use nalgebra::Vector3;
 use super::baro_sim::{BURN_ACCEL_MS2, BURN_TIME_S, DESCENT_TERMINAL_MS, GRAVITY, PAD_DURATION_S};
 use super::noise::hash_noise;
 
-/// 1-sigma per-axis accelerometer noise (m/s^2). Mid of the 0.05–0.10 m/s^2
-/// measured on the Void Lake pad data (same LSM6DSM part, on the rail).
-const ACCEL_NOISE_MS2: f32 = 0.07;
-/// 1-sigma per-axis gyro noise (deg/s). Mid of the 0.07–0.16 deg/s measured
-/// on the Void Lake pad data.
-const GYRO_NOISE_DPS: f32 = 0.1;
+/// 1-sigma accelerometer noise (m/s^2), per axis.
+///
+/// Measured on THIS board's LSM6DSM by `cargo run --bin imu_bench`, 57
+/// stationary 2 s windows over 114 s, aggregated by
+/// `scripts/imu_bench_stats.py` (median window sigma). The axes are not
+/// equal and the earlier scalar 0.07 — taken from the Void Lake flight pad,
+/// which had rail sway and a live motor in it — was 2-5x pessimistic.
+const ACCEL_NOISE_MS2: Vector3<f32> = Vector3::new(0.0147, 0.0190, 0.0359);
+/// 1-sigma gyro noise (deg/s), per axis, same capture. Note X and Y are
+/// several times noisier than the old scalar 0.1 guess, and Z is quieter.
+const GYRO_NOISE_DPS: Vector3<f32> = Vector3::new(0.448, 0.181, 0.048);
 
 /// Constant injected gyro bias (deg/s, device frame).
 ///
@@ -102,15 +107,15 @@ pub fn generate_imu(t_s: f32, sample_idx: u32) -> IMUData {
     };
     IMUData {
         acc: Vector3::new(
-            ACCEL_NOISE_MS2 * noise(0),
-            ACCEL_NOISE_MS2 * noise(1),
-            specific_force_up(t_s) + ACCEL_NOISE_MS2 * noise(2),
+            ACCEL_NOISE_MS2.x * noise(0),
+            ACCEL_NOISE_MS2.y * noise(1),
+            specific_force_up(t_s) + ACCEL_NOISE_MS2.z * noise(2),
         ),
         gyro: GYRO_BIAS_DPS
             + Vector3::new(
-                GYRO_NOISE_DPS * noise(3),
-                GYRO_NOISE_DPS * noise(4),
-                GYRO_NOISE_DPS * noise(5),
+                GYRO_NOISE_DPS.x * noise(3),
+                GYRO_NOISE_DPS.y * noise(4),
+                GYRO_NOISE_DPS.z * noise(5),
             ),
     }
 }

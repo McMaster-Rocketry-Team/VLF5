@@ -5,7 +5,11 @@
 //! CAN, SD, and the LoRa radio — and the only things replaced are the sensor
 //! *values* a static bench cannot produce: the barometer reading
 //! ([`baro_sim`]) and the IMU's accel/gyro values ([`imu_sim`]), both
-//! synthesized from one scripted single-deploy flight. The IMU chip itself is
+//! synthesized from one flight. `hil-single` flies a short analytic script
+//! ([`baro_sim`] / [`imu_sim`]) that walks the mode machine in about a
+//! minute; `hil-dual` replays the real Osiris OpenRocket trajectory
+//! ([`osiris`]) against the real `FLIGHT_CONFIG` — Mach 1.9, 9.5 km, and
+//! eight minutes of wall clock. The IMU chip itself is
 //! still read on its real data-ready interrupt, so loop pacing and sample
 //! timestamps stay genuine; only the values are swapped. The board boots into
 //! SelfTest exactly like a flight build and is flown from rocket-cli over the
@@ -27,6 +31,11 @@ compile_error!("hil-replay requires hil-dual or hil-single");
 pub mod baro_sim;
 pub mod imu_sim;
 pub mod noise;
+#[cfg(feature = "hil-dual")]
+pub mod osiris;
+#[cfg(feature = "hil-dual")]
+#[rustfmt::skip]
+pub mod osiris_table;
 
 use embassy_time::Instant;
 use firmware_common_new::readings::{BaroData, IMUData};
@@ -47,6 +56,11 @@ pub struct HilSimState {
     armed_t0: Option<Instant>,
     baro_idx: u32,
     imu_idx: u32,
+    /// `hil-dual` replays the real Osiris trajectory from a baked table and
+    /// has to carry its roll integrator across samples; `hil-single` flies
+    /// the analytic script, which is stateless.
+    #[cfg(feature = "hil-dual")]
+    osiris: osiris::OsirisReplay,
 }
 
 impl HilSimState {
@@ -55,6 +69,8 @@ impl HilSimState {
             armed_t0: None,
             baro_idx: 0,
             imu_idx: 0,
+            #[cfg(feature = "hil-dual")]
+            osiris: osiris::OsirisReplay::new(),
         }
     }
 
@@ -80,6 +96,9 @@ impl HilSimState {
     /// Next synthetic baro sample for the current avionics `mode`.
     pub fn next_baro(&mut self, mode: AvionicsMode) -> BaroData {
         let t_s = self.flight_time_s(mode);
+        #[cfg(feature = "hil-dual")]
+        let baro = self.osiris.baro(t_s, self.baro_idx);
+        #[cfg(not(feature = "hil-dual"))]
         let baro = baro_sim::generate_baro(t_s, self.baro_idx);
         self.baro_idx = self.baro_idx.wrapping_add(1);
         baro
@@ -90,6 +109,9 @@ impl HilSimState {
     /// replaced.
     pub fn next_imu(&mut self, mode: AvionicsMode) -> IMUData {
         let t_s = self.flight_time_s(mode);
+        #[cfg(feature = "hil-dual")]
+        let imu = self.osiris.imu(t_s, self.imu_idx);
+        #[cfg(not(feature = "hil-dual"))]
         let imu = imu_sim::generate_imu(t_s, self.imu_idx);
         self.imu_idx = self.imu_idx.wrapping_add(1);
         imu

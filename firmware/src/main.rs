@@ -9,11 +9,18 @@ use core::cell::RefCell;
 
 use {defmt_rtt_pipe as _, panic_probe as _};
 
+// `boot-armed` removes the operator from the arming decision, so it must never
+// be reachable from a flight build. HIL builds fake the barometer, which is
+// what makes an unattended Armed boot a bench exercise rather than a live
+// rocket.
+#[cfg(all(feature = "boot-armed", not(feature = "hil-replay")))]
+compile_error!("boot-armed is a HIL-only bench shortcut; it requires hil-dual or hil-single");
+
 use air_brakes_controller_core::{
     DeploymentProfile, FlightConfig, FlightEstimators, FlightProfile, RocketParameters,
     airbrakes_estimator::AirbrakesConfig,
 };
-#[cfg(not(feature = "hil-replay"))]
+#[cfg(not(feature = "hil-single"))]
 use air_brakes_controller_core::airbrakes_estimator::MachLockoutConfig;
 use binary_macros::base64;
 use cortex_m::singleton;
@@ -112,12 +119,30 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
 /// motors go subsonic earlier (15.7–16.1 s) and apogee earlier (37.7–38.2 s),
 /// which only costs control window here — every bound below is set from the
 /// O3400 and stays safe on the backups.
-#[cfg(not(feature = "hil-replay"))]
+///
+/// The `hil-dual` bench build flies THIS config, not a HIL-specific one, and
+/// replays the same OpenRocket trajectory it was derived from (see
+/// `hil::osiris`). A bench profile with its own softened numbers would prove
+/// only that the bench profile works.
+#[cfg(not(feature = "hil-single"))]
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     profile: FlightProfile {
         // Mach 0.75 at 18.67 s worst case, x1.4; ends 13 s before the
         // earliest simulated apogee.
         mach_lockout_duration_us: Some(26_000_000),
+        // The ONLY ignition detector this half has. The barometric one it
+        // replaced completed at ignition+1.12 s on this trajectory while the
+        // airframe crosses Mach 0.8 at +1.88 s — it was deciding the start
+        // of the Mach lockout 0.75 s before the static port it reads began
+        // lying. This latches at +0.15 s instead.
+        //
+        // 8 g rather than the airbrakes half's 4 g: boost holds 14 g for the
+        // whole 6.3 s burn, so on this motor 8 g latches only 20 ms later
+        // than 4 g would (O3400 0.147 s, N2900 0.163 s) while doubling the
+        // margin over anything that can happen to a rocket on a rail. Cheap
+        // here, but airframe-specific — on a softer thrust curve the same
+        // 8 g costs real time, and 10 g can miss the launch entirely.
+        ignition_detection_acc_threshold: 8.0 * 9.81,
         deployment: DeploymentProfile::Dual {
             drogue_chute_minimum_altitude_agl: 2000.0,
             drogue_chute_delay_us: 1_000_000,
@@ -156,31 +181,14 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     profile: FlightProfile {
         mach_lockout_duration_us: None,
+        // 4 g, not the Osiris profile's 8 g: this bench's scripted motor is
+        // a constant 80 m/s^2 net, so the accelerometer sees 9.15 g and 8 g
+        // would leave barely a g of margin. Different airframe, different
+        // number — which is why this is per-profile config.
+        ignition_detection_acc_threshold: 4.0 * 9.81,
         deployment: DeploymentProfile::Single {
             minimum_deployment_altitude_agl: 2000.0,
             delay_us: 0,
-        },
-    },
-    airbrakes: AirbrakesConfig {
-        ignition_detection_acc_threshold: 4.0 * 9.81,
-        mach_lockout: None,
-        rocket: RocketParameters {
-            burnout_mass: 17.607,
-            cd: [0.47044, 0.5082, 0.57784, 0.665, 0.74313],
-            reference_area: 0.008982476,
-        },
-    },
-};
-
-#[cfg(all(feature = "hil-replay", not(feature = "hil-single")))]
-pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
-    profile: FlightProfile {
-        mach_lockout_duration_us: None,
-        deployment: DeploymentProfile::Dual {
-            drogue_chute_minimum_altitude_agl: 2000.0,
-            drogue_chute_delay_us: 0,
-            main_chute_altitude_agl: 457.2,
-            main_chute_delay_us: 0,
         },
     },
     airbrakes: AirbrakesConfig {
@@ -218,6 +226,22 @@ fn main() -> ! {
         "HIL-SINGLE build: baro is SIMULATED; IMU/GPS/mag/CAN/SD/LoRa are REAL and the real pyro task drives real GPIO — do NOT connect e-matches"
     );
     // Flight and HIL boot identically into SelfTest; the operator arms over the radio.
+    // Boot mode. Flight builds always come up in SelfTest and are armed by an
+    // operator over the radio — arming is a human decision and stays one.
+    //
+    // `boot-armed` skips that, for a bench with no ground station attached.
+    // It is gated to HIL builds at the top of this file because the thing it
+    // removes is the only thing standing between power-on and the pyro task
+    // energizing the drogue and main FETs on its own, roughly a minute later.
+    // NEVER power a `boot-armed` board with e-matches connected.
+    #[cfg(feature = "boot-armed")]
+    {
+        defmt::warn!(
+            "boot-armed: entering Armed with no operator — pyro GPIO WILL fire at apogee"
+        );
+        avionics_mode.sender().send(AvionicsMode::Armed);
+    }
+    #[cfg(not(feature = "boot-armed"))]
     avionics_mode.sender().send(AvionicsMode::SelfTest);
     let imu_baro_reading_pubsub =
         singleton!(: IMUBaroReadingPubSub = IMUBaroReadingPubSub::new()).unwrap();
