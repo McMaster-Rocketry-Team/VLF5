@@ -111,6 +111,12 @@ pub async fn armed_mode(
         FlightEstimators::new(FLIGHT_CONFIG.clone()),
     ));
 
+    // Session-scoped, like `estimators` itself: the per-sample estimator
+    // state, published by the estimator loop below and read by BOTH the SD
+    // logger and the 5 Hz packet loop. Hoisted up here because the packet
+    // loop now reads it instead of taking the estimators mutex.
+    let estimator_log_watch = EstimatorLogWatch::new();
+
     let update_packet_sensor_fut = async {
         let mut imu_baro_sub = SubscriberWithLastValue::new(imu_baro_pubsub).unwrap();
 
@@ -182,13 +188,23 @@ pub async fn armed_mode(
                     packet.payload_stack_status = PayloadSDRMCustomStatus::new();
                 }
 
-                estimators.lock(|s| {
-                    let est = s.borrow();
-                    let ab = est.airbrakes_estimator();
+                {
+                    // Read the SAME published sample the SD logger records,
+                    // rather than taking the estimators mutex at 5 Hz. The
+                    // downlink and the log can therefore not disagree about a
+                    // sample: there is only one, produced once per IMU sample
+                    // by the estimator loop below.
+                    //
+                    // `None` before that loop's first sample, which is the
+                    // same thing reading a freshly-built `FlightEstimators`
+                    // used to produce: nothing born, nothing calibrated, no
+                    // tilt, no deployment filter.
+                    let sample = estimator_log_watch.try_get().map(|(_, s)| s);
+                    let ab = sample.as_ref().and_then(|s| s.airbrakes.as_ref());
 
                     // Airbrakes estimator health: whether the vertical filter
                     // is born. The rest of its state is SD-only.
-                    packet.airbrakes_born = ab.is_some_and(|ab| ab.baro_trusted());
+                    packet.airbrakes_born = ab.is_some_and(|ab| ab.baro_trusted);
 
                     // ...and whether the pad calibration exists. This is the
                     // only airbrakes bit in the downlink that can be acted on
@@ -202,48 +218,60 @@ pub async fn armed_mode(
                     // `false` once the half is retired at apogee, where the
                     // question has stopped meaning anything — the same
                     // convention `airbrakes_born` follows.
-                    packet.airbrakes_calibrated = ab.is_some_and(|ab| ab.calibration_complete());
+                    packet.airbrakes_calibrated = ab.is_some_and(|ab| ab.calibration_complete);
 
                     // Tilt is the airbrakes estimator's gyro dead reckoning:
                     // absent before ignition and again once the estimator is
                     // retired at apogee. Passed through as the `Option` it
                     // already is — a zero here would read as "pointing
                     // straight up", which is a claim, not silence.
-                    packet.airbrakes_kf_tilt_deg =
-                        ab.and_then(|ab| ab.tilt()).map(|t| t.to_degrees());
+                    packet.airbrakes_kf_tilt_deg = ab.and_then(|ab| ab.tilt_rad).map(|t| t.to_degrees());
 
                     // The downlink and the SD log read the deployment KF
                     // through the SAME two accessors, so the two channels
                     // cannot disagree about whether a sample exists — they
                     // agree by construction rather than by two pieces of code
-                    // happening to make the same call. Both are `Some` in every
-                    // stage where the filter is live and fusing baro (`OnPad`
-                    // included, where a near-zero AGL is real evidence the baro
-                    // and the filter are alive before launch), and both are
-                    // `None` through the Mach lockout, where the filter is
-                    // frozen and holds a stale pre-ignition reading. `None` on
-                    // the ground display and an empty column in the log now
+                    // happening to make the same call.
+                    //
+                    // Both are absent for the whole first half of the flight,
+                    // by design and not by fault. There is no filter on the
+                    // pad at all — the barometer's only job there is the pad
+                    // altitude reference — and none through the Mach lockout
+                    // either: it is DROPPED at ignition detection rather than
+                    // frozen, so nothing can read a pre-ignition altitude out
+                    // of it while the rocket is kilometres away. One is built
+                    // in flight, from the first honest reading, when the 26 s
+                    // lockout ends (`hil-single` configures no lockout, so
+                    // there it is built at ignition detection instead). So
+                    // `deployment_kf` is `None` for the entire pad period AND
+                    // the 26 s that follow ignition, and `Some` from there to
+                    // landing.
+                    //
+                    // "n/a" on the ground display while the rocket is on the
+                    // rail is therefore correct, not a dead filter, and it is
+                    // not a pre-launch health check: `airbrakes_calibrated`
+                    // above is the field that says something with time left to
+                    // act on it. `None` here and an empty column in the log
                     // describe the same window.
-                    let deployment = est.deployment_estimator();
-                    let launch_pad_altitude_asl = deployment.launch_pad_altitude_asl();
-                    packet.deployment_kf = match (
-                        deployment.kf_altitude_asl(),
-                        deployment.kf_vertical_velocity(),
-                    ) {
-                        (Some(altitude_asl), Some(vertical_velocity)) => Some(DeploymentKfState {
-                            altitude_agl: altitude_asl - launch_pad_altitude_asl,
-                            vertical_velocity,
-                        }),
-                        _ => None,
-                    };
+                    packet.deployment_kf = sample.as_ref().and_then(|s| {
+                        match (s.deployment_altitude_asl, s.deployment_vertical_velocity) {
+                            (Some(altitude_asl), Some(vertical_velocity)) => {
+                                Some(DeploymentKfState {
+                                    altitude_agl: altitude_asl
+                                        - s.deployment_launch_pad_altitude_asl,
+                                    vertical_velocity,
+                                })
+                            }
+                            _ => None,
+                        }
+                    });
 
-                    // `state()` is read for the one thing only it can answer:
-                    // which flight phase the deployment state machine is in.
-                    // The numbers it also carries are deliberately not used
-                    // here — they are the second code path that used to make
-                    // the packet and the log disagree.
-                    packet.flight_stage = wire_flight_stage(est.state());
-                });
+                    // Written by the 416 Hz estimator loop below rather than
+                    // recomputed here, so the packet, the SD log and the
+                    // logger's own stage all come from one call to
+                    // `wire_flight_stage` instead of three.
+                    packet.flight_stage = flight_stage.lock(|r| *r.borrow());
+                }
             });
 
             ticker.next().await;
@@ -294,10 +322,6 @@ pub async fn armed_mode(
             vlp_avionics_client.send(packet_builder.create_packet().into());
         }
     };
-
-    // Session-scoped, like `estimators` itself: the per-sample estimator
-    // state the SD logger records, published by the loop below.
-    let estimator_log_watch = EstimatorLogWatch::new();
 
     let start_airbrakes_signal = Signal::<NoopRawMutex, ()>::new();
     let update_estimators_fut = async {
@@ -351,22 +375,19 @@ pub async fn armed_mode(
             // One update per ~416 Hz sample; retiring the airbrakes half at
             // apogee happens inside.
             //
-            // `log_sample` is taken here, inside the same lock as `update`,
-            // because the baro innovation-gate outcomes it carries describe
-            // exactly the sample `update` just processed and are overwritten
-            // by the next one. It is published with its timestamp so the
-            // logger can pair it with the matching fast record and refuse
-            // anything else.
+            // The log sample comes back OUT of `update` rather than being
+            // read off the estimators afterwards: the baro innovation-gate
+            // outcomes it carries describe exactly the sample `update` just
+            // processed and are stored nowhere, so there is no way left to
+            // read them late or attribute them to the wrong tick. It is
+            // published with its timestamp so the logger can pair it with the
+            // matching fast record and refuse anything else.
             let (pyro, state, mpc_states, log_sample) = estimators.lock(|s| {
                 let mut est = s.borrow_mut();
-                let pyro = est.update(reading.timestamp_us, imu.as_ref(), baro_altitude_asl);
+                let (pyro, log_sample) =
+                    est.update(reading.timestamp_us, imu.as_ref(), baro_altitude_asl);
 
-                (
-                    pyro,
-                    est.state(),
-                    est.airbrakes_mpc_states(),
-                    est.log_sample(),
-                )
+                (pyro, est.state(), est.airbrakes_mpc_states(), log_sample)
             });
             estimator_log_watch
                 .sender()
@@ -428,7 +449,7 @@ pub async fn armed_mode(
 
         start_airbrakes_signal.wait().await;
         let launch_pad_altitude_asl =
-            estimators.lock(|s| s.borrow().deployment_estimator().launch_pad_altitude_asl());
+            estimators.lock(|s| s.borrow().launch_pad_altitude_asl());
 
         // The same airframe the airbrakes estimator inverts for its drag
         // check — one field, so the lockout and the apogee prediction cannot
@@ -445,50 +466,91 @@ pub async fn armed_mode(
         let mut mpc_went_full = false;
         let mut validating = false;
         loop {
-            // Run condition and MPC state are the same Option: Some exactly
-            // while the airbrakes are permitted to be open (coasting, filter
-            // alive, ascending, subsonic). "Permitted but no state" cannot
-            // be expressed, so there is no fallback chain — the loop ends
-            // (and the brakes retract) the moment permission lapses.
-            let Some(s) = estimators.lock(|s| s.borrow().airbrakes_mpc_states()) else {
+            // Two questions, one lock, one sample of the estimator, because
+            // they are NOT the same question and must not be answered a tick
+            // apart:
+            //
+            // * is the airbrakes half RETIRED — dropped for good by
+            //   `FlightEstimators::update` at apogee, below the horizon, or
+            //   on the deployment half's apogee call. Destructive and final:
+            //   there is no state left to reopen from. This ends the loop.
+            // * is the gate OPEN RIGHT NOW — Some exactly while the brakes
+            //   are permitted to be open (filter alive, ascending, subsonic).
+            //   This shuts for reasons that pass, so it ends a tick, not the
+            //   flight.
+            //
+            // Ending on the gate alone was one unlucky tick away from ending
+            // airbrakes control for a whole healthy flight. On the nominal
+            // Osiris O3400 trajectory the filter is born at 18.892 s and its
+            // vertical velocity settles at 251.8 m/s against a 0.8 Mach
+            // ceiling of 250.2 m/s — 0.6% over — so the ceiling clause holds
+            // the gate shut from 18.919 s to 19.079 s, 0.160 s. A 10 Hz tick
+            // lands inside that window: the loop used to get 1 controlled
+            // tick and then command 0% for the remaining 20 s of coast. Ending
+            // on retirement instead gets all 206 of them, and still ends for
+            // good at 39.59 s, on the same sample the estimator retires.
+            let (mpc_states, retired) = estimators.lock(|s| {
+                let est = s.borrow();
+                (
+                    est.airbrakes_mpc_states(),
+                    est.airbrakes_estimator().is_none(),
+                )
+            });
+            if retired {
                 break;
-            };
-            let mpc = airbrakes_mpc.update(s.altitude_asl, s.velocity);
-            mpc_went_full |= mpc.extension_percentage >= 0.99;
-
-            // An undershoot barely moves the brakes, leaving the flight with no
-            // evidence they work — so once slow enough to be harmless (full
-            // extension costs ~0.1 m/s^2 at Mach 0.1), open them fully anyway.
-            // Vertical velocity, like the gate's own `max_open_mach`, so it
-            // always sweeps through before apogee — total airspeed would not on
-            // a tilted flight.
-            if !validating
-                && !mpc_went_full
-                && s.velocity.y < 0.1 * approximate_speed_of_sound(s.altitude_asl)
-            {
-                info!(
-                    "airbrakes: MPC never reached full extension; forcing 100% for validation at {} m/s",
-                    s.velocity.y
-                );
-                validating = true;
             }
 
-            let airbrake_extension_percentage = if validating {
-                1.0
-            } else {
-                mpc.extension_percentage
-            };
-            // The prediction belongs to the MPC's own command. While the
-            // validation deploy overrides it, there is no prediction for what
-            // is actually being commanded, so report absence rather than a
-            // number about a different extension. A solve that comes back NaN
-            // is absent for the same reason — it is not a prediction either,
-            // and the packet's fixed-point encoding has nothing to make of it.
-            let predicted_apogee_agl = if validating {
-                None
-            } else {
-                let predicted_apogee_agl = mpc.predicted_apogee_asl - launch_pad_altitude_asl;
-                (!predicted_apogee_agl.is_nan()).then_some(predicted_apogee_agl)
+            // A shut gate is a retracted tick — a real 0.0 on the wire, and no
+            // prediction, because the MPC did not run and so predicted
+            // nothing. Both latches below live outside the loop on purpose and
+            // are left alone here: they are statements about the flight so
+            // far, not about this tick, and a gap in the middle of the coast
+            // does not un-say them.
+            let (airbrake_extension_percentage, predicted_apogee_agl) = match mpc_states {
+                None => (0.0, None),
+                Some(s) => {
+                    let mpc = airbrakes_mpc.update(s.altitude_asl, s.velocity);
+                    mpc_went_full |= mpc.extension_percentage >= 0.99;
+
+                    // An undershoot barely moves the brakes, leaving the flight
+                    // with no evidence they work — so once slow enough to be
+                    // harmless (full extension costs ~0.1 m/s^2 at Mach 0.1),
+                    // open them fully anyway. Vertical velocity, like the
+                    // gate's own `max_open_mach`, so it always sweeps through
+                    // before apogee — total airspeed would not on a tilted
+                    // flight.
+                    if !validating
+                        && !mpc_went_full
+                        && s.velocity.y < 0.1 * approximate_speed_of_sound(s.altitude_asl)
+                    {
+                        info!(
+                            "airbrakes: MPC never reached full extension; forcing 100% for validation at {} m/s",
+                            s.velocity.y
+                        );
+                        validating = true;
+                    }
+
+                    let airbrake_extension_percentage = if validating {
+                        1.0
+                    } else {
+                        mpc.extension_percentage
+                    };
+                    // The prediction belongs to the MPC's own command. While
+                    // the validation deploy overrides it, there is no
+                    // prediction for what is actually being commanded, so
+                    // report absence rather than a number about a different
+                    // extension. A solve that comes back NaN is absent for the
+                    // same reason — it is not a prediction either, and the
+                    // packet's fixed-point encoding has nothing to make of it.
+                    let predicted_apogee_agl = if validating {
+                        None
+                    } else {
+                        let predicted_apogee_agl =
+                            mpc.predicted_apogee_asl - launch_pad_altitude_asl;
+                        (!predicted_apogee_agl.is_nan()).then_some(predicted_apogee_agl)
+                    };
+                    (airbrake_extension_percentage, predicted_apogee_agl)
+                }
             };
             publish_airbrakes_commanded(
                 air_brakes_watch,
@@ -508,9 +570,10 @@ pub async fn armed_mode(
             ticker.next().await;
         }
 
-        // Permission has lapsed, so the brakes are commanded shut — a real 0.0
-        // — and the MPC has stopped, so there is no longer a prediction to go
-        // with it.
+        // The airbrakes half is retired — the flight is past apogee and there
+        // is no state left to reopen from — so the brakes are commanded shut
+        // (a real 0.0, not an absence) and the MPC has stopped for good, so
+        // there is no longer a prediction to go with it.
         publish_airbrakes_commanded(air_brakes_watch, Some(0.0), None, false);
         can_sender.send(AirBrakesControlMessage::new(0.0).into());
         packet_builder.update(|packet| {

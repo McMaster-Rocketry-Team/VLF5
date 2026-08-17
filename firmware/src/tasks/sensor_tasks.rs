@@ -203,6 +203,9 @@ enum SensorFault<E> {
     Io(E),
     /// The transfer did not finish within [`SENSOR_IO_TIMEOUT_MS`].
     Timeout,
+    /// The transfer completed, but the value it carried cannot be real — see
+    /// [`check_baro`]. Counted as a failed read so it spends the same budget.
+    Invalid,
 }
 
 /// Flatten a [`run_with_timeout`] result into one `Result`.
@@ -237,6 +240,51 @@ fn tolerate<T, E>(
                 Ok(None)
             }
         }
+    }
+}
+
+/// Reject a barometer sample whose pressure is not a real, positive Pascal
+/// value, so it spends the [`SENSOR_IO_ERROR_LIMIT`] budget through
+/// [`tolerate`] and is dropped exactly like any other bus glitch.
+///
+/// The MS5607's compensation is integer arithmetic on the raw pressure word
+/// (`drivers/ms5607.rs`, the final `pressure` line) with no lower clamp. With
+/// this part's calibration the result crosses zero at a raw `d1` of 61.5% of
+/// nominal, and `d1 = 0` — what the MS5607 returns for an ADC read issued
+/// before its conversion has finished — gives -175925 Pa. `altitude_asl` then
+/// hands that to `calculate_isa_altitude`, which is a `powf` of a negative
+/// base: NaN.
+///
+/// A NaN altitude is far worse than a missing sample, because nothing
+/// downstream rejects it: both baro gates in the deployment estimator are
+/// `.abs() > threshold`, and that is *false* for NaN, so a NaN takes the
+/// accept branch and is fused into the filter that fires the pyros. Replayed
+/// against the Void Lake flight log, 3 ms of NaN pressure took the run from
+/// 41915 state changes ending Landed with both pyros fired, to 175 state
+/// changes stuck in Ascent with a NaN vertical velocity and no pyros at all —
+/// no panic, no watchdog reset, and nothing in the log to say why. Dropping
+/// the sample here instead costs one of five tolerated reads (~2.4 ms at
+/// 416 Hz) and protects the estimators, the CAN broadcast and the SD log at
+/// the one point where a bad pressure is first seen.
+///
+/// The test is written as the negation of the accept condition rather than as
+/// `pressure <= 0.0` for exactly the reason above: `NaN <= 0.0` is false, so
+/// the direct form would wave a NaN through the same way the gates
+/// downstream do. `is_finite` additionally excludes +inf, which the integer
+/// path cannot produce but a HIL baro could.
+///
+/// No valid reading is lost: ISA pressure is 101325 Pa at sea level and still
+/// 22632 Pa at 11 km, four orders of magnitude clear of the test. Pressures
+/// that are finite but implausible (a stuck-high MISO reads 0xFFFFFF, giving
+/// 566030 Pa and -17166 m) are deliberately left alone here — those are
+/// finite, so the estimator's innovation gate handles them correctly, which
+/// is what it is for.
+fn check_baro<E>(result: Result<BaroData, SensorFault<E>>) -> Result<BaroData, SensorFault<E>> {
+    match result {
+        Ok(data) if !(data.pressure > 0.0 && data.pressure.is_finite()) => {
+            Err(SensorFault::Invalid)
+        }
+        other => other,
     }
 }
 
@@ -434,7 +482,7 @@ async fn read_baro_low_power_loop<B: SpiDevice>(
     loop {
         let read =
             run_with_timeout(SENSOR_IO_TIMEOUT_MS, read_baro_or_sim(baro, hil, mode_watch)).await;
-        match tolerate(sensor_result(read), &mut baro_failures)? {
+        match tolerate(check_baro(sensor_result(read)), &mut baro_failures)? {
             Some(baro_data) => publisher.publish_immediate(SensorReading::new(
                 Instant::now().as_micros(),
                 (None, baro_data),
@@ -472,7 +520,7 @@ async fn read_imu_baro_loop<I: SpiDevice, B: SpiDevice>(
         if matches!(imu_outcome, Ok(None)) {
             warn!("IMU read failed ({} consecutive)", imu_failures);
         }
-        let baro_outcome = tolerate(sensor_result(baro_read), &mut baro_failures);
+        let baro_outcome = tolerate(check_baro(sensor_result(baro_read)), &mut baro_failures);
         if matches!(baro_outcome, Ok(None)) {
             warn!("baro read failed ({} consecutive)", baro_failures);
         }

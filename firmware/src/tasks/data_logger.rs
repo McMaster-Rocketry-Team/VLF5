@@ -19,7 +19,7 @@ use firmware_common_new::{
         AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
     },
     flight_data_record::{
-        AIRBRAKES_APOGEE, AIRBRAKES_BARO_GATE_REJECT,
+        AIRBRAKES_BARO_GATE_REJECT,
         AIRBRAKES_BARO_RESYNC, AIRBRAKES_BARO_TRUSTED, AIRBRAKES_BURNOUT,
         AIRBRAKES_PAD_CALIBRATED,
         AIRBRAKES_SUBSONIC_DRAG, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
@@ -198,9 +198,10 @@ fn pack_estimator_sample(
     if ab.baro_trusted {
         flags |= AIRBRAKES_BARO_TRUSTED;
     }
-    if ab.is_apogee {
-        flags |= AIRBRAKES_APOGEE;
-    }
+    // Nothing sets bit 4 (`AIRBRAKES_APOGEE`) any more: the estimator's apogee
+    // latch was deleted as dead on 2026-08-17. Apogee is now visible in the
+    // log as the sample where this whole record goes absent, because the
+    // wrapper retires the airbrakes half there. The bit stays reserved.
     if ab.baro_gate.rejected() {
         flags |= AIRBRAKES_BARO_GATE_REJECT;
     }

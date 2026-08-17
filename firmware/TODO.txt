@@ -1,4 +1,5 @@
 need hardware:
 joined fut jitter
-measure sensor noise
 55ms sd stall?
+
+HIL airbrakes

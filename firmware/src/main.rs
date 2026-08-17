@@ -136,12 +136,18 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
         // of the Mach lockout 0.75 s before the static port it reads began
         // lying. This latches at +0.15 s instead.
         //
-        // 8 g rather than the airbrakes half's 4 g: boost holds 14 g for the
-        // whole 6.3 s burn, so on this motor 8 g latches only 20 ms later
-        // than 4 g would (O3400 0.147 s, N2900 0.163 s) while doubling the
-        // margin over anything that can happen to a rocket on a rail. Cheap
-        // here, but airframe-specific — on a softer thrust curve the same
-        // 8 g costs real time, and 10 g can miss the launch entirely.
+        // 8 g: boost holds 14 g for the whole 6.3 s burn, so on this motor
+        // 8 g costs only 15-22 ms over 4 g while doubling the margin over
+        // anything that can happen to a rocket on a rail. Measured latch
+        // times after true ignition, sustain included — O3400 0.136 s,
+        // N2900 0.148 s (`ignition_latch_time_by_threshold`). Cheap here,
+        // but airframe-specific: on LC'25's softer curve 8 g costs 0.45 s
+        // and 10 g never latches at all.
+        //
+        // The airbrakes half below runs the same detector at the same
+        // number. They are two settings, but "the motor lit" is one event,
+        // so on this airframe they get one answer — and the diagnostic
+        // asserts the two halves latch on the same sample.
         ignition_detection_acc_threshold: 8.0 * 9.81,
         deployment: DeploymentProfile::Dual {
             drogue_chute_minimum_altitude_agl: 2000.0,
@@ -152,8 +158,17 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
         },
     },
     airbrakes: AirbrakesConfig {
-        // Boost holds 14 g for the whole 6.3 s burn, so 4 g clears easily.
-        ignition_detection_acc_threshold: 4.0 * 9.81,
+        // Same 8 g as the pyro half above, and for the same reason. This was
+        // 4 g while this half had no sustain, which meant the looser
+        // threshold and the weaker transient rejection sat on the same
+        // detector; sharing the implementation removed the second half of
+        // that and matching the number removes the first.
+        //
+        // The cost lands entirely on this half — it used to latch ~0.02 s
+        // after ignition and now latches at 0.136 s with the rest. That lag
+        // is the error in the origin of the two timers below, and 0.115 s
+        // against a 17.5 s floor is not a number either of them can feel.
+        ignition_detection_acc_threshold: 8.0 * 9.81,
         mach_lockout: Some(MachLockoutConfig {
             // Earliest simulated time below Mach 0.8: 17.52 s. This floor,
             // not the velocity ceiling, is what actually keeps an early
