@@ -190,6 +190,20 @@ pub async fn armed_mode(
                     // is born. The rest of its state is SD-only.
                     packet.airbrakes_born = ab.is_some_and(|ab| ab.baro_trusted());
 
+                    // ...and whether the pad calibration exists. This is the
+                    // only airbrakes bit in the downlink that can be acted on
+                    // while there is still time to act: `airbrakes_born` is
+                    // `baro_trusted`, which cannot go true until the Mach
+                    // lockout has already been and gone. Ignition detection is
+                    // gated on the calibration, so a rocket on the rail
+                    // reporting false here will fly with no airbrakes and
+                    // report nothing unusual while doing it.
+                    //
+                    // `false` once the half is retired at apogee, where the
+                    // question has stopped meaning anything — the same
+                    // convention `airbrakes_born` follows.
+                    packet.airbrakes_calibrated = ab.is_some_and(|ab| ab.calibration_complete());
+
                     // Tilt is the airbrakes estimator's gyro dead reckoning:
                     // absent before ignition and again once the estimator is
                     // retired at apogee. Passed through as the `Option` it
@@ -296,13 +310,17 @@ pub async fn armed_mode(
         loop {
             // Not `next_message_pure`: that silently swallows `Lagged`, and a
             // dropped sample is not a neutral event here. The deployment
-            // estimator is SAMPLE-clocked — its burn timer, apogee
-            // persistence, landing persistence and pyro delays are all counts
-            // of samples, and its KF integrates a fixed `DT` — so every
-            // sample this loop misses stretches those timers and shortens the
-            // filter's idea of elapsed time, with nothing in the flight log
-            // to say it happened. The data is gone either way; refusing to
-            // drop it quietly is the point.
+            // estimator's KF integrates a fixed `DT` per sample — deliberately,
+            // so no clock can surprise the filter that fires the pyros — so
+            // every sample this loop misses shortens that filter's idea of
+            // elapsed time, with nothing in the flight log to say it happened.
+            // The data is gone either way; refusing to drop it quietly is the
+            // point.
+            //
+            // What a drop no longer does is stretch the timers: the Mach
+            // lockout, the pyro delays and the apogee/landing persistence all
+            // read the sample timestamp now, so they stay in honest seconds
+            // across a gap.
             let reading = loop {
                 match imu_baro_sub.next_message().await {
                     WaitResult::Message(reading) => break reading,
@@ -311,7 +329,7 @@ pub async fn armed_mode(
                             estimator_dropped_samples.saturating_add(dropped);
                         if !lag_warned {
                             warn!(
-                                "estimator loop lagged the sensor stream, {} samples lost — sample-clocked timers now run long",
+                                "estimator loop lagged the sensor stream, {} samples lost — the deployment KF has missed that many fixed-DT steps",
                                 estimator_dropped_samples
                             );
                             lag_warned = true;

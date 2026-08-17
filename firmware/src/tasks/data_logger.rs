@@ -21,6 +21,7 @@ use firmware_common_new::{
     flight_data_record::{
         AIRBRAKES_APOGEE, AIRBRAKES_BARO_GATE_REJECT,
         AIRBRAKES_BARO_RESYNC, AIRBRAKES_BARO_TRUSTED, AIRBRAKES_BURNOUT,
+        AIRBRAKES_PAD_CALIBRATED,
         AIRBRAKES_SUBSONIC_DRAG, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
         DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
         FlightDataFastRecord,
@@ -205,6 +206,13 @@ fn pack_estimator_sample(
     }
     if ab.baro_gate.resynced() {
         flags |= AIRBRAKES_BARO_RESYNC;
+    }
+    // The only one of these that says anything before ignition, which is
+    // exactly when it matters: the estimator will not detect ignition
+    // without it, so a pad segment logged with this clear is the whole
+    // explanation for airbrakes that never deployed.
+    if ab.calibration_complete {
+        flags |= AIRBRAKES_PAD_CALIBRATED;
     }
 
     (
