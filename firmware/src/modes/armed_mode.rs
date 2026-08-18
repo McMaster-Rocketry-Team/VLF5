@@ -22,6 +22,7 @@ use firmware_common_new::{
         node_types::{AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE},
         sender::CanSender,
     },
+    flight_data_record::AirbrakesState,
     flight_storage::DEFAULT_TARGET_APOGEE_AGL,
     vlp::{
         client::VLPAvionics,
@@ -289,22 +290,24 @@ pub async fn armed_mode(
                     let sample = estimator_log_watch.try_get().map(|(_, s)| s);
                     let ab = sample.as_ref().and_then(|s| s.airbrakes.as_ref());
 
-                    // Airbrakes estimator health: whether the vertical filter
-                    // is born. The rest of its state is SD-only.
-                    packet.airbrakes_born = ab.is_some_and(|ab| ab.airbrakes_enabled);
+                    // Airbrakes estimator health: whether the brakes are
+                    // permitted to open. Which of the other three states it
+                    // is in, if not, is SD-only.
+                    packet.airbrakes_enabled =
+                        ab.is_some_and(|ab| ab.state == AirbrakesState::AirbrakesEnabled);
 
                     // ...and whether the pad calibration exists. This is the
                     // only airbrakes bit in the downlink that can be acted on
-                    // while there is still time to act: `airbrakes_born` is
-                    // `airbrakes_enabled`, which cannot go true until the Mach
-                    // lockout has already been and gone. Ignition detection is
+                    // while there is still time to act: `airbrakes_enabled`
+                    // cannot go true until the Mach lockout has already been
+                    // and gone. Ignition detection is
                     // gated on the calibration, so a rocket on the rail
                     // reporting false here will fly with no airbrakes and
                     // report nothing unusual while doing it.
                     //
                     // `false` once the half is retired at apogee, where the
                     // question has stopped meaning anything — the same
-                    // convention `airbrakes_born` follows.
+                    // convention `airbrakes_enabled` follows.
                     packet.airbrakes_calibrated = ab.is_some_and(|ab| ab.calibration_complete);
 
                     // Tilt is the airbrakes estimator's gyro dead reckoning:

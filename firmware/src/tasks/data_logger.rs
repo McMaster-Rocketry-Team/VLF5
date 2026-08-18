@@ -20,8 +20,7 @@ use firmware_common_new::{
     },
     flight_data_record::{
         AIRBRAKES_BARO_GATE_REJECT,
-        AIRBRAKES_BARO_RESYNC, AIRBRAKES_BURNOUT, AIRBRAKES_ENABLED,
-        AIRBRAKES_PAD_CALIBRATED,
+        AIRBRAKES_BARO_RESYNC, AIRBRAKES_BURNOUT, AIRBRAKES_PAD_CALIBRATED,
         AIRBRAKES_SUBSONIC_DRAG, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
         DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
         FlightDataFastRecord,
@@ -219,9 +218,9 @@ fn pack_estimator_sample(
     if ab.burnout_detected {
         flags |= AIRBRAKES_BURNOUT;
     }
-    if ab.airbrakes_enabled {
-        flags |= AIRBRAKES_ENABLED;
-    }
+    // Two bits at the top of the same byte, so "where was the estimator"
+    // costs nothing over the booleans it replaced.
+    flags |= ab.state.to_flags();
     if ab.baro_gate.rejected() {
         flags |= AIRBRAKES_BARO_GATE_REJECT;
     }

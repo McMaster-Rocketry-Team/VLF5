@@ -89,7 +89,7 @@ are live throughout and are what to read there.
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 38 B (299/304 bits — 5 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes born**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
+| `TelemetryPacket` | 38 B (299/304 bits — 5 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
 | `LowPowerTelemetryPacket` | 13 B (98 bits — 6 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp, **payload EPM battery** |
 | `LandedTelemetryPacket` | 11 B (88 bits — 0 spare) | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
@@ -157,7 +157,7 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | `airbrakes_kf_altitude_asl` | – | – | ✓ (ASL, absent until born / after apogee) | – | yes — replay IMU+baro through estimator |
 | `airbrakes_kf_vertical_velocity` | – | – | ✓ (absent until born / after apogee) | – | yes — replay |
 | `airbrakes_kf_tilt_deg` | ✓ (8-bit, `airbrakes_kf_tilt_valid`) | – | ✓ (absent before ignition / after apogee) | – | yes — replay / offline attitude |
-| airbrakes enabled (the brakes may open, one-way) | ✓ as `airbrakes_born` (1 bit; 0 after apogee) | – | ✓ (`AIRBRAKES_ENABLED`) | – | yes — replay |
+| `airbrakes_state` (`Armed`/`Stage1`/`DeadReckoning`/`AirbrakesEnabled`, one-way) | ✓ as `airbrakes_enabled` (1 bit, the last state only; 0 after apogee) | – | ✓ (2 bits at the top of `airbrakes.flags`) | – | partly — `Armed` vs `Stage1` is this half's OWN ignition detection and is nowhere else |
 | airbrakes drag check | – | – | ✓ (`airbrakes.flags` bit) | – | yes — replay |
 | airbrakes burnout latch | – | – | ✓ (`AIRBRAKES_BURNOUT`) | – | SD only; the packet has 5 spare bits, but see the air-time note below |
 | airbrakes pad calibration complete | – | – | ✓ (`AIRBRAKES_PAD_CALIBRATED`) | – | SD only — **nowhere on the wire**; RTT line live, candidate for a VLCustomStatus bit |
