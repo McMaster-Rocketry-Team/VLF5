@@ -100,7 +100,7 @@ are live throughout and are what to read there.
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 38 B (304/304 bits — 0 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts**, **payload arm-sequence state**, **five experiment flags per channel** |
+| `TelemetryPacket` | 41 B (328/328 bits — 0 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts**, **payload arm-sequence state**, **five experiment flags per channel**, **three fracture load cells** |
 | `LowPowerTelemetryPacket` | 12 B (96 bits — 0 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp, **payload EPM battery** |
 | `LandedTelemetryPacket` | 11 B (88 bits — 0 spare) | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
@@ -205,7 +205,7 @@ sources, and they are there so their edges are timestamped, not resampled.
 | EPM battery voltage | ✓ (9-bit, 12–17 V @ 9.8 mV; **all-ones = unavailable, zero = below 12 V**) | ✓/LP (same 9-bit field, same two codes) | – | ✓ (raw mV, absent = unavailable) | logged |
 | EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (5-bit each, 0–1 A @ 32.3 mA, pins at 968 mA; **all-ones code = unavailable**) | – | – | ✓ (raw mA, absent = unavailable) | logged |
 | SEM actuator steps ×3 | ✓ (10-bit each, full u16 @ 64.1 steps; **all-ones code = unavailable**) | – | – | ✓ (raw steps, absent = unavailable) | logged |
-| SEM load cells ×3 (fracture load, cN) | – | – | – | ✓ (raw cN, signed, absent = unavailable) | **SD only** — the downlink has no room, see below |
+| SEM load cells ×3 (fracture load) | ✓ (8-bit each, −20..79.6 N @ 0.392 N; **all-ones code = unavailable**) | – | – | ✓ (raw cN, signed, absent = unavailable) | logged — SD is exact cN, the packet is quantized N |
 | experiment flags: fractured, finished, fault, closure confirmed, monitoring | ✓ (1 bit each × 3 channels = 15) | – | – | ✓ (packed word, expanded to 21 CSV columns) | logged |
 | experiment flags: homed, enabled | – | – | – | ✓ (same packed word) | **SD only** — see `DownlinkExperimentFlags` |
 | payload arm-sequence bits ×3 (`arm_seq_running` / `_complete` / `_fault`) | ✓ (1 bit each) | – | – | ✓ (inside `payload_sdrm_custom_status`, bits 8–10) | logged |
@@ -231,7 +231,9 @@ Takeaways:
   flags left behind are the two the ground already knows — `enabled` is
   fitted-at-build configuration and `homed` is an arm-sequence intermediate
   `arm_seq_complete` / `arm_seq_fault` already summarise. The three load cells
-  did not fit at any useful resolution and stay on SD.
+  took the packet's last three bytes at 8 bits each, over −20..80 N rather than
+  the CAN field's ±327.67 N — mirroring the wire range would have cost 2.57 N
+  per code, the same mistake the rails made with their old 0–10.23 A range.
   The 30-byte length is a hard cut, not an extension: `FixedLenSerializable` is
   exact-length, so a 20-byte type 35 does not decode as a short 30-byte one.
   Payload and avionics move together or the payload goes dark.
@@ -245,23 +247,25 @@ Takeaways:
   | struct | on air | payload symbols | time on air |
   |---|---|---|---|
   | 36–37 B | 46–47 B | 80 | 1511.4 ms |
-  | **38–41 B** | **48–52 B** | **88** | **1642.5 ms** ← current bucket |
+  | **38–41 B** | **48–52 B** | **88** | **1642.5 ms** ← current bucket, and 41 B is its top |
   | 42–45 B | 53–57 B | 96 | 1773.6 ms |
   | 46–49 B | 58–62 B | 104 | 1904.6 ms |
 
   At 1642.5 ms the packet occupies **82 % of the 2 s telemetry period**. Each
   step up costs 131.1 ms, or 6.6 points of that duty cycle.
 
-  So there are **three bytes of free headroom** above the current struct. An
-  earlier version of this note put the steps at 50 / 55 / 60 B on air and
-  concluded 38 B was the last size in the bucket; those boundaries were
-  computed with CRC on, and the radio runs with CRC off. The same arithmetic
-  says the shrink from the old 41 B packet to 38 B bought no air time at all —
-  both are 1642.5 ms.
-  The payload stack owns 97 of the 304 used bits (32%): 8 for the stack flags,
+  The packet sat at 38 B until the payload's load cells took the last three
+  bytes, and it is now genuinely full: the next field costs 131.1 ms whatever
+  it is. An earlier version of this note put the steps at 50 / 55 / 60 B on air
+  and concluded 38 B was already the last size in the bucket; those boundaries
+  were computed with CRC on, and the radio runs with CRC off. That mistake hid
+  the three bytes the load cells now occupy — and the same arithmetic says the
+  earlier shrink from a 41 B packet to 38 B bought no air time at all.
+  The payload stack owns 121 of the 328 used bits (37%): 8 for the stack flags,
   3 for the arm sequence, 15 for five experiment flags on each of three
-  channels, 9 for the EPM battery, 30 for the six rails, 30 for the three
-  actuators, 2 for SDRM liveness. Every other CAN node together costs 40 — AMP 21, Icarus
+  channels, 24 for the three load cells, 9 for the EPM battery, 30 for the six
+  rails, 30 for the three actuators, 2 for SDRM liveness. Every other CAN node
+  together costs 35. Every other CAN node together costs 40 — AMP 21, Icarus
   17 (two liveness bits, `icarus_status_valid`, extension and servo temp),
   OZYS 2.
 - The EPM battery is the one payload reading that is **also on the low-power

@@ -274,6 +274,7 @@ pub async fn armed_mode(
                     packet.epm_batt_mv = None;
                     packet.epm_rail_ma = [None; 6];
                     packet.sem_actuator_steps = [None; 3];
+                    packet.sem_load_cell_cn = [None; 3];
                     // The flags have no absence encoding, so silence clears
                     // them. That is the right direction: a fracture the
                     // payload reported and can no longer confirm should stop
@@ -408,6 +409,7 @@ pub async fn armed_mode(
                     packet.epm_batt_mv = message.epm_batt_mv();
                     packet.epm_rail_ma = message.rail_ma();
                     packet.sem_actuator_steps = message.actuator_steps();
+                    packet.sem_load_cell_cn = message.load_cell_cn();
                     // All seven flags per channel. The packet carries five of
                     // them; which five is the packet's business, not this
                     // handler's.
