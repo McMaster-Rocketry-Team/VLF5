@@ -21,7 +21,7 @@ use firmware_common_new::{
     flight_data_record::{
         AIRBRAKES_BARO_GATE_REJECT,
         AIRBRAKES_BARO_RESYNC, AIRBRAKES_BARO_TRUSTED, AIRBRAKES_BURNOUT,
-        AIRBRAKES_PAD_CALIBRATED,
+        AIRBRAKES_MPC_PERMITTED, AIRBRAKES_PAD_CALIBRATED,
         AIRBRAKES_SUBSONIC_DRAG, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
         DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
         FlightDataFastRecord,
@@ -234,6 +234,12 @@ fn pack_estimator_sample(
     // explanation for airbrakes that never deployed.
     if ab.calibration_complete {
         flags |= AIRBRAKES_PAD_CALIBRATED;
+    }
+    // The MPC's own gate, at the fast rate — the control loop only runs at
+    // 10 Hz, so this is the only column that dates the permission to the
+    // sample it was decided on rather than to the next control tick.
+    if ab.mpc_permitted {
+        flags |= AIRBRAKES_MPC_PERMITTED;
     }
 
     (
