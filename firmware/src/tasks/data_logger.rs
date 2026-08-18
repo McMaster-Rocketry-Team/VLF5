@@ -19,8 +19,8 @@ use firmware_common_new::{
         AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
     },
     flight_data_record::{
-        AIRBRAKES_BURNOUT, AIRBRAKES_PAD_CALIBRATED, AIRBRAKES_SUBSONIC_DRAG,
-        AirBrakesActuationRecord, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
+        AIRBRAKES_BURNOUT, AIRBRAKES_PAD_CALIBRATED, AirBrakesActuationRecord,
+        AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
         DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
         FlightDataFastRecord,
         FlightDataSlowRecord, ImuRecord, LogRecord, NodeStatusRecord, PayloadRecord,
@@ -211,9 +211,6 @@ fn pack_estimator_sample(
     };
 
     let mut flags = 0u8;
-    if ab.subsonic_by_drag.unwrap_or(false) {
-        flags |= AIRBRAKES_SUBSONIC_DRAG;
-    }
     if ab.burnout_detected {
         flags |= AIRBRAKES_BURNOUT;
     }

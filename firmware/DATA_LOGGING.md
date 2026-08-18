@@ -35,7 +35,7 @@ the firmware starts a fresh log over them on the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
-| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 161 B (160 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, pad calibration complete, two-bit state), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), `air_brakes` (**commanded + actual extension**, **validation-deploy flag** — here for the edges, not the values) |
+| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 161 B (160 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: burnout latch, pad calibration complete, two-bit state), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), `air_brakes` (**commanded + actual extension**, **validation-deploy flag** — here for the edges, not the values) |
 | **Slow** (tag 0x02) | 10 Hz | 233 B (232 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
 
 Throughput ≈ 71 kB/s of record payload (427 Hz × 161 B + 10 Hz × 233 B).
@@ -166,7 +166,7 @@ sources, and they are there so their edges are timestamped, not resampled.
 | `airbrakes_kf_vertical_velocity` | – | – | ✓ (absent until born / after apogee) | – | yes — replay |
 | `airbrakes_kf_tilt_deg` | ✓ (8-bit, `airbrakes_kf_tilt_valid`) | – | ✓ (absent before ignition / after apogee) | – | yes — replay / offline attitude |
 | `airbrakes_state` (`Armed`/`Stage1`/`DeadReckoning`/`AirbrakesEnabled`, one-way) | ✓ as `airbrakes_enabled` (1 bit, the last state only; 0 after apogee) | – | ✓ (2 bits at the top of `airbrakes.flags`) | – | partly — `Armed` vs `Stage1` is this half's OWN ignition detection and is nowhere else |
-| airbrakes drag check | – | – | ✓ (`airbrakes.flags` bit, set only when the vote was REFUSED — normally 0 all flight) | – | yes — replay |
+| airbrakes drag check | – | – | – | – | **nowhere** — its vote and the birth are the same row, and the birth is the state going to `AirbrakesEnabled` |
 | airbrakes burnout latch | – | – | ✓ (`AIRBRAKES_BURNOUT`) | – | SD only; the packet has 5 spare bits, but see the air-time note below |
 | airbrakes pad calibration complete | – | – | ✓ (`AIRBRAKES_PAD_CALIBRATED`) | – | SD only — **nowhere on the wire**; RTT line live, candidate for a VLCustomStatus bit |
 | `flight_stage` (incl. FailedToReachMinApogee; Mach lockout folded into `Ascent`) | ✓ (3-bit) | – | ✓ full rate | – | logged |
@@ -300,10 +300,23 @@ Takeaways:
   or without it. What it cost was ~1 s of control window on every flight where
   the drag model was right.
 
-  Two consequences to know when reading a log. `earliest_subsonic_after_ignition_us`
-  moved 17.50 s → 17.70 s, because it is now the whole of the timing guarantee
-  and the O3400 crosses Mach 0.8 at 17.56 s. And `airbrakes_subsonic_drag`
-  reads 0 for a whole nominal flight now — see its own note above.
+  `earliest_subsonic_after_ignition_us` moved 17.50 s → 17.70 s to pay for it:
+  that floor is now the whole of the timing guarantee, and the O3400 crosses
+  Mach 0.8 at 17.56 s.
+- **And the drag check is the whole of the lockout exit.** A second opinion —
+  the dead reckoner's own vertical velocity against the same ceiling, tested
+  once at the birth site — vetoed a vote the drag model got wrong until v19.
+  It shared no input with that model, which is what made it worth having and
+  also what made it weak: it is raw integration since ignition, so it reads
+  24 m/s low on the clipped-accelerometer replay (the unsafe direction) and
+  holds only ~8 m/s of margin on a clean flight. `max_open_mach` is now read
+  as an approximation with about ±0.05 Mach either side rather than as a hard
+  edge, which is what the removal costs: at the flown 0.8 ceiling the birth
+  does not move at all (Mach 0.772), lower ceilings land a hair over instead
+  of a hair under (0.610 at 0.6, 0.701 at 0.7), and a `Cd*A/m` a third too
+  large births at 0.857 instead of 0.787.
+  `airbrakes_subsonic_drag` went with it: with nothing left to defer the vote,
+  the vote and the birth are one row, and the birth is already logged.
 - The airbrakes estimator is **retired at apogee**, not merely gated: the
   wrapper drops it on the first of (its own vertical velocity <= 0), (its own
   tilt past the horizon), or (the deployment estimator calling apogee). The

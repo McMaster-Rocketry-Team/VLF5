@@ -2,3 +2,4 @@ plot data
 ground station tui
 
 are we also using dead reckoner's own velocity for subsonic detection? dont that be affected by acc clipping?
+do we have any similar logic (reject / resync baro, sustain) on deployment estimator?
