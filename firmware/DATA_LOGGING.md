@@ -100,8 +100,8 @@ are live throughout and are what to read there.
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 38 B (300/304 bits — 4 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
-| `LowPowerTelemetryPacket` | 13 B (98 bits — 6 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp, **payload EPM battery** |
+| `TelemetryPacket` | 38 B (304/304 bits — 0 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts**, **payload arm-sequence state**, **five experiment flags per channel** |
+| `LowPowerTelemetryPacket` | 12 B (96 bits — 0 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp, **payload EPM battery** |
 | `LandedTelemetryPacket` | 11 B (88 bits — 0 spare) | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
 Six of the `TelemetryPacket`'s bits are validity bits. The packet is a
@@ -201,13 +201,14 @@ sources, and they are there so their edges are timestamped, not resampled.
 | node uptime, health, mode (all four) | – | – | – | ✓ | logged |
 | OZYS disk usage, gauge-connected, `sd_ok` | – | – | – | ✓ (`ozys_custom_status`, decode with `OzysCustomStatus`) | logged |
 | OZYS strain measurements | – | – | – | – | **nowhere** — OZYS logs to its own SD |
-| payload stack flags ×8 (`payload_epm_alive` etc.) | ✓ (1 bit each) | – | – | – | **not derivable** — radio only |
-| EPM battery voltage | ✓ (11-bit, 0–17 V @ 8.3 mV; **all-ones code = unavailable**) | ✓/LP (same 11-bit field, same sentinel) | – | ✓ (raw mV, absent = unavailable) | logged |
-| EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (7-bit each, 0–5 A @ 39.4 mA; **all-ones code = unavailable**) | – | – | ✓ (raw mA, absent = unavailable) | logged |
+| payload stack flags ×8 (`payload_epm_alive` etc.) | ✓ (1 bit each) | – | – | ✓ (inside `payload_sdrm_custom_status`) | logged raw |
+| EPM battery voltage | ✓ (9-bit, 12–17 V @ 9.8 mV; **all-ones = unavailable, zero = below 12 V**) | ✓/LP (same 9-bit field, same two codes) | – | ✓ (raw mV, absent = unavailable) | logged |
+| EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (5-bit each, 0–1 A @ 32.3 mA, pins at 968 mA; **all-ones code = unavailable**) | – | – | ✓ (raw mA, absent = unavailable) | logged |
 | SEM actuator steps ×3 | ✓ (10-bit each, full u16 @ 64.1 steps; **all-ones code = unavailable**) | – | – | ✓ (raw steps, absent = unavailable) | logged |
 | SEM load cells ×3 (fracture load, cN) | – | – | – | ✓ (raw cN, signed, absent = unavailable) | **SD only** — the downlink has no room, see below |
-| experiment flags ×7 per channel (fractured, finished, fault, homed, closure confirmed, enabled, monitoring) | – | – | – | ✓ (packed word, expanded to 21 CSV columns) | **SD only** — the downlink has no room, see below |
-| payload arm-sequence bits ×3 (`arm_seq_running` / `_complete` / `_fault`) | – | – | – | ✓ (inside `payload_sdrm_custom_status`, bits 8–10) | logged raw; not yet on the downlink |
+| experiment flags: fractured, finished, fault, closure confirmed, monitoring | ✓ (1 bit each × 3 channels = 15) | – | – | ✓ (packed word, expanded to 21 CSV columns) | logged |
+| experiment flags: homed, enabled | – | – | – | ✓ (same packed word) | **SD only** — see `DownlinkExperimentFlags` |
+| payload arm-sequence bits ×3 (`arm_seq_running` / `_complete` / `_fault`) | ✓ (1 bit each) | – | – | ✓ (inside `payload_sdrm_custom_status`, bits 8–10) | logged |
 | VL health flags (imu_ok, sd_ok, …) | – | – | – | – | CAN node status only; not persisted |
 
 Takeaways:
@@ -224,25 +225,43 @@ Takeaways:
   packed 21-bit experiment flag word, because the payload now runs its
   experiments autonomously off the flight stage and nothing on the bus could
   say whether that sequence was working. All of it reaches the slow record;
-  none of it reaches the downlink, because the packet has four spare bits and
-  the load cells alone would need far more (see the packet's size note below).
-  The three `arm_seq_*` bits added in the same revision ride in the SDRM's
-  existing 11-bit custom status, so they are already on SD at 10 Hz — they are
-  the cheapest of the three to put on the downlink later, at three bits.
+  all of it reaches SD; the downlink carries the arm-sequence state and five
+  of the seven per-channel flags, paid for by narrowing the EPM battery to
+  12–17 V (−2 bits) and the six rail currents to 0–1 A (−12 bits). The two
+  flags left behind are the two the ground already knows — `enabled` is
+  fitted-at-build configuration and `homed` is an arm-sequence intermediate
+  `arm_seq_complete` / `arm_seq_fault` already summarise. The three load cells
+  did not fit at any useful resolution and stay on SD.
   The 30-byte length is a hard cut, not an extension: `FixedLenSerializable` is
   exact-length, so a 20-byte type 35 does not decode as a short 30-byte one.
   Payload and avionics move together or the payload goes dark.
 - The downlink packet is 38 B — 48 B on air, after the type byte and
-  reed-solomon ecc (`(n+1) + (n+1)/4`). The symbol count steps at 50 / 55 / 60
-  bytes on air, so **38 B is the last size that still fits the current symbol
-  count**: 39 B is 50 B on air, exactly on the first step. The four spare bits
-  are padding inside the last byte, not budget,
-  and there is no headroom left to add a field without paying for more air time
-  inside the 2 s telemetry period. Time-on-air is lower than the 1642 ms quoted
-  for the old 41 B packet and should be re-measured.
-  The payload stack owns 93 of the 300 used bits (31%): 8 for the stack flags,
-  11 for the EPM battery, 42 for the six rails, 30 for the three actuators,
-  2 for SDRM liveness. Every other CAN node together costs 40 — AMP 21, Icarus
+  reed-solomon ecc (`(n+1) + (n+1)/4`). The link is **SF12 / 250 kHz / CR 4/8,
+  preamble 8, explicit header, CRC off**, and the sx126x enables low-data-rate
+  optimization for SF12 at 250 kHz. One symbol is 16.384 ms, the preamble is
+  200.7 ms, and the payload symbol count is `8 + ceil((8·PL − 20) / 40) · 8`,
+  which steps every five bytes of on-air payload.
+
+  | struct | on air | payload symbols | time on air |
+  |---|---|---|---|
+  | 36–37 B | 46–47 B | 80 | 1511.4 ms |
+  | **38–41 B** | **48–52 B** | **88** | **1642.5 ms** ← current bucket |
+  | 42–45 B | 53–57 B | 96 | 1773.6 ms |
+  | 46–49 B | 58–62 B | 104 | 1904.6 ms |
+
+  At 1642.5 ms the packet occupies **82 % of the 2 s telemetry period**. Each
+  step up costs 131.1 ms, or 6.6 points of that duty cycle.
+
+  So there are **three bytes of free headroom** above the current struct. An
+  earlier version of this note put the steps at 50 / 55 / 60 B on air and
+  concluded 38 B was the last size in the bucket; those boundaries were
+  computed with CRC on, and the radio runs with CRC off. The same arithmetic
+  says the shrink from the old 41 B packet to 38 B bought no air time at all —
+  both are 1642.5 ms.
+  The payload stack owns 97 of the 304 used bits (32%): 8 for the stack flags,
+  3 for the arm sequence, 15 for five experiment flags on each of three
+  channels, 9 for the EPM battery, 30 for the six rails, 30 for the three
+  actuators, 2 for SDRM liveness. Every other CAN node together costs 40 — AMP 21, Icarus
   17 (two liveness bits, `icarus_status_valid`, extension and servo temp),
   OZYS 2.
 - The EPM battery is the one payload reading that is **also on the low-power
@@ -261,20 +280,31 @@ Takeaways:
   The payload's status stream gets its own staleness receipt in both modes, so
   a payload that browns out mid-wait goes `n/a` within 5 s instead of
   downlinking the healthy voltage it had when it stopped talking.
-- Payload readings still have **no validity bit on the downlink**, but they no
-  longer read as zero: `epm_batt_v`, the six rail currents and the three
-  actuator step counts each spend their **all-ones code** on "the payload could
-  not take this reading", and the getters decode that code back to `None`. The
-  sentinel moved off 0 deliberately — 0 is a real reading for all three. A
-  switched rail that is off genuinely draws ~0 mA (the normal state whenever
-  `payload_epm_rails_on` is false), an actuator at its home position genuinely
-  sits at step 0, and 0.0 V on the EPM bus is a collapsed or disconnected pack
-  the ground needs to see. Giving up the top code instead costs one quantum of
-  headroom at full scale, which is headroom nothing real ever reaches: real
-  values are clamped one code below full scale so they can never collide with
-  the sentinel, capping at 16.992 V, 4961 mA and 65471 steps respectively. This
-  is also why the EPM battery factory starts at 0 V rather than 11 V — an 11 V
-  floor would have decoded a collapsed bus as a plausible low pack.
+- Payload readings still have **no validity bit on the downlink**, but they do
+  not read as zero: `epm_batt_v`, the six rail currents and the three actuator
+  step counts each spend their **all-ones code** on "the payload could not take
+  this reading", and the getters decode that code back to absence. The sentinel
+  is the top code deliberately — 0 is a real reading for the rails and the
+  actuators. A switched rail that is off genuinely draws ~0 mA (the normal
+  state whenever `payload_epm_rails_on` is false) and an actuator at its home
+  position genuinely sits at step 0. Real values clamp one code below full
+  scale so they can never collide with the sentinel, capping at 16.990 V,
+  968 mA and 65471 steps respectively.
+- **The EPM battery spends both ends of its range.** Its floor moved from 0 V
+  to 12 V to free two bits, which would have made a collapsed bus decode as a
+  healthy 12.0 V — the exact failure the 0 V floor existed to prevent. So the
+  bottom code is reserved too: `epm_batt_v` decodes to one of three things,
+  `Unavailable` (the payload said nothing), `BelowRange` (under 12 V, i.e. a
+  collapsed or disconnected pack, shown as a red `<12V` on the ground station)
+  or a voltage. That costs one code rather than the two bits a wider range
+  would, and keeps the fault visible and distinct from silence. The exact
+  millivolts of a collapsed bus are on the payload's own log; no ground
+  decision turns on whether it is at 3 V or 9 V.
+- **A rail over 1 A pins rather than reporting.** The range came down from 5 A
+  because the rails draw well under 1 A, and the narrowing improved resolution
+  (39.4 → 32.3 mA per code) as well as freeing bits. A stalled stepper or a
+  short reads as 968 mA — visible as pinned-at-ceiling, but not quantified.
+  CAN and the SD slow record keep the full u16 mA, so the log is exact.
 - Every CAN node's heartbeat is now on SD in full: uptime, health, mode and
   the 11-bit custom status, at 10 Hz, for AMP / Icarus / OZYS / payload SDRM.
   The downlink still compresses each to two bits because it has no room, so
