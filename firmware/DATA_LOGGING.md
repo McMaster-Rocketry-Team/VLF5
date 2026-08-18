@@ -36,9 +36,9 @@ the firmware starts a fresh log over them on the next arm.
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
 | **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 145 B (144 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, pad calibration complete, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms) |
-| **Slow** (tag 0x02) | 10 Hz | 241 B (240 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), `air_brakes` (**commanded + actual extension**, **validation-deploy flag**, **servo temp**, **MPC predicted apogee AGL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
+| **Slow** (tag 0x02) | 10 Hz | 257 B (256 B body + tag), 1 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**commanded + actual extension**, **validation-deploy flag**, **servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
 
-Throughput ≈ 64 kB/s of record payload (427 Hz × 145 B + 10 Hz × 241 B),
+Throughput ≈ 64 kB/s of record payload (427 Hz × 145 B + 10 Hz × 257 B),
 ≈ 70 kB/s of actual block writes once block padding is counted, ≈ 250 MB/hour.
 That is up from v11's ≈ 43 kB/s / 154 MB/hour, and capacity remains a
 non-issue.
@@ -163,11 +163,11 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | airbrakes pad calibration complete | – | – | ✓ (`AIRBRAKES_PAD_CALIBRATED`) | – | SD only — **nowhere on the wire**; RTT line live, candidate for a VLCustomStatus bit |
 | `flight_stage` (incl. FailedToReachMinApogee; Mach lockout folded into `Ascent`) | ✓ (3-bit) | – | ✓ full rate | – | logged |
 | drogue/main deployed | – | – | ✓ (pyro fire flags) | – | read the stage transition, or the pyro fire bits for the GPIO edge |
-| `target_apogee_agl` | ✓ (14-bit) | – | – | – | also in SD config block |
+| `air_brakes_target_apogee_asl` (what the MPC latched) | ✓ as `target_apogee_agl` (14-bit; the operator's live setting, which can differ) | – | – | ✓ (absent until the MPC is built) | the operator's AGL setting is also in the SD config block |
 | deployment baro gate reject, resync | – | – | ✓ (`deployment.flags` bits, exact per sample) | – | logged |
 | airbrakes baro gate reject, resync | – | – | ✓ (`airbrakes.flags` bits, exact per sample) | – | logged |
 | KF innovation magnitude | – | – | – | – | yes — replay pressure |
-| launch pad altitude | – | – | – | – | yes — `deployment_kf_altitude_asl` while on pad |
+| `launch_pad_altitude_asl` | – | – | – | ✓ (absent only before the estimator's first sample) | logged — previously had to be eyeballed off `deployment_kf_altitude_asl` while on pad |
 | GPS `lat_lon` | ✓ (23-bit lat / 24-bit lon, ~2.4 m, `lat_lon_valid`) | ✓ all three | – | ✓ (f64, exact; absent until a fix) | logged |
 | `num_of_fix_satellites` | ✓ (5-bit, **saturates at 31**) | ✓ (full u8) | – | ✓ (full u8; 0 is a real reading, so never absent) | logged |
 | `gps_altitude_asl` | – | – | – | ✓ (absent until the fix carries one) | logged |
@@ -181,7 +181,7 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | `air_brakes_validation_deploy` | – | – | – | ✓ (a flag, not an absence) | logged |
 | `air_brakes_servo_temp` | ✓ (9-bit, shares `icarus_status_valid`) | – | – | ✓ (absent until Icarus reports) | logged |
 | Icarus servo current | – | – | – | – | **nowhere** — the field was dropped from `IcarusStatusMessage`; the servo does not measure current |
-| MPC predicted apogee | ✓ (14-bit AGL, `mpc_predicted_apogee_valid`) | – | – | ✓ (absent while the MPC is not running) | logged |
+| MPC predicted apogee | ✓ (14-bit AGL, `mpc_predicted_apogee_valid`) | – | – | ✓ as `mpc_predicted_apogee_asl` (absent while the MPC is not running) | logged — SD stores ASL, the packet AGL; subtract `launch_pad_altitude_asl` |
 | amp: online, outputs ×3, shared battery | ✓ | ✓/LD | – | ✓ (whole `amp` group absent until the first `AmpStatusMessage`) | logged |
 | Icarus / OZYS / SDRM online + rebooted | ✓ (2 bits each) | – | – | ✓ (full `NodeStatus`; absent = never heard from) | logged |
 | node uptime, health, mode (all four) | – | – | – | ✓ | logged |
@@ -260,7 +260,7 @@ Takeaways:
   forced stretch is roughly the last 3.5 s before apogee, ending when the
   airbrakes estimator is retired and the brakes are commanded to 0. It is
   marked in the log by `air_brakes_validation_deploy`, and confirmed by
-  `mpc_predicted_apogee_agl` going empty over the same rows — the command is no
+  `mpc_predicted_apogee_asl` going empty over the same rows — the command is no
   longer the MPC's, so there is no prediction that describes it. Read the tail
   of the commanded column as a servo test, not as MPC intent. It is not on the
   downlink; the RTT line `forcing 100% for validation` is the live marker.

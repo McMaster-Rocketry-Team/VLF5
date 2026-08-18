@@ -35,7 +35,7 @@ use crate::{
     SetTargetWatch, VLStatusMutex,
     tasks::data_logger::{
         AirBrakesWatch, AmpStateWatch, EstimatorLogWatch, PayloadStateWatch,
-        publish_airbrakes_commanded,
+        publish_airbrakes_commanded, publish_airbrakes_target,
     },
     avionics_mode::AvionicsMode,
     can::CanReceiverSub,
@@ -129,6 +129,11 @@ pub async fn armed_mode(
         // commanded half is legitimately set at entry and must keep working.
         air_brakes.actual_extension = None;
         air_brakes.servo_temp = None;
+        // Session-scoped for the same reason, and not covered by the entry
+        // command below: the target belongs to an MPC that this session has not
+        // built yet, so carrying the last one forward would put the previous
+        // flight's target on this flight's first slow records.
+        air_brakes.target_apogee_asl = None;
         air_brakes_watch.sender().send(air_brakes);
     }
 
@@ -549,6 +554,13 @@ pub async fn armed_mode(
                     .unwrap_or(DEFAULT_TARGET_APOGEE_AGL),
         );
 
+        // The MPC's target, on the record, the instant it exists. The SD log
+        // takes it from here rather than resampling `target_agl_watch`, so the
+        // logged target is the one the controller latched above — a
+        // `SetTargetApogee` accepted later in the flight moves the watch and
+        // the config block but not this.
+        publish_airbrakes_target(air_brakes_watch, airbrakes_mpc.target_apogee_asl());
+
         let mut ticker = Ticker::every(Duration::from_hz(10));
         let mut mpc_went_full = false;
         let mut validating = false;
@@ -593,7 +605,7 @@ pub async fn armed_mode(
             // are left alone here: they are statements about the flight so
             // far, not about this tick, and a gap in the middle of the coast
             // does not un-say them.
-            let (airbrake_extension_percentage, predicted_apogee_agl) = match mpc_states {
+            let (airbrake_extension_percentage, predicted_apogee_asl) = match mpc_states {
                 None => (0.0, None),
                 Some(s) => {
                     let mpc = airbrakes_mpc.update(s.altitude_asl, s.velocity);
@@ -629,20 +641,23 @@ pub async fn armed_mode(
                     // extension. A solve that comes back NaN is absent for the
                     // same reason — it is not a prediction either, and the
                     // packet's fixed-point encoding has nothing to make of it.
-                    let predicted_apogee_agl = if validating {
-                        None
-                    } else {
-                        let predicted_apogee_agl =
-                            mpc.predicted_apogee_asl - launch_pad_altitude_asl;
-                        (!predicted_apogee_agl.is_nan()).then_some(predicted_apogee_agl)
-                    };
-                    (airbrake_extension_percentage, predicted_apogee_agl)
+                    //
+                    // Carried ASL, which is what the MPC computes and what the
+                    // SD log stores; the pad is subtracted once, below, for the
+                    // downlink alone, whose 14-bit altitude field is scaled for
+                    // AGL and is what the operator reads.
+                    let predicted_apogee_asl =
+                        (!validating && !mpc.predicted_apogee_asl.is_nan())
+                            .then_some(mpc.predicted_apogee_asl);
+                    (airbrake_extension_percentage, predicted_apogee_asl)
                 }
             };
+            let predicted_apogee_agl =
+                predicted_apogee_asl.map(|asl| asl - launch_pad_altitude_asl);
             publish_airbrakes_commanded(
                 air_brakes_watch,
                 Some(airbrake_extension_percentage),
-                predicted_apogee_agl,
+                predicted_apogee_asl,
                 validating,
             );
             can_sender.send(AirBrakesControlMessage::new(airbrake_extension_percentage).into());
@@ -689,7 +704,6 @@ pub async fn armed_mode(
         flight_stage,
         vl_status,
         flight_data_channel,
-        target_agl_watch,
     );
 
     // ORDER MATTERS: `update_estimators_fut` must stay ahead of

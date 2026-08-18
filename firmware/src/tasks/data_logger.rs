@@ -1,5 +1,5 @@
 use crate::{
-    ContinuityWatch, FlightStageMutex, GPSReadingWatch, SetTargetWatch, VLStatusMutex,
+    ContinuityWatch, FlightStageMutex, GPSReadingWatch, VLStatusMutex,
     can_central::CanCentral,
     tasks::{
         sensor_tasks::{BatteryVWatch, IMUBaroReadingPubSub, MagReadingPubSub},
@@ -51,11 +51,12 @@ pub const FLIGHT_DATA_CHANNEL_DEPTH: usize = 512;
 pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNEL_DEPTH>;
 
 /// Latest airbrakes state for SD logging: commanded extension, the apogee the
-/// MPC predicts at it, and Icarus's reported extension and servo temperature.
+/// MPC predicts at it and the one it is aiming for, and Icarus's reported
+/// extension and servo temperature.
 ///
 /// Every field is `None` until its source has spoken — the firmware for
-/// `commanded_extension` and `predicted_apogee_agl`, an `IcarusStatus` CAN
-/// message for the other two.
+/// `commanded_extension`, `predicted_apogee_asl` and `target_apogee_asl`, an
+/// `IcarusStatus` CAN message for the other two.
 /// That is the whole "is this present?" story: there are no validity flags,
 /// because the `Option` says it and a 0.0 would not. An Icarus that is offline
 /// or silent must not read as one reporting fully-stowed brakes at 0 C.
@@ -66,11 +67,24 @@ pub type FlightDataChannel = Channel<NoopRawMutex, LogRecord, FLIGHT_DATA_CHANNE
 #[derive(Clone, Copy, Default, defmt::Format)]
 pub struct AirBrakesLogState {
     pub commanded_extension: Option<f32>,
-    /// Apogee AGL the MPC predicts at `commanded_extension`. `None` whenever
+    /// Apogee ASL the MPC predicts at `commanded_extension`. `None` whenever
     /// the MPC is not running, which includes the forced validation deploy —
     /// there the commanded extension is not the MPC's output, so pairing it
     /// with a prediction would be a lie.
-    pub predicted_apogee_agl: Option<f32>,
+    ///
+    /// ASL rather than the AGL the downlink carries: the log stores altitudes
+    /// in the unit they are measured in and keeps the pad reference beside
+    /// them, so the subtraction happens once, on the ground, instead of being
+    /// baked in irreversibly here.
+    pub predicted_apogee_asl: Option<f32>,
+    /// Apogee ASL the MPC is aiming at, as it latched the target at
+    /// construction. `None` until the MPC exists.
+    ///
+    /// Published once, by the control loop that builds the MPC, rather than
+    /// sampled per record off the operator's target watch: the MPC takes its
+    /// target once and a `SetTargetApogee` accepted later moves the watch but
+    /// not the controller. This field is about the controller.
+    pub target_apogee_asl: Option<f32>,
     /// `commanded_extension` is the forced validation deploy rather than the
     /// MPC's output. The one thing about the command that an absent prediction
     /// cannot say, so it gets its own flag: 1.0 from the MPC and 1.0 from the
@@ -83,19 +97,29 @@ pub struct AirBrakesLogState {
 pub type AirBrakesWatch = Watch<NoopRawMutex, AirBrakesLogState, 2>;
 
 /// Publish a commanded extension and the MPC's prediction for it, leaving the
-/// Icarus-sourced fields alone. Pass `None` for the prediction when the command
-/// did not come from the MPC, and set `validation_deploy` when the reason is
-/// the forced validation deploy.
+/// Icarus-sourced fields and the target alone. Pass `None` for the prediction
+/// when the command did not come from the MPC, and set `validation_deploy`
+/// when the reason is the forced validation deploy.
 pub fn publish_airbrakes_commanded(
     watch: &AirBrakesWatch,
     extension: Option<f32>,
-    predicted_apogee_agl: Option<f32>,
+    predicted_apogee_asl: Option<f32>,
     validation_deploy: bool,
 ) {
     let mut state = watch.try_get().unwrap_or_default();
     state.commanded_extension = extension;
-    state.predicted_apogee_agl = predicted_apogee_agl;
+    state.predicted_apogee_asl = predicted_apogee_asl;
     state.validation_deploy = validation_deploy;
+    let _ = watch.sender().send(state);
+}
+
+/// Publish the apogee ASL the MPC has just latched as its target, leaving every
+/// other field alone. Called once, when the MPC is constructed — the target
+/// does not change after that, which is exactly why the log takes it from here
+/// rather than resampling the operator's watch per record.
+pub fn publish_airbrakes_target(watch: &AirBrakesWatch, target_apogee_asl: f32) {
+    let mut state = watch.try_get().unwrap_or_default();
+    state.target_apogee_asl = Some(target_apogee_asl);
     let _ = watch.sender().send(state);
 }
 
@@ -274,7 +298,6 @@ pub async fn log_flight_data(
     flight_stage: &'static FlightStageMutex,
     vl_status: &'static VLStatusMutex,
     channel: &'static FlightDataChannel,
-    target_agl_watch: &'static SetTargetWatch,
 ) {
     let mut imu_baro_sub = imu_baro_pubsub.subscriber().unwrap();
     let mut mag_sub = mag_pubsub.subscriber().unwrap();
@@ -333,10 +356,20 @@ pub async fn log_flight_data(
         // check below is what makes that a guarantee rather than an ordering
         // assumption — a mismatch means the two loops have drifted apart and
         // the gate bits would be attributed to the wrong row.
-        let (deployment, airbrakes) = match estimator_log_watch.try_get() {
+        //
+        // The pad altitude rides out of the same match for the same reason:
+        // it is a field of the estimator sample, so taking it here means the
+        // slow record's reference and the fast record's ASL altitudes came
+        // from one estimator tick and cannot describe different pads.
+        let (deployment, airbrakes, launch_pad_altitude_asl) = match estimator_log_watch.try_get()
+        {
             Some((sample_timestamp_us, sample)) if sample_timestamp_us == timestamp_us => {
                 let (deployment, airbrakes) = pack_estimator_sample(&sample);
-                (Some(deployment), airbrakes)
+                (
+                    Some(deployment),
+                    airbrakes,
+                    Some(sample.deployment_launch_pad_altitude_asl),
+                )
             }
             // Before the estimator's first sample there is no matching
             // estimator tick — log absence rather than a neighbouring tick's
@@ -348,7 +381,7 @@ pub async fn log_flight_data(
                     warn!("data_logger: estimator sample is not for this tick");
                     estimator_skew_warned = true;
                 }
-                (None, None)
+                (None, None, None)
             }
         };
 
@@ -398,14 +431,17 @@ pub async fn log_flight_data(
         let airbrakes_state = airbrakes_opt.unwrap_or_default();
         let air_brakes = AirBrakesRecord {
             commanded_extension: airbrakes_state.commanded_extension,
-            predicted_apogee_agl: airbrakes_state.predicted_apogee_agl,
+            predicted_apogee_asl: airbrakes_state.predicted_apogee_asl,
             validation_deploy: airbrakes_state.validation_deploy,
             actual_extension: airbrakes_state.actual_extension,
             servo_temp: airbrakes_state.servo_temp,
-            // Sampled per record rather than latched once: `SetTargetApogee` is
-            // accepted while Armed, so the target the MPC is chasing can move
-            // mid-flight and the log should say when.
-            target_apogee_agl: target_agl_watch.try_get(),
+            // The MPC's own latched target, published by the control loop when
+            // it built the MPC — not a per-record sample of the operator's
+            // target watch. A `SetTargetApogee` accepted mid-flight moves that
+            // watch and the SD config block, but the controller keeps chasing
+            // the number it started with, and this column is about the
+            // controller.
+            target_apogee_asl: airbrakes_state.target_apogee_asl,
         };
         // No default to fall back on here: `out_status` packs `PowerOutputStatus`
         // discriminants two bits at a time and 0 is one of them, so an AMP that
@@ -457,6 +493,7 @@ pub async fn log_flight_data(
             hdop,
             vdop,
             pdop,
+            launch_pad_altitude_asl,
             air_brakes,
             amp,
             payload: PayloadRecord {
