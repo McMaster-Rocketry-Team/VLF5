@@ -29,22 +29,28 @@ the deliberate price of a log that cannot mistake a reading for its own absence.
 Two tagged record types interleaved into 512 B blocks (508 usable + CRC32),
 superblock flushed every 250 ms. Decoding:
 `rocket-cli download-flight-log <out.csv>` (one CSV row per fast record, latest
-slow snapshot merged in). Storage format v13 is **not** backward compatible:
-logs written by older firmware are reported as unsupported by rocket-cli, and
+slow snapshot merged in). The storage format is **not** backward compatible at any version:
+logs written by other firmware are reported as unsupported by rocket-cli, and
 the firmware starts a fresh log over them on the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
 | **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 161 B (160 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: burnout latch, pad calibration complete, two-bit state), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), `air_brakes` (**commanded + actual extension**, **validation-deploy flag** — here for the edges, not the values) |
-| **Slow** (tag 0x02) | 10 Hz | 233 B (232 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
+| **Slow** (tag 0x02) | 10 Hz | 249 B (248 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts + three SEM load cells cN + the packed experiment flag word**) |
 
-Throughput ≈ 71 kB/s of record payload (427 Hz × 161 B + 10 Hz × 233 B).
+Throughput ≈ 71 kB/s of record payload (427 Hz × 161 B + 10 Hz × 249 B).
 Blocks are what actually reach the card: three fast records per block is
 142 blocks/s, two slow records per block is another 5, so ≈ 147 blocks/s
 ≈ 75 kB/s ≈ 271 MB/hour. Moving the extensions to the fast record in v19 did
 not cost a single block write — the fast record still packs three to a block
 and the slow one now packs two where it packed one. Capacity remains a
 non-issue.
+
+The slow record is the one with no room left: two 249 B records plus the 8 B
+block header is 506 of 512, so **6 bytes of slack**. The next field added to it
+drops the pack from two records per block to one and doubles the slow block
+rate — still affordable, but it is a step, not a slope, and worth knowing
+before it is paid by accident.
 
 Absence means "no source is producing this", uniformly, and every one of these
 reads as an empty cell in the CSV rather than as a number:
@@ -199,6 +205,9 @@ sources, and they are there so their edges are timestamped, not resampled.
 | EPM battery voltage | ✓ (11-bit, 0–17 V @ 8.3 mV; **all-ones code = unavailable**) | ✓/LP (same 11-bit field, same sentinel) | – | ✓ (raw mV, absent = unavailable) | logged |
 | EPM rail currents ×6 (sys 3v3/5v, per 3v3/5v/9v/12v) | ✓ (7-bit each, 0–5 A @ 39.4 mA; **all-ones code = unavailable**) | – | – | ✓ (raw mA, absent = unavailable) | logged |
 | SEM actuator steps ×3 | ✓ (10-bit each, full u16 @ 64.1 steps; **all-ones code = unavailable**) | – | – | ✓ (raw steps, absent = unavailable) | logged |
+| SEM load cells ×3 (fracture load, cN) | – | – | – | ✓ (raw cN, signed, absent = unavailable) | **SD only** — the downlink has no room, see below |
+| experiment flags ×7 per channel (fractured, finished, fault, homed, closure confirmed, enabled, monitoring) | – | – | – | ✓ (packed word, expanded to 21 CSV columns) | **SD only** — the downlink has no room, see below |
+| payload arm-sequence bits ×3 (`arm_seq_running` / `_complete` / `_fault`) | – | – | – | ✓ (inside `payload_sdrm_custom_status`, bits 8–10) | logged raw; not yet on the downlink |
 | VL health flags (imu_ok, sd_ok, …) | – | – | – | – | CAN node status only; not persisted |
 
 Takeaways:
@@ -207,9 +216,22 @@ Takeaways:
   redundant-FC correlation), and amp state + servo temp survive an RF-link
   drop via the slow record.
 - The payload stack telemetry is on SD as well: the slow record carries the
-  raw mV / mA / step values, with the CAN `0xFFFF` already decoded into an
+  raw mV / mA / step / cN values, with the CAN `0xFFFF` already decoded into an
   `Option`, so an RF-link drop does not lose EPM rails or actuator positions.
   The downlink copies are quantized; the SD copies are exact.
+- **The payload's experiment data is SD-only.** `CustomPayloadStatusMessage`
+  grew from 20 B to 30 B in 2026-08 to carry three fracture load cells and a
+  packed 21-bit experiment flag word, because the payload now runs its
+  experiments autonomously off the flight stage and nothing on the bus could
+  say whether that sequence was working. All of it reaches the slow record;
+  none of it reaches the downlink, because the packet has four spare bits and
+  the load cells alone would need far more (see the packet's size note below).
+  The three `arm_seq_*` bits added in the same revision ride in the SDRM's
+  existing 11-bit custom status, so they are already on SD at 10 Hz — they are
+  the cheapest of the three to put on the downlink later, at three bits.
+  The 30-byte length is a hard cut, not an extension: `FixedLenSerializable` is
+  exact-length, so a 20-byte type 35 does not decode as a short 30-byte one.
+  Payload and avionics move together or the payload goes dark.
 - The downlink packet is 38 B — 48 B on air, after the type byte and
   reed-solomon ecc (`(n+1) + (n+1)/4`). The symbol count steps at 50 / 55 / 60
   bytes on air, so **38 B is the last size that still fits the current symbol

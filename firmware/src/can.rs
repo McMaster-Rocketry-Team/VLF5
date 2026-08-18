@@ -337,6 +337,12 @@ async fn can_message_receive_task(
                     epm_batt_mv: message.epm_batt_mv(),
                     rail_ma: message.rail_ma(),
                     actuator_steps: message.actuator_steps(),
+                    load_cell_cn: message.load_cell_cn(),
+                    // Kept packed. Unpacking here would mean carrying 21 bools
+                    // through the watch and repacking them for the log, with
+                    // two more chances to get the layout wrong; the log stores
+                    // the word and `rocket-cli` decodes it once, at the end.
+                    experiment_flags: message.experiment_flags,
                 });
             }
             CanBusMessageEnum::AmpStatus(message) => {

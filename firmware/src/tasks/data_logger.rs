@@ -157,6 +157,14 @@ pub struct PayloadLogState {
     pub rail_ma: [Option<u16>; 6],
     /// Experiment channels 1..3.
     pub actuator_steps: [Option<u16>; 3],
+    /// Fracture load per experiment channel (centinewtons, tension positive),
+    /// channels 1..3. Signed, so it carries its own absence code rather than
+    /// the 0xFFFF the readings above use — see `PAYLOAD_LOAD_CELL_UNAVAILABLE`.
+    pub load_cell_cn: [Option<i16>; 3],
+    /// Per-channel experiment state, as the packed word the payload sent.
+    /// Not optional: every bit pattern is a legal state, and the default
+    /// (every flag clear) is also what an unfitted channel reports.
+    pub experiment_flags: u32,
 }
 
 pub type PayloadStateWatch = Watch<NoopRawMutex, PayloadLogState, 2>;
@@ -496,6 +504,8 @@ pub async fn log_flight_data(
                 epm_batt_mv: payload.epm_batt_mv,
                 rail_ma: payload.rail_ma,
                 actuator_steps: payload.actuator_steps,
+                load_cell_cn: payload.load_cell_cn,
+                experiment_flags: payload.experiment_flags,
             },
             amp_node,
             icarus_node,
