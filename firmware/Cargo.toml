@@ -76,10 +76,11 @@ default = []
 # all real and the board boots into SelfTest. Prefer hil-dual or hil-single.
 hil-replay = ["dep:icao-isa", "dep:icao-units"]
 # Dual-deploy HIL: replays the real Osiris OpenRocket trajectory against the
-# real FLIGHT_CONFIG, and boots straight into Armed so no ground station is
-# needed. ~8 minutes of wall clock, ending in a landed detection.
+# real FLIGHT_CONFIG. ~8 minutes of wall clock, ending in a landed detection.
+# Boots into SelfTest and is armed from rocket-cli, like a flight build; add
+# boot-armed for a bench with no ground station.
 #   cargo run --bin main --features hil-dual
-hil-dual = ["hil-replay", "boot-armed"]
+hil-dual = ["hil-replay"]
 # Single-deploy HIL plot (drogue then main back-to-back at apogee).
 #   cargo run --bin main --features hil-single
 hil-single = ["hil-replay"]

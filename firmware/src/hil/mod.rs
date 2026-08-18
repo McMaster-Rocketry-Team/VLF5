@@ -13,7 +13,7 @@
 //! still read on its real data-ready interrupt, so loop pacing and sample
 //! timestamps stay genuine; only the values are swapped. The board boots into
 //! SelfTest exactly like a flight build and is flown from rocket-cli over the
-//! radio — except under `boot-armed`, which `hil-dual` implies. The crate-root
+//! radio — except under `boot-armed`, which is opt-in. The crate-root
 //! [`HIL2.md`](../../HIL2.md) carries the bench specifics: probe identification,
 //! measured hardware properties, verified runs, and what HIL does not prove.
 //!

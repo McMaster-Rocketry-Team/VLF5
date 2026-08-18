@@ -7,8 +7,9 @@ holds only what the source cannot tell you: this bench's identity, what has actu
 measured on it, the traps that cost real debugging time, and what HIL still does not prove.
 
 > **Pyro GPIO fires for real in HIL.** The real `pyro_task` energizes the drogue and main
-> FETs at apogee. `hil-dual` additionally implies `boot-armed` — it enters Armed straight out
-> of reset with no operator and fires ~64 s later, every reset. **No e-matches.**
+> FETs at apogee, whether the board was armed from rocket-cli or by `boot-armed`. Add
+> `boot-armed` and it enters Armed straight out of reset with no operator and fires ~64 s
+> later, every reset — `hil-dual` used to imply it and no longer does. **No e-matches.**
 
 ## 1. Which probe is which board — re-probe, do not trust a cached answer
 
