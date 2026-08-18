@@ -126,29 +126,29 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
 /// only that the bench profile works.
 #[cfg(not(feature = "hil-single"))]
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
+    // The ONLY ignition detector either half has, and one setting for both
+    // of them. The barometric one it replaced completed at ignition+1.12 s
+    // on this trajectory while the airframe crosses Mach 0.8 at +1.88 s —
+    // it was deciding the start of the Mach lockout 0.75 s before the
+    // static port it reads began lying. This latches at +0.15 s instead.
+    //
+    // 8 g: boost holds 14 g for the whole 6.3 s burn, so on this motor 8 g
+    // costs only 15-22 ms over 4 g while doubling the margin over anything
+    // that can happen to a rocket on a rail. Measured latch times after
+    // true ignition, sustain included — O3400 0.136 s, N2900 0.148 s
+    // (`ignition_latch_time_by_threshold`). Cheap here, but
+    // airframe-specific: on LC'25's softer curve 8 g costs 0.45 s and 10 g
+    // never latches at all.
+    //
+    // This was two fields, one per half, and this comment used to have to
+    // argue that setting them apart would be a mistake. It is one field
+    // now, so it cannot happen: "the motor lit" is one event, and it is the
+    // origin of both Mach lockout clocks.
+    ignition_detection_acc_threshold: 8.0 * 9.81,
     profile: FlightProfile {
         // Mach 0.75 at 18.67 s worst case, x1.4; ends 13 s before the
         // earliest simulated apogee.
         mach_lockout_duration_us: Some(26_000_000),
-        // The ONLY ignition detector this half has. The barometric one it
-        // replaced completed at ignition+1.12 s on this trajectory while the
-        // airframe crosses Mach 0.8 at +1.88 s — it was deciding the start
-        // of the Mach lockout 0.75 s before the static port it reads began
-        // lying. This latches at +0.15 s instead.
-        //
-        // 8 g: boost holds 14 g for the whole 6.3 s burn, so on this motor
-        // 8 g costs only 15-22 ms over 4 g while doubling the margin over
-        // anything that can happen to a rocket on a rail. Measured latch
-        // times after true ignition, sustain included — O3400 0.136 s,
-        // N2900 0.148 s (`ignition_latch_time_by_threshold`). Cheap here,
-        // but airframe-specific: on LC'25's softer curve 8 g costs 0.45 s
-        // and 10 g never latches at all.
-        //
-        // The airbrakes half below runs the same detector at the same
-        // number. They are two settings, but "the motor lit" is one event,
-        // so on this airframe they get one answer — and the diagnostic
-        // asserts the two halves latch on the same sample.
-        ignition_detection_acc_threshold: 8.0 * 9.81,
         deployment: DeploymentProfile::Dual {
             drogue_chute_minimum_altitude_agl: 2000.0,
             drogue_chute_delay_us: 1_000_000,
@@ -158,17 +158,6 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
         },
     },
     airbrakes: AirbrakesConfig {
-        // Same 8 g as the pyro half above, and for the same reason. This was
-        // 4 g while this half had no sustain, which meant the looser
-        // threshold and the weaker transient rejection sat on the same
-        // detector; sharing the implementation removed the second half of
-        // that and matching the number removes the first.
-        //
-        // The cost lands entirely on this half — it used to latch ~0.02 s
-        // after ignition and now latches at 0.136 s with the rest. That lag
-        // is the error in the origin of the two timers below, and 0.115 s
-        // against a 17.5 s floor is not a number either of them can feel.
-        ignition_detection_acc_threshold: 8.0 * 9.81,
         mach_lockout: Some(MachLockoutConfig {
             // Past the LATEST simulated Mach 0.8 crossing (the O3400's, at
             // 17.56 s), which is the bar this floor has to clear on its own
@@ -223,20 +212,20 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
 
 #[cfg(feature = "hil-single")]
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
+    // 4 g, not the Osiris profile's 8 g: this bench's scripted motor is a
+    // constant 80 m/s^2 net, so the accelerometer sees 9.15 g and 8 g would
+    // leave barely a g of margin. Different airframe, different number —
+    // which is why this stays configuration and not a constant in
+    // `ignition_detector`.
+    ignition_detection_acc_threshold: 4.0 * 9.81,
     profile: FlightProfile {
         mach_lockout_duration_us: None,
-        // 4 g, not the Osiris profile's 8 g: this bench's scripted motor is
-        // a constant 80 m/s^2 net, so the accelerometer sees 9.15 g and 8 g
-        // would leave barely a g of margin. Different airframe, different
-        // number — which is why this is per-profile config.
-        ignition_detection_acc_threshold: 4.0 * 9.81,
         deployment: DeploymentProfile::Single {
             minimum_deployment_altitude_agl: 2000.0,
             delay_us: 0,
         },
     },
     airbrakes: AirbrakesConfig {
-        ignition_detection_acc_threshold: 4.0 * 9.81,
         mach_lockout: None,
         // No lockout on this bench profile, so the drag check never reads
         // this; it is only the MPC gate's ceiling here. Kept at the flight
