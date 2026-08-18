@@ -331,9 +331,12 @@ Takeaways:
   bit on the last row of a run is the opposite verdict: the run lasted long
   enough that the filter, not the sensor, was judged wrong, and altitude
   snapped to the baro. A run without a resync is the gate doing its job; a run
-  ending in one means altitude is discontinuous across that row. Both bits read
-  0 through Mach lockout, where the KF is frozen and nothing is fused — the
-  same window in which its altitude and velocity are absent.
+  ending in one means altitude is discontinuous across that row. Both bits report
+  the in-flight KF's gate and nothing else, so they read 0 wherever no KF is
+  fusing: through Mach lockout, the same window in which its altitude and
+  velocity are absent, and on the pad. (The pad altitude reference had a gate
+  of its own until v19 and these bits carried its verdict while on the pad; it
+  is a plain mean over a 1 s window now, which rejects nothing.)
 
   The airbrakes filter had the same pair until v19 and lost both along with the
   gate itself. It is born subsonic and after burnout and retired at apogee, so
