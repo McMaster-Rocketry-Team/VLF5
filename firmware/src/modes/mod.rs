@@ -20,20 +20,19 @@ use embassy_time::{Duration, Instant};
 /// only from the `NodeStatus` handler, so `is_online()` tracks the *heartbeat*
 /// and structurally cannot say whether the *status stream* is alive. Both
 /// senders prove the difference: AMP's status message comes from a task
-/// independent of its heartbeat, and Icarus's `IcarusStatus` send is
-/// conditional on a servo UART temperature read succeeding — a failed read
-/// just skips the report while the heartbeat keeps claiming
-/// Healthy/Operational. Hence a receipt timestamp per stream, recorded where
-/// the message actually arrives.
+/// independent of its heartbeat, and Icarus's `IcarusStatus` comes from its
+/// servo control loop — a loop that has stalled, or bailed out to re-home
+/// after a run of UART errors, stops reporting while the heartbeat keeps
+/// claiming Healthy/Operational. Hence a receipt timestamp per stream,
+/// recorded where the message actually arrives.
 ///
 /// 5 s, matching the `is_online()` window so the two freshness answers on a
 /// downlink packet are on the same timebase. Against the actual cadences it is
 /// generous in the right direction — AMP sends `AmpStatusMessage` every 500 ms
-/// (10 missed frames) and Icarus sends `IcarusStatusMessage` at 10 Hz
-/// (50 missed reports) — so a burst of arbitration losses or a handful of
-/// skipped temperature reads cannot blank a working field, while a sender that
-/// has genuinely stopped is caught within one 2 s telemetry period of the
-/// packet after the window closes.
+/// (10 missed frames) and Icarus sends `IcarusStatusMessage` at 100 Hz
+/// (500 missed reports) — so a burst of arbitration losses cannot blank a
+/// working field, while a sender that has genuinely stopped is caught within
+/// one 2 s telemetry period of the packet after the window closes.
 ///
 /// The timekeeping stays here rather than in `firmware-common-new`: that crate
 /// is shared with the host build and has no business knowing about

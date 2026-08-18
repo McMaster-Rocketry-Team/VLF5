@@ -19,11 +19,10 @@ use firmware_common_new::{
         AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
     },
     flight_data_record::{
-        AIRBRAKES_BARO_GATE_REJECT,
-        AIRBRAKES_BARO_RESYNC, AIRBRAKES_BURNOUT, AIRBRAKES_PAD_CALIBRATED,
-        AIRBRAKES_SUBSONIC_DRAG, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
-        DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
-        FlightDataFastRecord,
+        AIRBRAKES_BARO_GATE_REJECT, AIRBRAKES_BARO_RESYNC, AIRBRAKES_BURNOUT,
+        AIRBRAKES_PAD_CALIBRATED, AIRBRAKES_SUBSONIC_DRAG, AirBrakesActuationRecord,
+        AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord, DEPLOYMENT_BARO_GATE_REJECT,
+        DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord, FlightDataFastRecord,
         FlightDataSlowRecord, ImuRecord, LogRecord, NodeStatusRecord, PayloadRecord,
     },
 };
@@ -428,11 +427,17 @@ pub async fn log_flight_data(
         // like a state where nothing has been commanded and Icarus has not
         // reported — which is the truth in both cases.
         let airbrakes_state = airbrakes_opt.unwrap_or_default();
-        let air_brakes = AirBrakesRecord {
+        // Sampled per fast record, which is the whole point of it being here:
+        // the watch is written by the 10 Hz control loop and by every
+        // `IcarusStatus` frame, and reading it at 427 Hz is what pins each of
+        // those edges to a row rather than to a 100 ms bucket.
+        let air_brakes_actuation = AirBrakesActuationRecord {
             commanded_extension: airbrakes_state.commanded_extension,
-            predicted_apogee_asl: airbrakes_state.predicted_apogee_asl,
-            validation_deploy: airbrakes_state.validation_deploy,
             actual_extension: airbrakes_state.actual_extension,
+            validation_deploy: airbrakes_state.validation_deploy,
+        };
+        let air_brakes = AirBrakesRecord {
+            predicted_apogee_asl: airbrakes_state.predicted_apogee_asl,
             servo_temp: airbrakes_state.servo_temp,
             // The MPC's own latched target, published by the control loop when
             // it built the MPC — not a per-record sample of the operator's
@@ -479,6 +484,7 @@ pub async fn log_flight_data(
             airbrakes,
             pyro_flags,
             flight_stage: stage,
+            air_brakes: air_brakes_actuation,
         });
         sequence = sequence.wrapping_add(1);
 

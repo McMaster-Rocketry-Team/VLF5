@@ -35,12 +35,15 @@ the firmware starts a fresh log over them on the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
-| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 145 B (144 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, pad calibration complete, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms) |
-| **Slow** (tag 0x02) | 10 Hz | 257 B (256 B body + tag), 1 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**commanded + actual extension**, **validation-deploy flag**, **servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
+| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 161 B (160 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, pad calibration complete, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), `air_brakes` (**commanded + actual extension**, **validation-deploy flag** — here for the edges, not the values) |
+| **Slow** (tag 0x02) | 10 Hz | 233 B (232 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
 
-Throughput ≈ 64 kB/s of record payload (427 Hz × 145 B + 10 Hz × 257 B),
-≈ 70 kB/s of actual block writes once block padding is counted, ≈ 250 MB/hour.
-That is up from v11's ≈ 43 kB/s / 154 MB/hour, and capacity remains a
+Throughput ≈ 71 kB/s of record payload (427 Hz × 161 B + 10 Hz × 233 B).
+Blocks are what actually reach the card: three fast records per block is
+142 blocks/s, two slow records per block is another 5, so ≈ 147 blocks/s
+≈ 75 kB/s ≈ 271 MB/hour. Moving the extensions to the fast record in v19 did
+not cost a single block write — the fast record still packs three to a block
+and the slow one now packs two where it packed one. Capacity remains a
 non-issue.
 
 Absence means "no source is producing this", uniformly, and every one of these
@@ -52,7 +55,9 @@ filter's birth) **and again from apogee onward**, when the airbrakes estimator
 is retired — dropped outright, so the whole descent has no `airbrakes_*`
 columns at all, flags included; the airbrakes commanded extension until the
 firmware commands one; and the airbrakes actual extension and servo temp until
-Icarus first reports. The last of those is the one worth remembering when
+Icarus first reports (both on the same condition, though they now sit on
+different records — the extension on the fast one, the temperature on the
+slow). The last of those is the one worth remembering when
 reading a log: a silent or offline Icarus shows as an empty cell, never as 0.0,
 so it cannot be mistaken for stowed brakes at 0 C. The one exception to
 absence-encoding is `air_brakes_validation_deploy`, which is a flag rather than
@@ -143,6 +148,9 @@ zero.
 
 Columns: **TM** = TelemetryPacket (2 s) · **LP/LD** = low-power / landed
 packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
+A ✓ under **Fast** is about when the column can CHANGE, not how fast its source
+runs: the brake extensions are fast-record columns fed by 10 Hz and 100 Hz
+sources, and they are there so their edges are timestamped, not resampled.
 
 | Value | TM 2s | LP/LD 5s | Fast | Slow | Derivable post-flight? |
 |---|---|---|---|---|---|
@@ -176,9 +184,9 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | VL battery voltage | ✓ | ✓ | – | ✓ (absent until the ADC reports) | logged |
 | pyro continuity (main/drogue) | ✓ | – | ✓ | – | logged |
 | pyro fire outputs, short-circuit | – | – | ✓ (±2.3 ms) | – | logged |
-| `air_brakes_commanded_extension` | ✓ (5-bit, always sent) | – | – | ✓ (absent until commanded) | logged |
-| `air_brakes_actual_extension` | ✓ (5-bit, `icarus_status_valid`) | – | – | ✓ (absent until Icarus reports) | logged |
-| `air_brakes_validation_deploy` | – | – | – | ✓ (a flag, not an absence) | logged |
+| `air_brakes_commanded_extension` | ✓ (5-bit, always sent) | – | ✓ (absent until commanded; 10 Hz source) | – | logged |
+| `air_brakes_actual_extension` | ✓ (5-bit, `icarus_status_valid`) | – | ✓ (absent until Icarus reports; 100 Hz source) | – | logged |
+| `air_brakes_validation_deploy` | – | – | ✓ (a flag, not an absence) | – | logged |
 | `air_brakes_servo_temp` | ✓ (9-bit, shares `icarus_status_valid`) | – | – | ✓ (absent until Icarus reports) | logged |
 | Icarus servo current | – | – | – | – | **nowhere** — the field was dropped from `IcarusStatusMessage`; the servo does not measure current |
 | MPC predicted apogee | ✓ (14-bit AGL, `mpc_predicted_apogee_valid`) | – | – | ✓ as `mpc_predicted_apogee_asl` (absent while the MPC is not running) | logged — SD stores ASL, the packet AGL; subtract `launch_pad_altitude_asl` |
@@ -264,14 +272,20 @@ Takeaways:
   longer the MPC's, so there is no prediction that describes it. Read the tail
   of the commanded column as a servo test, not as MPC intent. It is not on the
   downlink; the RTT line `forcing 100% for validation` is the live marker.
-- Everything about the airbrakes *actuation* lives on the slow record, not
-  the fast one: the control loop runs at 10 Hz and Icarus reports at 10 Hz, so
-  the fast record was storing each value ~42 times over. It also stops the log
-  implying a precision it never had — the Icarus-reported extension is up to
-  100 ms older than the row it used to sit on, so a commanded/actual pair was
-  never a step response. Resolving servo slew would need Icarus to report
-  faster (it measures the angle every cycle at 100 Hz and throws 9 of 10 away),
-  not the log to sample faster.
+- The airbrakes **commanded and actual extension are on the fast record**
+  (v19), and the rest of the actuation — servo temperature, MPC prediction and
+  target — is still on the slow one. Neither extension moves faster than
+  100 Hz: the control loop commands at 10 Hz, and Icarus measures the servo
+  angle every cycle of its 100 Hz loop. They are logged at 427 Hz for their
+  EDGES, not their values, so a commanded step and the extension that follows
+  it are rows ~2.3 ms apart and can be read as a step response. On the slow
+  record each edge was quantised by ~100 ms and the reported extension was up
+  to another ~100 ms stale behind that, which is the same order as the servo
+  travel being measured — the pair was never a step response.
+  Icarus used to send one report in ten (it was measuring at 100 Hz and
+  throwing 9 away); it now sends every one, and reads the servo temperature on
+  every tenth cycle, repeating it in the reports between. The `commanded`
+  column still steps at 10 Hz — that is the control loop, not the log.
 - The airbrakes estimator is **retired at apogee**, not merely gated: the
   wrapper drops it on the first of (its own vertical velocity <= 0), (its own
   tilt past the horizon), or (the deployment estimator calling apogee). The
