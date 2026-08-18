@@ -291,12 +291,12 @@ pub async fn armed_mode(
 
                     // Airbrakes estimator health: whether the vertical filter
                     // is born. The rest of its state is SD-only.
-                    packet.airbrakes_born = ab.is_some_and(|ab| ab.baro_trusted);
+                    packet.airbrakes_born = ab.is_some_and(|ab| ab.airbrakes_enabled);
 
                     // ...and whether the pad calibration exists. This is the
                     // only airbrakes bit in the downlink that can be acted on
                     // while there is still time to act: `airbrakes_born` is
-                    // `baro_trusted`, which cannot go true until the Mach
+                    // `airbrakes_enabled`, which cannot go true until the Mach
                     // lockout has already been and gone. Ignition detection is
                     // gated on the calibration, so a rocket on the rail
                     // reporting false here will fly with no airbrakes and

@@ -157,11 +157,10 @@ packets (5 s) · **Fast** = SD @ ~427 Hz · **Slow** = SD @ 10 Hz.
 | `airbrakes_kf_altitude_asl` | – | – | ✓ (ASL, absent until born / after apogee) | – | yes — replay IMU+baro through estimator |
 | `airbrakes_kf_vertical_velocity` | – | – | ✓ (absent until born / after apogee) | – | yes — replay |
 | `airbrakes_kf_tilt_deg` | ✓ (8-bit, `airbrakes_kf_tilt_valid`) | – | ✓ (absent before ignition / after apogee) | – | yes — replay / offline attitude |
-| airbrakes born | ✓ (1 bit; 0 after apogee) | – | ✓ (`AIRBRAKES_BARO_TRUSTED`) | – | yes — replay |
+| airbrakes enabled (the brakes may open, one-way) | ✓ as `airbrakes_born` (1 bit; 0 after apogee) | – | ✓ (`AIRBRAKES_ENABLED`) | – | yes — replay |
 | airbrakes drag check | – | – | ✓ (`airbrakes.flags` bit) | – | yes — replay |
 | airbrakes burnout latch | – | – | ✓ (`AIRBRAKES_BURNOUT`) | – | SD only; the packet has 5 spare bits, but see the air-time note below |
 | airbrakes pad calibration complete | – | – | ✓ (`AIRBRAKES_PAD_CALIBRATED`) | – | SD only — **nowhere on the wire**; RTT line live, candidate for a VLCustomStatus bit |
-| airbrakes permitted to open (the MPC's gate) | – | – | ✓ (`AIRBRAKES_MPC_PERMITTED`, exact per sample) | – | SD only — **not reconstructible offline**: the Mach term needs `max_open_mach` and a speed of sound from the filter's own altitude, neither of which is in the log |
 | `flight_stage` (incl. FailedToReachMinApogee; Mach lockout folded into `Ascent`) | ✓ (3-bit) | – | ✓ full rate | – | logged |
 | drogue/main deployed | – | – | ✓ (pyro fire flags) | – | read the stage transition, or the pyro fire bits for the GPIO edge |
 | `air_brakes_target_apogee_asl` (what the MPC latched) | ✓ as `target_apogee_agl` (14-bit; the operator's live setting, which can differ) | – | – | ✓ (absent until the MPC is built) | the operator's AGL setting is also in the SD config block |
