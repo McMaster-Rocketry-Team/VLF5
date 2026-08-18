@@ -100,7 +100,7 @@ are live throughout and are what to read there.
 
 | Packet | Size | When | Contents (summary) |
 |---|---|---|---|
-| `TelemetryPacket` | 38 B (299/304 bits — 5 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
+| `TelemetryPacket` | 38 B (300/304 bits — 4 spare) | every 2 s in Armed + SelfTest | GPS fix, VL battery, air temp, pyro continuity, deployment altitude AGL + max + vertical velocity (signed, −400..1050 m/s @ ~1.4 m/s), airbrakes tilt, flight stage (3-bit `RocketState` mirror, Mach lockout folded into `Ascent`), **airbrakes enabled**, **MPC predicted apogee AGL**, **target apogee AGL**, amp status + 3 outputs + shared battery, Icarus status + airbrakes ext/temp, OZYS + SDRM status, payload stack status, **EPM battery + six rail currents + three SEM actuator step counts** |
 | `LowPowerTelemetryPacket` | 13 B (98 bits — 6 spare) | every 5 s in LowPower + Demo | sats, gps_fixed, **lat/lon**, VL battery, amp online, shared battery, air temp, **payload EPM battery** |
 | `LandedTelemetryPacket` | 11 B (88 bits — 0 spare) | every 5 s in Landed | lat/lon, sats, VL battery, amp status + outputs + shared battery |
 
@@ -235,11 +235,12 @@ Takeaways:
 - The downlink packet is 38 B — 48 B on air, after the type byte and
   reed-solomon ecc (`(n+1) + (n+1)/4`). The symbol count steps at 50 / 55 / 60
   bytes on air, so **38 B is the last size that still fits the current symbol
-  count**: the five spare bits are padding inside the last byte, not budget,
+  count**: 39 B is 50 B on air, exactly on the first step. The four spare bits
+  are padding inside the last byte, not budget,
   and there is no headroom left to add a field without paying for more air time
   inside the 2 s telemetry period. Time-on-air is lower than the 1642 ms quoted
   for the old 41 B packet and should be re-measured.
-  The payload stack owns 93 of the 299 used bits (31%): 8 for the stack flags,
+  The payload stack owns 93 of the 300 used bits (31%): 8 for the stack flags,
   11 for the EPM battery, 42 for the six rails, 30 for the three actuators,
   2 for SDRM liveness. Every other CAN node together costs 40 — AMP 21, Icarus
   17 (two liveness bits, `icarus_status_valid`, extension and servo temp),
