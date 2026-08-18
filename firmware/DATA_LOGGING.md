@@ -35,7 +35,7 @@ the firmware starts a fresh log over them on the next arm.
 
 | Record | Rate | Wire size | Contents |
 |---|---|---|---|
-| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 161 B (160 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, filter-born, pad calibration complete, baro gate reject + resync), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), `air_brakes` (**commanded + actual extension**, **validation-deploy flag** — here for the edges, not the values) |
+| **Fast** (tag 0x01) | ~427 Hz — exactly one record per published sensor sample, no filler | 161 B (160 B body + tag), 3 per block | sequence, timestamp_us, **unix_time_us** (GPS-disciplined, absent until the clock locks), `imu` (accel ×3 + gyro ×3, one group — they come from the same read), baro pressure, mag ×3 (100 Hz source, resampled), `deployment` (`kf_altitude_asl` + `kf_vertical_velocity` + `flags`: baro innovation-gate reject + resync, per sample), `airbrakes` (`kf_altitude_asl` + `kf_vertical_velocity` + `kf_tilt_deg` + `flags`: lockout-exit drag check, burnout latch, pad calibration complete, two-bit state), flight stage (`RocketState` mirror, Mach lockout folded into `Ascent`, logged only here), **pyro flags** (continuity / fire / short, at ±2.3 ms), `air_brakes` (**commanded + actual extension**, **validation-deploy flag** — here for the edges, not the values) |
 | **Slow** (tag 0x02) | 10 Hz | 233 B (232 B body + tag), 2 per block | timestamp_us, **baro temperature** (~13 Hz source), battery voltage, GPS lat/lon/alt/sats/DOPs (~1 Hz source), **`launch_pad_altitude_asl`** (the one reference every AGL number is measured from), `air_brakes` (**servo temp**, **MPC predicted apogee ASL**, **MPC target apogee ASL**), **full `NodeStatus` for AMP / Icarus / OZYS / payload SDRM** (uptime, health, mode, custom status), `amp` (**output statuses + shared battery voltage**), `payload` (**EPM battery mV + six rail currents mA + three SEM actuator step counts**, 2 Hz source) |
 
 Throughput ≈ 71 kB/s of record payload (427 Hz × 161 B + 10 Hz × 233 B).
@@ -72,7 +72,7 @@ whole point of the record shape:
   lockout**: an estimator sample exists for this tick, and the filter has
   nothing to say because it is frozen and holds a stale pre-ignition reading.
   `deployment: None` is different — no estimator sample matched that tick at
-  all, so the gate bits are absent too.
+  all, so its gate bits are absent too.
 - A node's outer `Option` being `None` means **never heard from at all**;
   `NodeStatusRecord::online == false` means the node spoke and then went quiet
   for 5 s, and the rest of its fields describe its last heartbeat. The old
@@ -173,7 +173,7 @@ sources, and they are there so their edges are timestamped, not resampled.
 | drogue/main deployed | – | – | ✓ (pyro fire flags) | – | read the stage transition, or the pyro fire bits for the GPIO edge |
 | `air_brakes_target_apogee_asl` (what the MPC latched) | ✓ as `target_apogee_agl` (14-bit; the operator's live setting, which can differ) | – | – | ✓ (absent until the MPC is built) | the operator's AGL setting is also in the SD config block |
 | deployment baro gate reject, resync | – | – | ✓ (`deployment.flags` bits, exact per sample) | – | logged |
-| airbrakes baro gate reject, resync | – | – | ✓ (`airbrakes.flags` bits, exact per sample) | – | logged |
+| airbrakes baro gate reject, resync | – | – | – | – | **nowhere** — that filter has no gate; see the bullet below |
 | KF innovation magnitude | – | – | – | – | yes — replay pressure |
 | `launch_pad_altitude_asl` | – | – | – | ✓ (absent only before the estimator's first sample) | logged — previously had to be eyeballed off `deployment_kf_altitude_asl` while on pad |
 | GPS `lat_lon` | ✓ (23-bit lat / 24-bit lon, ~2.4 m, `lat_lon_valid`) | ✓ all three | – | ✓ (f64, exact; absent until a fix) | logged |
@@ -293,16 +293,25 @@ Takeaways:
   is the only place that attribution is recorded — the whole `airbrakes` group
   just goes absent. On the Void Lake replay it is the velocity clause, ~2 s
   before the smoothed baro apogee.
-- Both estimators log their baro innovation gate, per sample. A **run** of
-  reject bits is one episode — an ejection transient, or a port the shock
-  front disturbed — and the filter rode it out on prediction alone. A
-  **resync** bit (`DEPLOYMENT_BARO_RESYNC` / `AIRBRAKES_BARO_RESYNC`) on the
-  last row of a run is the opposite verdict: the run lasted long enough that
-  the filter, not the sensor, was judged wrong, and altitude snapped to the
-  baro. A run without a resync is the gate doing its job; a run ending in one
-  means altitude is discontinuous across that row. Both deployment bits read 0
-  through Mach lockout, where the KF is frozen and nothing is fused — the same
-  window in which its altitude and velocity are absent.
+- **The deployment estimator logs its baro innovation gate, per sample; the
+  airbrakes estimator has no gate to log.** A **run** of `DEPLOYMENT_BARO_GATE_REJECT`
+  is one episode — an ejection transient, or a port the shock front disturbed —
+  and the filter rode it out on prediction alone. A `DEPLOYMENT_BARO_RESYNC`
+  bit on the last row of a run is the opposite verdict: the run lasted long
+  enough that the filter, not the sensor, was judged wrong, and altitude
+  snapped to the baro. A run without a resync is the gate doing its job; a run
+  ending in one means altitude is discontinuous across that row. Both bits read
+  0 through Mach lockout, where the KF is frozen and nothing is fused — the
+  same window in which its altitude and velocity are absent.
+
+  The airbrakes filter had the same pair until v19 and lost both along with the
+  gate itself. It is born subsonic and after burnout and retired at apogee, so
+  its entire life is the one window of the flight with no shock front ahead of
+  the static ports and no charge fired behind them: neither thing a gate exists
+  to catch can reach it. What it costs is one bad sample moving altitude by the
+  Kalman gain instead of being refused — about half a spike, at birth-time
+  covariance. The deployment filter flies pad to landing through both hazards
+  and keeps its gate.
 - A `record_count` step other than +1 is the **only** signal that samples were
   lost, and every path now consumes a sequence number: the logger falling
   behind the sensor stream, a full SD queue, and an SD card reported offline.
@@ -312,8 +321,8 @@ Takeaways:
 - These bits are **exact, not sampled**. The estimator loop takes them in the
   same critical section as its update and publishes them stamped with that
   sample's `timestamp_us`; the logger only accepts a sample whose stamp equals
-  the record's, so a resync — which happens on exactly one sample — can be
-  neither missed nor attributed to a neighbouring row. Rows before the
+  the record's, so a deployment resync — which happens on exactly one sample —
+  can be neither missed nor attributed to a neighbouring row. Rows before the
   estimator's first update carry no estimator group at all rather than a
   nearby tick's numbers, and the flag bits go absent with it: a `false` there
   would be a claim about a sample nothing measured.

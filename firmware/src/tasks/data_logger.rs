@@ -19,10 +19,10 @@ use firmware_common_new::{
         AMP_NODE_TYPE, ICARUS_NODE_TYPE, OZYS_NODE_TYPE, PAYLOAD_SDRM_NODE_TYPE,
     },
     flight_data_record::{
-        AIRBRAKES_BARO_GATE_REJECT, AIRBRAKES_BARO_RESYNC, AIRBRAKES_BURNOUT,
-        AIRBRAKES_PAD_CALIBRATED, AIRBRAKES_SUBSONIC_DRAG, AirBrakesActuationRecord,
-        AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord, DEPLOYMENT_BARO_GATE_REJECT,
-        DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord, FlightDataFastRecord,
+        AIRBRAKES_BURNOUT, AIRBRAKES_PAD_CALIBRATED, AIRBRAKES_SUBSONIC_DRAG,
+        AirBrakesActuationRecord, AirBrakesRecord, AirbrakesEstimatorRecord, AmpRecord,
+        DEPLOYMENT_BARO_GATE_REJECT, DEPLOYMENT_BARO_RESYNC, DeploymentEstimatorRecord,
+        FlightDataFastRecord,
         FlightDataSlowRecord, ImuRecord, LogRecord, NodeStatusRecord, PayloadRecord,
     },
 };
@@ -217,15 +217,9 @@ fn pack_estimator_sample(
     if ab.burnout_detected {
         flags |= AIRBRAKES_BURNOUT;
     }
-    // Two bits at the top of the same byte, so "where was the estimator"
-    // costs nothing over the booleans it replaced.
+    // Two bits of the same byte, so "where was the estimator" costs nothing
+    // over the booleans it replaced.
     flags |= ab.state.to_flags();
-    if ab.baro_gate.rejected() {
-        flags |= AIRBRAKES_BARO_GATE_REJECT;
-    }
-    if ab.baro_gate.resynced() {
-        flags |= AIRBRAKES_BARO_RESYNC;
-    }
     // The only one of these that says anything before ignition, which is
     // exactly when it matters: the estimator will not detect ignition
     // without it, so a pad segment logged with this clear is the whole
