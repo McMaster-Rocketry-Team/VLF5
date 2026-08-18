@@ -170,12 +170,21 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
         // against a 17.5 s floor is not a number either of them can feel.
         ignition_detection_acc_threshold: 8.0 * 9.81,
         mach_lockout: Some(MachLockoutConfig {
-            // Earliest simulated time below Mach 0.8: 17.52 s. This floor,
-            // not the velocity ceiling, is what actually keeps an early
+            // Past the LATEST simulated Mach 0.8 crossing (the O3400's, at
+            // 17.56 s), which is the bar this floor has to clear on its own
+            // now that the drag check concludes on the sample it votes on.
+            // It was 17.50 s while the check also had to hold for a second;
+            // that second covered the 0.06 s shortfall, and nothing does any
+            // more. 17.70 s is still 0.02 s short of the earliest the check
+            // has ever actually voted on this motor (17.725 s), so it costs
+            // no control window — it only makes the guarantee true without
+            // reference to the check's own behaviour.
+            //
+            // This floor, not the velocity ceiling, is what keeps an early
             // birth out: on the O3400 sim a 5x-wrong Cd moves birth only
             // from 18.89 s to 18.52 s, because the check cannot speak before
             // this.
-            earliest_subsonic_after_ignition_us: 17_500_000,
+            earliest_subsonic_after_ignition_us: 17_700_000,
             // Latest (17.57 s) x1.4; still 14 s before the earliest apogee.
             force_birth_after_ignition_us: 25_000_000,
             // The O3400 crosses Mach 0.8 at 6734 m in the sim the two timers

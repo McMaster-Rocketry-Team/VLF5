@@ -80,8 +80,8 @@ whole point of the record shape:
   longer reads as "booted, then dropped".
 
 `flight_stage` gives stage transitions at ~2.3 ms resolution, and the
-per-sample drag-check and burnout bits reconstruct the lockout-exit table
-post-flight; the pyro fire bits get the same resolution. Through the Mach
+per-sample burnout bit and the two-bit airbrakes state reconstruct the
+lockout exit post-flight; the pyro fire bits get the same resolution. Through the Mach
 lockout the deployment KF columns are **empty**, not frozen — the accessors
 that feed the log and the accessors that feed the downlink are the same two
 functions, so the two channels describe that window identically by
@@ -166,7 +166,7 @@ sources, and they are there so their edges are timestamped, not resampled.
 | `airbrakes_kf_vertical_velocity` | – | – | ✓ (absent until born / after apogee) | – | yes — replay |
 | `airbrakes_kf_tilt_deg` | ✓ (8-bit, `airbrakes_kf_tilt_valid`) | – | ✓ (absent before ignition / after apogee) | – | yes — replay / offline attitude |
 | `airbrakes_state` (`Armed`/`Stage1`/`DeadReckoning`/`AirbrakesEnabled`, one-way) | ✓ as `airbrakes_enabled` (1 bit, the last state only; 0 after apogee) | – | ✓ (2 bits at the top of `airbrakes.flags`) | – | partly — `Armed` vs `Stage1` is this half's OWN ignition detection and is nowhere else |
-| airbrakes drag check | – | – | ✓ (`airbrakes.flags` bit) | – | yes — replay |
+| airbrakes drag check | – | – | ✓ (`airbrakes.flags` bit, set only when the vote was REFUSED — normally 0 all flight) | – | yes — replay |
 | airbrakes burnout latch | – | – | ✓ (`AIRBRAKES_BURNOUT`) | – | SD only; the packet has 5 spare bits, but see the air-time note below |
 | airbrakes pad calibration complete | – | – | ✓ (`AIRBRAKES_PAD_CALIBRATED`) | – | SD only — **nowhere on the wire**; RTT line live, candidate for a VLCustomStatus bit |
 | `flight_stage` (incl. FailedToReachMinApogee; Mach lockout folded into `Ascent`) | ✓ (3-bit) | – | ✓ full rate | – | logged |
@@ -286,6 +286,24 @@ Takeaways:
   throwing 9 away); it now sends every one, and reads the servo temperature on
   every tenth cycle, repeating it in the reports between. The `commanded`
   column still steps at 10 Hz — that is the control loop, not the log.
+- **The drag check concludes on the sample it votes on.** It had to hold
+  continuously for 1 s until v19, on the theory that a sustain rejects
+  flicker at the threshold crossing — measured on the LC'25 replay there is
+  no flicker: the low-passed airspeed crosses once and the margin grows
+  monotonically (+1.03, +1.13, +1.21, +1.44 m/s over the four samples around
+  it). What the second actually bought was ~0.04 Mach of margin, and only
+  where nothing else was binding; the unsafe direction — a `Cd*A/m` too large,
+  which reads the airspeed low and votes early — is held by the inertial Mach
+  test at the birth site, which is a pure accelerometer integration and so
+  cannot be fooled by a wrong drag model. At Cd +30% on LC'25 the check votes
+  at true Mach 0.857 and that test holds the birth at 0.787, with the sustain
+  or without it. What it cost was ~1 s of control window on every flight where
+  the drag model was right.
+
+  Two consequences to know when reading a log. `earliest_subsonic_after_ignition_us`
+  moved 17.50 s → 17.70 s, because it is now the whole of the timing guarantee
+  and the O3400 crosses Mach 0.8 at 17.56 s. And `airbrakes_subsonic_drag`
+  reads 0 for a whole nominal flight now — see its own note above.
 - The airbrakes estimator is **retired at apogee**, not merely gated: the
   wrapper drops it on the first of (its own vertical velocity <= 0), (its own
   tilt past the horizon), or (the deployment estimator calling apogee). The
