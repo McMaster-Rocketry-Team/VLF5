@@ -106,32 +106,6 @@ pub async fn self_test_mode(
             }
         });
 
-        // test amp out 1
-        // recovery beacon is on battery 1
-
-        {
-            amp_control_watch.sender().send(AmpControlMessage {
-                out1_enable: true,
-                out2_enable: false,
-                out3_enable: false,
-            });
-            Timer::after_millis(5000).await; // keep this long for any longer and you shall deafen people
-            // A timeout and an answer of "not PowerGood" are the same result to
-            // the operator listening at the pad: the output did not come up. Both
-            // land as `false` here, and `false` is a partial failure.
-            let out1_power_good = get_amp_status_message(&mut can_receiver_sub)
-                .await
-                .is_some_and(|amp_status_message| {
-                    amp_status_message.out1.status == PowerOutputStatus::PowerGood
-                });
-            if !out1_power_good {
-                self_test_partial_failure = true;
-            }
-            packet_builder.update(|packet| {
-                packet.amp_out1_power_good = out1_power_good;
-            });
-        }
-
         // test amp out 2 (air brakes, camera, VL-Mini, VLF6)
         {
             amp_control_watch.sender().send(AmpControlMessage {
@@ -216,6 +190,33 @@ pub async fn self_test_mode(
                 if !packet.icarus.healthy() {
                     self_test_partial_failure = true;
                 }
+            });
+        }
+
+        Timer::after_millis(3000).await;
+
+        // test amp out 1
+        // recovery beacon is on battery 1
+        {
+            amp_control_watch.sender().send(AmpControlMessage {
+                out1_enable: true,
+                out2_enable: false,
+                out3_enable: false,
+            });
+            Timer::after_millis(5000).await; // keep this long for any longer and you shall deafen people
+            // A timeout and an answer of "not PowerGood" are the same result to
+            // the operator listening at the pad: the output did not come up. Both
+            // land as `false` here, and `false` is a partial failure.
+            let out1_power_good = get_amp_status_message(&mut can_receiver_sub)
+                .await
+                .is_some_and(|amp_status_message| {
+                    amp_status_message.out1.status == PowerOutputStatus::PowerGood
+                });
+            if !out1_power_good {
+                self_test_partial_failure = true;
+            }
+            packet_builder.update(|packet| {
+                packet.amp_out1_power_good = out1_power_good;
             });
         }
 
