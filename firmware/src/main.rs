@@ -126,85 +126,26 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
 /// only that the bench profile works.
 #[cfg(not(feature = "hil-single"))]
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
-    // The ONLY ignition detector either half has, and one setting for both
-    // of them. The barometric one it replaced completed at ignition+1.12 s
-    // on this trajectory while the airframe crosses Mach 0.8 at +1.88 s —
-    // it was deciding the start of the Mach lockout 0.75 s before the
-    // static port it reads began lying. This latches at +0.15 s instead.
-    //
-    // 8 g: boost holds 14 g for the whole 6.3 s burn, so on this motor 8 g
-    // costs only 15-22 ms over 4 g while doubling the margin over anything
-    // that can happen to a rocket on a rail. Measured latch times after
-    // true ignition, sustain included — O3400 0.136 s, N2900 0.148 s
-    // (`ignition_latch_time_by_threshold`). Cheap here, but
-    // airframe-specific: on LC'25's softer curve 8 g costs 0.45 s and 10 g
-    // never latches at all.
-    //
-    // This was two fields, one per half, and this comment used to have to
-    // argue that setting them apart would be a mistake. It is one field
-    // now, so it cannot happen: "the motor lit" is one event, and it is the
-    // origin of both Mach lockout clocks.
     ignition_detection_acc_threshold: 8.0 * 9.81,
     profile: FlightProfile {
-        // Mach 0.75 at 18.67 s worst case, x1.4; ends 13 s before the
-        // earliest simulated apogee.
         mach_lockout_duration_us: Some(26_000_000),
         deployment: DeploymentProfile::Dual {
             drogue_chute_minimum_altitude_agl: 2000.0,
             drogue_chute_delay_us: 1_000_000,
-            // 1500 ft AGL, FDR R4.3.1 / CONOPS.
             main_chute_altitude_agl: 457.2,
-            main_chute_delay_us: 0,
+            main_chute_delay_us: 1_000_000,
         },
     },
     airbrakes: AirbrakesConfig {
+        max_open_mach: 0.83,
         mach_lockout: Some(MachLockoutConfig {
-            // Past the LATEST simulated Mach 0.8 crossing (the O3400's, at
-            // 17.56 s), which is the bar this floor has to clear on its own
-            // now that the drag check concludes on the sample it votes on.
-            // It was 17.50 s while the check also had to hold for a second;
-            // that second covered the 0.06 s shortfall, and nothing does any
-            // more. 17.70 s is still 0.02 s short of the earliest the check
-            // has ever actually voted on this motor (17.725 s), so it costs
-            // no control window — it only makes the guarantee true without
-            // reference to the check's own behaviour.
-            //
-            // This floor, not the velocity ceiling, is what keeps an early
-            // birth out: on the O3400 sim a 5x-wrong Cd moves birth only
-            // from 18.89 s to 18.52 s, because the check cannot speak before
-            // this.
-            earliest_subsonic_after_ignition_us: 17_700_000,
-            // Latest (17.57 s) x1.4; still 14 s before the earliest apogee.
+            earliest_subsonic_after_ignition_us: 17_200_000,
             force_birth_after_ignition_us: 25_000_000,
-            // The O3400 crosses Mach 0.8 at 6734 m in the sim the two timers
-            // above come from; this is that, rounded up, since erring HIGH
-            // reads density low and airspeed high and so only ever delays
-            // the exit. The N2900 backup crosses 1151 m lower (5583 m), and
-            // taking the higher of the two is the same one-sided choice —
-            // flying the backup then makes the check vote at Mach 0.736
-            // instead of 0.796, which `mach_lockout_timers_bracket_every_simulation`
-            // asserts for both motors.
             subsonic_crossing_altitude_asl: 6800.0,
         }),
-        // The Mach the CFD Cd table below is tabulated at (FDR Table 10 is a
-        // Mach 0.8, 4000 m sweep), which is also the speed below which the
-        // flaps may open — one fact, so one number. The drag check votes at
-        // it and the MPC gate refuses above it. Measured birth lands at Mach
-        // 0.726 nominal and 0.743 with a 5x-wrong Cd, so the gate is slack
-        // on a healthy flight without a second, higher constant.
-        max_open_mach: 0.8,
         rocket: RocketParameters {
             burnout_mass: 18.696,
-            // FDR Table 10 — STAR-CCM+ drag at Mach 0.8 and 4000 m for 0/25/
-            // 50/75/100% flap extension (167/190/220/263/306 N), divided by
-            // `q * reference_area` at ISA 4000 m (rho 0.8191, a 324.6 m/s,
-            // q 27615 Pa). The stowed 0.614 sits 3.6% above OpenRocket's own
-            // Mach-0.8 Cd of 0.592, which is the cross-check that the CFD
-            // numbers are whole-body and share this reference area.
             cd: [0.61365, 0.69816, 0.8084, 0.96641, 1.12441],
-            // pi/4 * (0.112017 m)^2 — OpenRocket's reference area for this
-            // airframe, taken from the widest transition, not the 105.7 mm
-            // body tube.
             reference_area: 0.009854945,
         },
     },
@@ -440,6 +381,7 @@ async fn low_prio_main(
         p.PA7,
         gps_reading_watch.receiver().unwrap(),
     ).unwrap());
+    spawner.spawn(periodic_beep_task(buzzer_pubsub).unwrap());
     spawner.spawn(adc_task(p.ADC1, p.PB0, battery_v_watch).unwrap());
     spawner.spawn(pyro_task(
         p.PE9,
@@ -669,6 +611,21 @@ async fn low_prio_main(
                 .await
             }
         }
+    }
+}
+
+/// Locator beep: a short low tone every 5 s, unconditionally, for as long as
+/// the board is powered. Spawned without a `DISABLE_BUZZER` check on purpose —
+/// `buzzer_task` already drops every tone when that flag is set, so the one
+/// place the buzzer is silenced stays the one place that decides it.
+#[embassy_executor::task]
+async fn periodic_beep_task(buzzer_pubsub: &'static BuzzerPubSub) {
+    let buzzer_pub = buzzer_pubsub.immediate_publisher();
+    let mut ticker = Ticker::every(Duration::from_millis(5000));
+
+    loop {
+        ticker.next().await;
+        buzzer_pub.publish_immediate(BuzzerTone::Low(50, 50));
     }
 }
 

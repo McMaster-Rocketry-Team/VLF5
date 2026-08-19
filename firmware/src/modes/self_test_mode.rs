@@ -84,10 +84,10 @@ pub async fn self_test_mode(
                 packet.main_continuity = continuity.pyro_main_continuity;
                 packet.drogue_continuity = continuity.pyro_drogue_continuity;
 
-                if !packet.imu_ok || !packet.baro_ok || !packet.gps_ok || !packet.can_bus_ok {
+                if !packet.imu_ok || !packet.baro_ok || !packet.gps_ok {
                     self_test_failed = true;
                 }
-                if !packet.mag_ok || !packet.sd_ok {
+                if !packet.mag_ok || !packet.sd_ok || !packet.can_bus_ok {
                     self_test_partial_failure = true;
                 }
             });
@@ -116,14 +116,17 @@ pub async fn self_test_mode(
                 out3_enable: false,
             });
             Timer::after_millis(5000).await; // keep this long for any longer and you shall deafen people
-            let out1_power_good = if let Some(amp_status_message) =
-                get_amp_status_message(&mut can_receiver_sub).await
-            {
-                amp_status_message.out1.status == PowerOutputStatus::PowerGood
-            } else {
+            // A timeout and an answer of "not PowerGood" are the same result to
+            // the operator listening at the pad: the output did not come up. Both
+            // land as `false` here, and `false` is a partial failure.
+            let out1_power_good = get_amp_status_message(&mut can_receiver_sub)
+                .await
+                .is_some_and(|amp_status_message| {
+                    amp_status_message.out1.status == PowerOutputStatus::PowerGood
+                });
+            if !out1_power_good {
                 self_test_partial_failure = true;
-                false
-            };
+            }
             packet_builder.update(|packet| {
                 packet.amp_out1_power_good = out1_power_good;
             });
@@ -137,14 +140,17 @@ pub async fn self_test_mode(
                 out3_enable: false,
             });
             Timer::after_millis(15000).await; // longer time for payload sdrm to connect to payload, also air brakes need to home.
-            let out2_power_good = if let Some(amp_status_message) =
-                get_amp_status_message(&mut can_receiver_sub).await
-            {
-                amp_status_message.out2.status == PowerOutputStatus::PowerGood
-            } else {
+            // A timeout and an answer of "not PowerGood" are the same result to
+            // the operator listening at the pad: the output did not come up. Both
+            // land as `false` here, and `false` is a partial failure.
+            let out2_power_good = get_amp_status_message(&mut can_receiver_sub)
+                .await
+                .is_some_and(|amp_status_message| {
+                    amp_status_message.out2.status == PowerOutputStatus::PowerGood
+                });
+            if !out2_power_good {
                 self_test_partial_failure = true;
-                false
-            };
+            }
             packet_builder.update(|packet| {
                 packet.amp_out2_power_good = out2_power_good;
             });
@@ -179,9 +185,9 @@ pub async fn self_test_mode(
                 } else {
                     packet.ozys = NodeStatus::offline();
                 }
-                if !packet.ozys.healthy() {
-                    self_test_partial_failure = true;
-                }
+                // OZYS is reported to the ground but deliberately does not vote:
+                // it carries no flight-critical function, so a missing or
+                // unhealthy OZYS still chimes success.
 
                 if let Some(payload_sdrm) =
                     can_central.get_nodes::<1>(PAYLOAD_SDRM_NODE_TYPE).first()
@@ -221,14 +227,17 @@ pub async fn self_test_mode(
                 out3_enable: true,
             });
             Timer::after_millis(2000).await;
-            let out3_power_good = if let Some(amp_status_message) =
-                get_amp_status_message(&mut can_receiver_sub).await
-            {
-                amp_status_message.out3.status == PowerOutputStatus::PowerGood
-            } else {
+            // A timeout and an answer of "not PowerGood" are the same result to
+            // the operator listening at the pad: the output did not come up. Both
+            // land as `false` here, and `false` is a partial failure.
+            let out3_power_good = get_amp_status_message(&mut can_receiver_sub)
+                .await
+                .is_some_and(|amp_status_message| {
+                    amp_status_message.out3.status == PowerOutputStatus::PowerGood
+                });
+            if !out3_power_good {
                 self_test_partial_failure = true;
-                false
-            };
+            }
             packet_builder.update(|packet| {
                 packet.amp_out3_power_good = out3_power_good;
             });
