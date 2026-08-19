@@ -128,9 +128,9 @@ const LORA_CONFIG: LoraConfig = LoraConfig {
 pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     ignition_detection_acc_threshold: 8.0 * 9.81,
     profile: FlightProfile {
-        mach_lockout_duration_us: Some(26_000_000),
+        mach_lockout_duration_us: Some(27_000_000),
         deployment: DeploymentProfile::Dual {
-            drogue_chute_minimum_altitude_agl: 2000.0,
+            drogue_chute_minimum_altitude_agl: 500.0,
             drogue_chute_delay_us: 1_000_000,
             main_chute_altitude_agl: 457.2,
             main_chute_delay_us: 1_000_000,
@@ -139,12 +139,12 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     airbrakes: AirbrakesConfig {
         max_open_mach: 0.83,
         mach_lockout: Some(MachLockoutConfig {
-            earliest_subsonic_after_ignition_us: 17_200_000,
-            force_birth_after_ignition_us: 25_000_000,
-            subsonic_crossing_altitude_asl: 6800.0,
+            earliest_subsonic_after_ignition_us: 12_900_000,
+            force_birth_after_ignition_us: 20_900_000,
+            subsonic_crossing_altitude_asl: 7042.0,
         }),
         rocket: RocketParameters {
-            burnout_mass: 18.696,
+            burnout_mass: 19.57,
             cd: [0.61365, 0.69816, 0.8084, 0.96641, 1.12441],
             reference_area: 0.009854945,
         },
