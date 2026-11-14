@@ -105,6 +105,13 @@ path = "src/main_gcm.rs"
 test = false
 bench = false
 
+# for the recovery parachute test rig
+[[bin]]
+name = "recovery_rig"
+path = "src/recovery_rig.rs"
+test = false
+bench = false
+
 # Testing Entry Points
 
 [[bin]]

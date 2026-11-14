@@ -180,6 +180,9 @@ pub const FLIGHT_CONFIG: FlightConfig = FlightConfig {
     },
 };
 
+// Usb identification name
+const USB_INDENTIFICATION: &str = "VLF5";
+
 pub type AvionicsModeWatch = Watch<CriticalSectionRawMutex, AvionicsMode, 10>;
 pub type GPSReadingWatch = Watch<CriticalSectionRawMutex, SensorReading<BootTimestamp, GPSData>, 4>;
 pub type VLStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<VLCustomStatus>>;

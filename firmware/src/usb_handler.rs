@@ -55,7 +55,7 @@ pub async fn setup_usb_handler(
 
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("MacRocketry");
-    config.product = Some("VLF5");
+    config.product = Some(crate::USB_INDENTIFICATION);
     config.serial_number = Some(device_id_hex());
 
     let handler = singleton!(: HandlerMutex =
