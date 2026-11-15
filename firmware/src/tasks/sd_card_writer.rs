@@ -586,6 +586,11 @@ async fn run_offline_loop(
     }
 }
 
+// outside the sd card write function so that the test rig can access
+bind_interrupts!(pub struct Irqs {
+    SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
+});
+
 #[embassy_executor::task]
 pub async fn sd_card_writer(
     sdmmc1: Peri<'static, SDMMC1>,
@@ -602,10 +607,6 @@ pub async fn sd_card_writer(
     vl_status: &'static VLStatusMutex,
     target_agl_watch: &'static SetTargetWatch,
 ) {
-    bind_interrupts!(struct Irqs {
-        SDMMC1 => sdmmc::InterruptHandler<peripherals::SDMMC1>;
-    });
-
     vl_status.lock(|s| s.borrow_mut().sd_ok = false);
 
     let mut sdmmc = Sdmmc::new_4bit(

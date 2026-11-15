@@ -42,8 +42,10 @@ use embassy_sync::{
     mutex::Mutex,
     pubsub::PubSubBehavior as _,
     watch::{self, Watch},
+    pubsub::WaitResult,
 };
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
+use embassy_futures::select::select;
 use firmware_common_new::{
     can_bus::{
         custom_status::vl_custom_status::VLCustomStatus,
@@ -51,13 +53,16 @@ use firmware_common_new::{
             baro_measurement::BaroMeasurementMessage,
             imu_measurement::IMUMeasurementMessage, mag_measurement::MagMeasurementMessage,
             vl_status::FlightStage,
+            CanBusMessageEnum, amp_control::AmpControlMessage,
         },
         sender::CanSender,
+        node_types::OZYS_NODE_TYPE,
     },
     gps::GPSData,
     sensor_reading::SensorReading,
     time::BootTimestamp,
     vlp::{client::VLPAvionics, packets::fire_pyro::PyroSelect},
+    flight_data_record::ImuRecord,
 };
 use firmware_common_new::vlp::lora_config::LoraConfig;
 
@@ -67,7 +72,7 @@ use crate::{
     can::{can_bus_broadcast_unix_time_task, init_can_bus, start_can_bus_low_prio_tasks},
     clock_config::vlf5_clock_config,
     modes::{
-        armed_mode::armed_mode, demo_mode::demo_mode, landed_mode::landed_mode,
+        demo_mode::demo_mode, landed_mode::landed_mode,
         low_power_mode::low_power_mode, self_test_mode::self_test_mode,
     },
     tasks::{
@@ -99,6 +104,8 @@ mod time;
 mod utils;
 mod usb_handler;
 mod watchdog;
+#[path = "tasks/test_rig_sd_card_writer.rs"]
+mod test_rig_sd_card_writer;
 
 static VLP_KEY: &[u8] = base64!("file:vlp.key");
 const LORA_CONFIG: LoraConfig = LoraConfig {
@@ -191,6 +198,25 @@ pub type FlightEstimatorsMutex = BlockingMutex<NoopRawMutex, RefCell<FlightEstim
 pub type ContinuityWatch = Watch<NoopRawMutex, ContinuityUpdate, 2>;
 pub type FireSignal = Channel<NoopRawMutex, PyroSelect, 2>;
 pub type SetTargetWatch = Watch<NoopRawMutex, f32, 1>;
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct OzysRecord {
+    pub received_at_us: u64,
+    pub node_id: u16,
+    pub voltage: [Option<f32>; 4],
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct TestRigDataRecord {
+    pub sequence: u32,
+    pub timestamp_us: u64,
+    pub unix_time_us: Option<u64>,
+    pub imu: Option<ImuRecord>,
+    pub ozys: Option<OzysRecord>,
+}
+
+type OzysWatch = Watch<NoopRawMutex, OzysRecord, 1>;
+type TestRigDataChannel = Channel<NoopRawMutex, TestRigDataRecord, 512>;
 
 #[entry]
 fn main() -> ! {
@@ -340,6 +366,9 @@ async fn low_prio_main(
     vl_status: &'static VLStatusMutex,
     unix_clock: &'static UnixClock,
 ) {
+    let ozys_watch = singleton!(: OzysWatch = OzysWatch::new()).unwrap();
+    let test_rig_records = singleton!(: TestRigDataChannel = TestRigDataChannel::new()).unwrap();
+
     let p = unsafe { Peripherals::steal() };
     let mut ps = Output::new(p.PA3, Level::Low, Speed::Low);
 
@@ -438,6 +467,13 @@ async fn low_prio_main(
     )
     .await;
 
+    spawner.spawn(
+    receive_ozys_task(
+        can_receiver.subscriber().unwrap(),
+        ozys_watch,
+    )
+    .unwrap());
+
     spawner.spawn(receive_vlp_task(
         vlp_avionics_client,
         avionics_mode_watch,
@@ -463,16 +499,11 @@ async fn low_prio_main(
     ).unwrap());
     spawner.spawn(amp_control_task(can_sender, amp_control_watch).unwrap());
 
-    let flight_data_channel = singleton!(
-        
-        : tasks::data_logger::FlightDataChannel = tasks::data_logger::FlightDataChannel::new()
-    )
-    .unwrap();
     // No logger task: flight-data logging runs as one of armed mode's joined
     // futures (`tasks::data_logger::log_flight_data`), so it exists exactly as
     // long as an armed session. The SD writer stays a task — it owns SDMMC1 —
     // and is fed over this channel.
-    spawner.spawn(tasks::sd_card_writer::sd_card_writer(
+    spawner.spawn(test_rig_sd_card_writer::sd_card_writer(
         p.SDMMC1,
         p.PC12,
         p.PD2,
@@ -480,7 +511,7 @@ async fn low_prio_main(
         p.PC9,
         p.PC10,
         p.PC11,
-        flight_data_channel,
+        test_rig_records,
         storage_cmd,
         storage_resp,
         vl_status,
@@ -528,29 +559,32 @@ async fn low_prio_main(
         match avionics_mode_watch.try_get().unwrap() {
             AvionicsMode::Armed => {
                 ps.set_low();
-                armed_mode(
-                    vlp_avionics_client,
-                    avionics_mode_watch,
-                    can_sender,
-                    can_central,
-                    gps_reading_watch,
-                    battery_v_watch,
-                    imu_baro_reading_pubsub,
-                    continuity_watch,
-                    fire_signal,
-                    target_agl_signal,
-                    can_receiver.subscriber().unwrap(),
-                    flight_stage,
-                    amp_control_watch,
-                    air_brakes_watch,
-                    unix_clock,
-                    mag_reading_pubsub,
-                    amp_state_watch,
-                    payload_state_watch,
-                    vl_status,
-                    flight_data_channel,
-                )
-                .await;
+
+                flight_stage.lock(|stage| {
+                    *stage.borrow_mut() = FlightStage::Armed;
+                });
+
+                amp_control_watch.sender().send(AmpControlMessage {
+                    out1_enable: false,
+                    out2_enable: true,
+                    out3_enable: true,
+                });
+
+                ozys_watch.sender().clear();
+
+                let mut mode_receiver = avionics_mode_watch.receiver().unwrap();
+
+                select(
+                    log_test_rig_data(
+                        imu_baro_reading_pubsub,
+                        ozys_watch,
+                        test_rig_records,
+                        unix_clock,
+                    ),
+                    mode_receiver.changed_and(|mode| {
+                        *mode != AvionicsMode::Armed
+                    })
+                ).await;
             }
             AvionicsMode::SelfTest => {
                 ps.set_high();
@@ -727,5 +761,84 @@ async fn broadcast_mag_measurement_task(
             )
             .into(),
         );
+    }
+}
+
+#[embassy_executor::task]
+async fn receive_ozys_task(
+    mut subscriber: can::CanReceiverSub,
+    ozys_watch: &'static OzysWatch,
+) {
+    loop {
+        let reading = subscriber.next_message_pure().await;
+        let source = reading.data.id;
+
+        if source.node_type != OZYS_NODE_TYPE {
+            continue;
+        }
+
+        if let CanBusMessageEnum::OzysMeasurement(message) =
+            reading.data.message
+        {
+            ozys_watch.sender().send(OzysRecord {
+                received_at_us: reading.timestamp_us,
+                node_id: source.node_id,
+                voltage: [
+                    message.sg_1(),
+                    message.sg_2(),
+                    message.sg_3(),
+                    message.sg_4(),
+                ],
+            });
+        }
+    }
+}
+
+async fn log_test_rig_data(
+    imu_baro: &'static IMUBaroReadingPubSub,
+    ozys_watch: &'static OzysWatch,
+    records: &'static TestRigDataChannel,
+    unix_clock: &'static UnixClock,
+) {
+    let mut subscriber = imu_baro.subscriber().unwrap();
+    let mut sequence = 0u32;
+
+    loop {
+        match subscriber.next_message().await {
+            WaitResult::Message(reading) => {
+                let (imu, _baro) = reading.data;
+
+                let record = TestRigDataRecord {
+                    sequence,
+                    timestamp_us: reading.timestamp_us,
+                    unix_time_us: unix_clock
+                        .convert_to_unix_us(reading.timestamp_us),
+                    imu: imu.map(|imu| ImuRecord {
+                        acc: [
+                            imu.acc.x,
+                            imu.acc.y,
+                            imu.acc.z,
+                        ],
+                        gyro: [
+                            imu.gyro.x,
+                            imu.gyro.y,
+                            imu.gyro.z,
+                        ],
+                    }),
+                    ozys: ozys_watch.try_get(),
+                };
+
+                sequence = sequence.wrapping_add(1);
+
+                if records.try_send(record).is_err() {
+                    // que is full, maybe add smth here?
+                }
+            }
+
+            WaitResult::Lagged(missed) => {
+                sequence =
+                    sequence.wrapping_add(missed as u32);
+            }
+        }
     }
 }
