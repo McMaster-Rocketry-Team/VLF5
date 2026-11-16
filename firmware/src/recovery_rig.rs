@@ -46,6 +46,7 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use embassy_futures::select::select;
+use embassy_futures::join::join;
 use firmware_common_new::{
     can_bus::{
         custom_status::vl_custom_status::VLCustomStatus,
@@ -89,6 +90,7 @@ use crate::tasks::{
     vlp_avionics_daemon_task::vlp_avionics_daemon_task,
 };
 use receive_vlp_task::{fire_pyro_countdown_task, receive_vlp_task};
+use firmware_common_new::vlp::packets::telemetry::TelemetryPacketBuilder;
 
 mod avionics_mode;
 mod can;
@@ -575,11 +577,17 @@ async fn low_prio_main(
                 let mut mode_receiver = avionics_mode_watch.receiver().unwrap();
 
                 select(
-                    log_test_rig_data(
-                        imu_baro_reading_pubsub,
-                        ozys_watch,
-                        test_rig_records,
-                        unix_clock,
+                    join(
+                log_test_rig_data(
+                            imu_baro_reading_pubsub,
+                            ozys_watch,
+                            test_rig_records,
+                            unix_clock,
+                        ),
+                send_test_rig_telemetry(
+                            vlp_avionics_client,
+                            battery_v_watch,
+                        ),
                     ),
                     mode_receiver.changed_and(|mode| {
                         *mode != AvionicsMode::Armed
@@ -840,5 +848,28 @@ async fn log_test_rig_data(
                     sequence.wrapping_add(missed as u32);
             }
         }
+    }
+}
+
+async fn send_test_rig_telemetry(
+    client: &'static VLPAvionics<NoopRawMutex>,
+    battery: &'static BatteryVWatch,
+) {
+    let builder = TelemetryPacketBuilder::<NoopRawMutex>::new();
+
+    let mut ticker = Ticker::every(Duration::from_secs(2));
+
+    loop {
+        builder.update(|packet| {
+            packet.flight_stage = FlightStage::Armed;
+
+            if let Some(reading) = battery.try_get() {
+                packet.vl_battery_v = reading.data;
+            }
+        });
+
+        client.send(builder.create_packet().into());
+
+        ticker.next().await;
     }
 }
